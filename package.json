@@ -1,0 +1,100 @@
+{
+  "name": "full-stack-auditor",
+  "version": "0.1.0",
+  "description": "White-hat full-stack security audit agent built on pi-mono primitives.",
+  "type": "module",
+  "license": "MIT",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    },
+    "./pi/extension": {
+      "types": "./dist/pi/extension.d.ts",
+      "import": "./dist/pi/extension.js"
+    },
+    "./package.json": "./package.json"
+  },
+  "bin": {
+    "full-stack-auditor": "./dist/cli.js",
+    "fsa": "./dist/cli.js"
+  },
+  "engines": {
+    "node": ">=22"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "check": "tsc -p tsconfig.json --noEmit",
+    "test": "npm run build && node --test tests/*.test.mjs",
+    "check:public": "node scripts/check-public-surface.mjs",
+    "verify": "npm run check && npm test && npm run dry-run && npm run mock-run && npm run check:public",
+    "prepack": "npm run build",
+    "start": "node ./dist/cli.js",
+    "dry-run": "node ./dist/cli.js run --target dry-run --source ./fixtures --dry-run",
+    "mock-run": "node ./dist/cli.js run --target mock-run --source ./fixtures --mock-llm --trials 2"
+  },
+  "keywords": [
+    "pi-package",
+    "security-audit",
+    "whitehat",
+    "agent",
+    "zk",
+    "crypto"
+  ],
+  "files": [
+    "dist/agents/**",
+    "dist/audit/**",
+    "dist/index/**",
+    "dist/ingest/**",
+    "dist/llm/**",
+    "dist/pi/**",
+    "dist/reports/**",
+    "dist/security/**",
+    "dist/seeders/**",
+    "dist/trace/**",
+    "dist/util/**",
+    "dist/verify/**",
+    "dist/cli.*",
+    "dist/config.*",
+    "dist/enumerate.*",
+    "dist/index.*",
+    "dist/pipeline.*",
+    "dist/types.*",
+    "src/**",
+    "skills/**",
+    "prompts/**",
+    "docs/**",
+    "fixtures/**",
+    "scripts/**",
+    "README.md",
+    "AGENTS.md",
+    "CONTRIBUTING.md",
+    "SECURITY.md",
+    "LICENSE"
+  ],
+  "pi": {
+    "extensions": [
+      "./src/pi/extension.ts"
+    ],
+    "skills": [
+      "./skills"
+    ],
+    "prompts": [
+      "./prompts"
+    ]
+  },
+  "peerDependencies": {
+    "@earendil-works/pi-ai": "*",
+    "@earendil-works/pi-coding-agent": "*",
+    "typebox": "*"
+  },
+  "devDependencies": {
+    "@earendil-works/pi-ai": "0.78.1",
+    "@earendil-works/pi-coding-agent": "0.78.1",
+    "@types/node": "^24.0.0",
+    "typebox": "1.2.0",
+    "typescript": "^5.9.0"
+  }
+}
