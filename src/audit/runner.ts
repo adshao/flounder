@@ -1,6 +1,7 @@
 import os from "node:os";
 import type { AuditorConfig } from "../config.js";
 import { AUDIT_SYSTEM, buildAuditPrompt } from "../agents/prompts.js";
+import { createAgentRegistry } from "../agents/registry.js";
 import { SourceIndex } from "../index/source-index.js";
 import type { AuditItem, AuditResult, Doc, LlmClient, TrialFinding } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
@@ -26,11 +27,13 @@ export async function runAudit(input: {
   }
 
   const index = new SourceIndex(input.source);
+  const agentRegistry = createAgentRegistry(input.cfg.auditorAgents);
   const results = await mapLimit(input.items, input.cfg.maxWorkers, async (item) =>
     auditItem({
       cfg: input.cfg,
       item,
       index,
+      agentRegistry,
       llm: input.llm!,
       logger: input.logger,
     }),
@@ -43,11 +46,12 @@ async function auditItem(input: {
   cfg: AuditorConfig;
   item: AuditItem;
   index: SourceIndex;
+  agentRegistry: ReturnType<typeof createAgentRegistry>;
   llm: LlmClient;
   logger: RunLogger;
 }): Promise<AuditResult> {
   const sourceContext = input.index.contextForItem(input.item, input.cfg.contextCharBudget);
-  const user = buildAuditPrompt(input.item, sourceContext);
+  const user = buildAuditPrompt(input.item, sourceContext, input.agentRegistry);
   const trials = await mapLimit(
     Array.from({ length: input.cfg.trials }, (_, idx) => idx),
     Math.min(input.cfg.trials, Math.max(1, Math.floor(os.cpus().length / 2))),

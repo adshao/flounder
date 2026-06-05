@@ -1,4 +1,5 @@
 import type { AuditorConfig } from "./config.js";
+import { effectiveFailureModes } from "./config.js";
 import { buildEnumerationPrompt, ENUM_SYSTEM } from "./agents/prompts.js";
 import { assemble } from "./ingest/source.js";
 import { runSeeders } from "./seeders/index.js";
@@ -39,7 +40,7 @@ export async function enumerateAuditItems(input: {
   const sourceText = assemble(input.source, Math.floor(input.cfg.contextCharBudget / 2), true);
   const user = buildEnumerationPrompt({
     target: input.cfg.targetName,
-    failureModes: input.cfg.failureModes,
+    failureModes: effectiveFailureModes(input.cfg),
     corpus: corpusText,
     source: sourceText,
   });

@@ -77,6 +77,14 @@ npm run check:public
 
 This scans the public source surface for local absolute paths and high-confidence secret patterns. It is also part of `npm run verify`.
 
+## Blind Discovery Check
+
+```bash
+npm run check:blind-discovery
+```
+
+This runs a dry-run audit against a neutral halo2 scalar-multiplication fixture and asserts that the framework autonomously enumerates a generic missing-constraint checklist item without target-specific hints.
+
 ## Pi Package Usage
 
 Try the package locally from this directory:
@@ -114,6 +122,24 @@ console.log(result.runDir);
 ```
 
 Use `full-stack-auditor/pi/extension` for the pi package extension entrypoint.
+
+## Extending Audit Agents
+
+Custom audit agents can be added through `AuditorConfig.auditorAgents`. Their `failureMode` values are automatically merged into the enumeration prompt and used by the audit runner when matching checklist items:
+
+```ts
+const cfg = defaultConfig();
+cfg.auditorAgents = [
+  {
+    failureMode: "custom_constraint_system",
+    id: "custom-constraint-system-auditor",
+    displayName: "Custom Constraint System Auditor",
+    guidance: "Trace assigned witnesses to enforced equations in the target DSL.",
+  },
+];
+```
+
+The built-in agents remain the default registry, so custom agents can be added incrementally.
 
 ## White-Hat Rules
 

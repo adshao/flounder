@@ -1,4 +1,4 @@
-import type { FailureMode } from "./types.js";
+import type { AuditorAgentDefinition, FailureMode } from "./types.js";
 
 export const DEFAULT_FAILURE_MODES: FailureMode[] = [
   "missing_constraint",
@@ -29,6 +29,7 @@ export interface AuditorConfig {
   thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh";
   contextCharBudget: number;
   failureModes: FailureMode[];
+  auditorAgents: AuditorAgentDefinition[];
   dryRun: boolean;
 }
 
@@ -48,6 +49,11 @@ export function defaultConfig(): AuditorConfig {
     thinkingLevel: "xhigh",
     contextCharBudget: 120_000,
     failureModes: DEFAULT_FAILURE_MODES,
+    auditorAgents: [],
     dryRun: false,
   };
+}
+
+export function effectiveFailureModes(cfg: Pick<AuditorConfig, "failureModes" | "auditorAgents">): FailureMode[] {
+  return [...new Set([...cfg.failureModes, ...cfg.auditorAgents.map((agent) => agent.failureMode)])];
 }

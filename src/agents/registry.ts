@@ -1,13 +1,8 @@
-import type { FailureMode } from "../types.js";
+import type { AuditorAgentDefinition, BuiltInFailureMode, FailureMode } from "../types.js";
 
-export interface AuditorAgentDefinition {
-  failureMode: FailureMode;
-  id: string;
-  displayName: string;
-  guidance: string;
-}
+export type AuditorAgentRegistry = Record<string, AuditorAgentDefinition>;
 
-export const AUDITOR_AGENTS: Record<FailureMode, AuditorAgentDefinition> = {
+export const BUILTIN_AUDITOR_AGENTS: Record<BuiltInFailureMode, AuditorAgentDefinition> = {
   missing_constraint: {
     failureMode: "missing_constraint",
     id: "missing-constraint-auditor",
@@ -82,6 +77,22 @@ export const AUDITOR_AGENTS: Record<FailureMode, AuditorAgentDefinition> = {
   },
 };
 
-export function getAuditorAgent(failureMode: FailureMode): AuditorAgentDefinition {
-  return AUDITOR_AGENTS[failureMode];
+export const AUDITOR_AGENTS: AuditorAgentRegistry = BUILTIN_AUDITOR_AGENTS;
+
+export function createAgentRegistry(extraAgents: AuditorAgentDefinition[] = []): AuditorAgentRegistry {
+  const registry: AuditorAgentRegistry = { ...BUILTIN_AUDITOR_AGENTS };
+  for (const agent of extraAgents) {
+    registry[agent.failureMode] = agent;
+  }
+  return registry;
+}
+
+export function getAuditorAgent(failureMode: FailureMode, registry: AuditorAgentRegistry = AUDITOR_AGENTS): AuditorAgentDefinition {
+  return registry[failureMode] ?? {
+    failureMode,
+    id: `${failureMode.replace(/[^a-zA-Z0-9_.-]+/g, "-")}-auditor`,
+    displayName: `${failureMode} Auditor`,
+    guidance:
+      "Analyze the assigned security property directly from source and reference material. State exactly what enforces the property or what attacker-controlled value can violate it.",
+  };
 }

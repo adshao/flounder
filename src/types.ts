@@ -1,6 +1,6 @@
 export type Severity = "info" | "low" | "medium" | "high" | "critical";
 
-export type FailureMode =
+export type BuiltInFailureMode =
   | "missing_constraint"
   | "supply_balance_integrity"
   | "double_spend_nullifier"
@@ -12,6 +12,15 @@ export type FailureMode =
   | "signature_replay"
   | "consensus_divergence"
   | "dos_resource";
+
+export type FailureMode = BuiltInFailureMode | (string & {});
+
+export interface AuditorAgentDefinition {
+  failureMode: FailureMode;
+  id: string;
+  displayName: string;
+  guidance: string;
+}
 
 export interface Doc {
   path: string;

@@ -40,7 +40,7 @@ test("pi extension registers audit tool and runs dry-run", async () => {
     undefined,
     {},
   );
-  assert.match(result.content[0].text, /Findings: 0\/2/);
+  assert.match(result.content[0].text, /Findings: 0\/5/);
 });
 
 test("pi extension blocks live-network exploit-like bash commands", async () => {

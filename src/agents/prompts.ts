@@ -1,5 +1,5 @@
 import type { AuditItem, FailureMode } from "../types.js";
-import { AUDITOR_AGENTS, getAuditorAgent } from "./registry.js";
+import { AUDITOR_AGENTS, getAuditorAgent, type AuditorAgentRegistry } from "./registry.js";
 
 export const MODE_GUIDANCE: Record<FailureMode, string> = Object.fromEntries(
   Object.entries(AUDITOR_AGENTS).map(([mode, agent]) => [mode, agent.guidance]),
@@ -44,8 +44,8 @@ export const AUDIT_SYSTEM = `You are a specialized auditor inside an authorized 
 Analyze only the assigned item. Real audited code can contain critical bugs, but do not invent findings.
 Reason from actual constraints, checks, and data flow. If the invariant is enforced, say so plainly.`;
 
-export function buildAuditPrompt(item: AuditItem, source: string): string {
-  const agent = getAuditorAgent(item.failureMode);
+export function buildAuditPrompt(item: AuditItem, source: string, registry?: AuditorAgentRegistry): string {
+  const agent = getAuditorAgent(item.failureMode, registry);
   return `Audit item:
   id: ${item.id}
   location: ${item.location}

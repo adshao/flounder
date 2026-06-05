@@ -36,6 +36,14 @@ source + corpus
 
 Audit roles are declared in `src/agents/registry.ts`. Adding a new role should be a registry change plus tests and, when useful, a static seeder.
 
+The registry is extensible at runtime. `AuditorConfig.auditorAgents` accepts additional agent definitions, and their failure modes are merged into the enumeration prompt through `effectiveFailureModes`. The audit runner builds an agent registry for each run, so custom checklist items can route to custom guidance without changing built-in agents.
+
+## Blind Discovery Gate
+
+`npm run check:blind-discovery` runs the framework against a neutral halo2 scalar-multiplication fixture. The fixture does not name a target protocol, impact, or expected bug. The gate passes only if static discovery produces a generic missing-constraint checklist item from source structure alone.
+
+This is not a substitute for a full target audit. It is a regression gate that prevents the framework from depending on answer-shaped fixture text or prompt hints for this class of issue.
+
 ## Pi Integration
 
 The project is a pi package. `package.json` exposes:
@@ -56,6 +64,7 @@ The command guardrail lives in `src/security/policy.ts` so non-pi integrations c
 - `npm test`: build plus Node tests for JSON parsing, seeders, dry-run pipeline, mock end-to-end pipeline, and pi extension registration.
 - `npm run dry-run`: static seeder run against fixtures.
 - `npm run mock-run`: full model-shaped pipeline using deterministic mock LLM.
+- `npm run check:blind-discovery`: blind fixture regression for autonomous missing-constraint enumeration.
 
 ## Local-Only Verification
 
