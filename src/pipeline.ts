@@ -12,8 +12,10 @@ import { discoverLensPacks } from "./lens/discover.js";
 import { createLlmClient } from "./llm/client.js";
 import { extractProofObligations } from "./obligations/extract.js";
 import { profileProject } from "./profile/project.js";
+import { extractCairoStarknetProvenance } from "./provenance/cairo.js";
+import { extractGoWormholeProvenance } from "./provenance/go.js";
 import { extractHalo2Provenance } from "./provenance/halo2.js";
-import { extractRustSolanaProvenance } from "./provenance/rust.js";
+import { extractRustSolanaProvenance, extractRustZkProvenance } from "./provenance/rust.js";
 import { extractSolidityProvenance } from "./provenance/solidity.js";
 import { renderDisclosure, reportArtifactName } from "./reports/disclosure.js";
 import { summarizeChecklist, summarizeRun, summarizeSourceIndex } from "./reports/coverage.js";
@@ -294,9 +296,14 @@ function basename(input: string): string {
 }
 
 function extractProvenanceGraphs(source: Parameters<typeof extractHalo2Provenance>[0]): ProvenanceGraph[] {
-  return [extractHalo2Provenance(source), extractSolidityProvenance(source), extractRustSolanaProvenance(source)].filter(
-    (graph) => graph.summary.facts > 0 || graph.summary.assignmentFlowObligations > 0,
-  );
+  return [
+    extractHalo2Provenance(source),
+    extractSolidityProvenance(source),
+    extractRustSolanaProvenance(source),
+    extractRustZkProvenance(source),
+    extractCairoStarknetProvenance(source),
+    extractGoWormholeProvenance(source),
+  ].filter((graph) => graph.summary.facts > 0 || graph.summary.assignmentFlowObligations > 0);
 }
 
 function countBy<T, K extends string>(items: T[], keyFn: (item: T) => K): Record<K, number> {

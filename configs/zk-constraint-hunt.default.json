@@ -36,31 +36,42 @@
     "summary": "Default authorized profile for zero-knowledge and constraint-system audits. Add the target protocol's source, specs, books, papers, design docs, tests, and answer-free historical audit notes as corpus material.",
     "criticalAssets": [
       "proof soundness",
+      "proof statement binding",
       "constraint coverage",
       "private witness integrity",
       "public input binding",
+      "prover coordinator metadata integrity",
+      "recursive aggregation integrity",
       "range, booleanity, and lookup correctness",
       "value and nullifier uniqueness when present"
     ],
     "attackerCapabilities": [
       "A malicious prover can choose private witness values and try to satisfy the circuit with semantically inconsistent values.",
-      "A malicious prover can search for selector, rotation, lookup, copy, equality, range, or arithmetic gaps that let a false statement verify."
+      "A malicious prover can search for selector, rotation, lookup, copy, equality, range, or arithmetic gaps that let a false statement verify.",
+      "A malicious or faulty prover, coordinator, interpreter, witness source, or recovery-mode participant can try to bind a valid proof to the wrong task, block, metadata, verification key, or public input statement."
     ],
     "trustBoundaries": [
       "witness assignment to circuit constraints",
+      "requested proof task identity to returned witness material",
       "caller-provided gadget input to internal advice cells",
       "reference equation to implemented gate polynomial",
       "lookup table or range-check helper to dependent gadget logic",
-      "public input or instance column to private witness relation"
+      "public input or instance column to private witness relation",
+      "chunk, batch, bundle, or recursive aggregation metadata to submitted proof bytes",
+      "coordinator task assignment and stored metadata to verifier submission"
     ],
     "securityInvariants": [
       "Every witness value that affects a verified statement should be connected to the checks that rely on it.",
+      "Every proof statement should preserve the same requested task identity across witness checkout, serialization, proving, aggregation, coordinator storage, and verification.",
       "Selectors and rotations should activate the intended constraints on every row where the security property is relied on.",
       "Range, booleanity, lookup, copy, and equality relations should bind the same semantic value consumed by downstream checks.",
       "Spec equations, exceptional-case assumptions, and protocol invariants should match the implemented gates and gadget composition."
     ],
     "focusAreas": [
       "witness ingress and gadget handoff",
+      "proof task, witness source, metadata, and public-input binding",
+      "recursive aggregation proof and metadata binding",
+      "coordinator submit-proof and verifier boundaries",
       "copy, equality, lookup, and instance-column relations",
       "selector and rotation coverage",
       "range and boolean constraints",
@@ -96,6 +107,28 @@
       "auditGuidance": [
         "Assignment code is the honest path, not proof of enforcement.",
         "A positive finding needs a specific missing relation between the upstream semantic value and the checked internal value."
+      ]
+    },
+    {
+      "id": "zk-proof-orchestration-binding",
+      "displayName": "ZK Proof Orchestration Binding",
+      "description": "Audit zkVM/prover coordinator flows that transform requested tasks into witnesses, public inputs, proof metadata, recursive aggregation tasks, and verifier submissions.",
+      "failureModes": [
+        "proof_statement_binding",
+        "proof_aggregation_binding",
+        "proof_verifier_submission_binding",
+        "soundness_gap",
+        "consensus_divergence"
+      ],
+      "enumerationGuidance": [
+        "Create items that connect each requested task identity, block hash, batch hash, fork/version, or coordinator assignment to the returned witness and the derived public-input metadata.",
+        "Create separate items for chunk-to-batch, batch-to-bundle, and bundle-to-final-verifier aggregation boundaries when the source exposes them.",
+        "Prioritize submit-proof and verifier paths where proof bytes are wrapped with stored metadata or later used to update task, batch, or finalization state."
+      ],
+      "auditGuidance": [
+        "A proof that verifies locally is not enough; check whether it proves the statement the coordinator requested.",
+        "Trace the same statement identity through witness fetch, serialized witness, metadata/public-input hash, proof wrapper, aggregation, verification key, and coordinator state update.",
+        "Explicitly separate normal coordinator paths from recovery, permissionless, or enforced-batch paths when attacker control differs."
       ]
     },
     {

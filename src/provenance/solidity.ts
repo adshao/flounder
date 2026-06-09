@@ -2,24 +2,51 @@ import type { Doc, ProofObligation, ProvenanceFact, ProvenanceFactKind, Provenan
 
 const SIGNAL_TERMS = [
   "asset",
+  "agreement",
+  "async",
   "balance",
+  "beacon",
   "bridge",
   "bus",
+  "burn rate",
+  "cluster",
   "credit",
+  "delegate",
   "delegatecall",
   "erc20",
   "endpoint",
   "erc4626",
+  "executor",
   "fee",
   "flash",
   "governance",
+  "guardian",
+  "guardian set",
+  "effective balance",
+  "emitter",
+  "proposal",
+  "quorum",
+  "allowlist",
+  "auth function",
+  "fallback",
   "guid",
   "hydra",
+  "hyperlane",
   "initializer",
+  "interchain",
+  "ism",
   "layerzero",
   "liquidation",
   "lzreceive",
   "lzsend",
+  "mailbox",
+  "metadata",
+  "max claim",
+  "name",
+  "name wrapper",
+  "namehash",
+  "merkle",
+  "accountant",
   "cooldown",
   "collateral",
   "custodian",
@@ -33,13 +60,29 @@ const SIGNAL_TERMS = [
   "order",
   "oracle",
   "oft",
+  "operator",
+  "payer",
+  "payment",
+  "permit2",
   "permit",
   "proxy",
   "redeem",
+  "registrar",
+  "registry",
   "receiver",
+  "receiverdestination",
   "restricted",
   "refund",
+  "request",
+  "recurring",
+  "resolver",
+  "remote router",
+  "root",
   "shares",
+  "solver",
+  "settler",
+  "selector",
+  "slippage",
   "spell",
   "staker",
   "stable",
@@ -47,13 +90,25 @@ const SIGNAL_TERMS = [
   "starguard",
   "storage",
   "subproxy",
+  "subname",
   "supply",
   "timelock",
   "ticket",
   "transfer",
+  "transient",
+  "msg.data",
+  "msg.sig",
+  "unit",
   "upgrade",
+  "vaa",
+  "wrapped name",
+  "validator",
+  "vunit",
   "vault",
+  "vote",
+  "voting",
   "whitelist",
+  "witness",
   "withdraw",
 ];
 
@@ -132,11 +187,39 @@ function factsFromLine(
     out.push(fact({ ...common, kind: "evm_external_call", sourceExpression: code }));
   }
 
+  if (looksLikeSelectorForwardingLine(code, nearbySignals)) {
+    out.push(fact({ ...common, kind: "evm_selector_forwarding", sourceExpression: code }));
+  }
+
+  if (looksLikeRecurringAgreementLine(code, nearbySignals)) {
+    out.push(fact({ ...common, kind: "evm_recurring_agreement", sourceExpression: code }));
+  }
+
+  if (looksLikePaymentDistributionLine(code, nearbySignals)) {
+    out.push(fact({ ...common, kind: "evm_payment_distribution", sourceExpression: code }));
+  }
+
   if (/\b(safeTransferFrom|transferFrom|safeTransfer|transfer|_mint|_burn|mint|burn)\s*\(/.test(code)) {
     out.push(fact({ ...common, kind: "evm_token_transfer", sourceExpression: code }));
   }
 
-  if (/\b(?:_lzSend|lzReceive|_lzReceive|sendCompose|isComposeMsgSender|Origin|OApp|endpoint|peers?|setPeer|quoteTaxi|taxi|rideBus|driveBus|encodeTaxi|decodeTaxi|encodeBus|decodeBus|encode\(|decode\()\b/.test(code)) {
+  if (/\b(?:_lzSend|lzReceive|_lzReceive|sendCompose|isComposeMsgSender|Origin|OApp|endpoint|peers?|setPeer|quoteTaxi|taxi|rideBus|driveBus|encodeTaxi|decodeTaxi|encodeBus|decodeBus|encode\(|decode\(|publishMessage|parseAndVerifyVM|completeTransfer|completeTransferWithPayload|TransferRedeemed)\b/.test(code)) {
+    out.push(fact({ ...common, kind: "evm_bridge_message", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:Wormhole|IWormhole|VAA|vaa|VM|encodedVM|encodedVm|parseAndVerifyVM|parseVM|verifyVM|verifyVMInternal|verifySignatures|guardianSet|guardianSets|guardianSetIndex|getCurrentGuardianSetIndex|governanceActionIsConsumed|governanceActionsConsumed|consumeGovernanceAction|publishMessage|LogMessagePublished|emitterChainId|emitterAddress|sequence|consistencyLevel|quorum|bridgeContracts|TransferRedeemed)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_wormhole_vaa", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:Mailbox|IMailbox|mailbox|dispatch|process|IMessageRecipient|handle|IInterchainSecurityModule|InterchainSecurityModule|ISM|interchainSecurityModule|moduleType|metadata|messageId|latestDispatchedId|delivered|recipientIsm|defaultIsm|postDispatch|quoteDispatch|InterchainGasPaymaster|IGP)\b/.test(
+      code,
+    )
+  ) {
     out.push(fact({ ...common, kind: "evm_bridge_message", sourceExpression: code }));
   }
 
@@ -144,7 +227,23 @@ function factsFromLine(
     out.push(fact({ ...common, kind: "evm_bridge_asset_mapping", sourceExpression: code }));
   }
 
-  if (/\b(?:paths|credit|credits|sendCredits|receiveCredits|increaseCredit|decreaseCredit|tryDecreaseCredit|burnCredit|UNLIMITED_CREDIT|PathLib|deficit|poolBalance|tvlSD|treasuryFee|applyFee|amountSD|minAmountLD)\b/.test(code)) {
+  if (
+    /\b(?:remoteRouter|remoteRouters|enrolledRouters|enrollRemoteRouter|unenrollRemoteRouter|localDomain|destinationDomain|originDomain|HypERC20|HypERC721|TokenRouter|Router|WarpRoute|warp route)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_bridge_asset_mapping", sourceExpression: code }));
+  }
+
+  if (/\b(?:paths|credit|credits|sendCredits|receiveCredits|increaseCredit|decreaseCredit|tryDecreaseCredit|burnCredit|UNLIMITED_CREDIT|PathLib|deficit|poolBalance|tvlSD|treasuryFee|applyFee|SendParam|OFTReceipt|quoteOFT|quoteSend|amountLD|amountSD|amountSentLD|amountReceivedLD|minAmountLD|minAmountOut)\b/.test(code)) {
+    out.push(fact({ ...common, kind: "evm_bridge_credit_accounting", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:payForGas|quoteGasPayment|gasPayment|interchainGasPaymaster|requiredHook|defaultHook|hook|hooks|postDispatch|quoteDispatch|warpRoute|collateralToken|syntheticToken|xERC20|TokenMessage|formatTokenMessage|parseTokenMessage|validatorsAndThreshold|validatorThreshold|checkpoint|merkleRoot|signedCheckpoint|threshold|validators)\b/.test(
+      code,
+    )
+  ) {
     out.push(fact({ ...common, kind: "evm_bridge_credit_accounting", sourceExpression: code }));
   }
 
@@ -160,6 +259,63 @@ function factsFromLine(
     out.push(fact({ ...common, kind: "evm_signature_check", sourceExpression: code }));
   }
 
+  if (
+    /\b(?:Permit2|ISignatureTransfer|SignatureTransfer|PermitTransferFrom|permitWitnessTransferFrom|permitTransferFrom|_transferFrom|_permitToTransferDetails|_permitToSellAmount|witness|WITNESS|FULL_PERMIT2_WITNESS_TYPEHASH|_witnessTypeSuffix|_hashArrayOfBytes|_hashActionsAndSlippage|_hashSlippage|metaTx)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_permit2_witness_binding", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:ISettlerActions|_dispatchVIP|_dispatch\(|decodeCall|actions\.decodeCall|revertActionInvalid|executeMetaTxn|_executeMetaTxn|execute\(|uint32\(ISettlerActions|action\s*==|actions\.length|VIP|METATXN_|TRANSFER_FROM|RFQ_VIP|UNISWAPV3_VIP|BASIC)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_settler_action_dispatch", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:AllowedSlippage|SLIPPAGE_TYPEHASH|SLIPPAGE_AND_ACTIONS_TYPEHASH|_hashActionsAndSlippage|_hashSlippage|_checkSlippageAndTransfer|_mandatorySlippageCheck|TooMuchSlippage|amountOutMin|minAmountOut|minBuyAmount|slippage|transferExactLimit|POSITIVE_SLIPPAGE|rebateClaimer)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_settler_slippage_binding", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:CalldataDecoder|decodeCall|calldataload|calldatacopy|args\.offset|args\.length|actions\.offset|data\.offset|negative offsets?|calldata alias|alias other parts|run off the end|implicitly padded)\b/i.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_settler_calldata_decoder", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:TransientStorage|_PAYER_SLOT|_OPERATOR_SLOT|_WITNESS_SLOT|setPayer|clearPayer|payer|_operator\(|_msgSender\(|_isForwarded\(|tstore|tload|metaTx|takerSubmitted|MultiCallContext|callback selector|callback function pointer)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_settler_transient_context", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:_isRestrictedTarget|isRestrictedTarget|revertConfusedDeputy|ConfusedDeputy|InvalidTarget|restricted target|FULL_RESTRICTED|SOFT_RESTRICTED|_msgSender\(\)|BASIC|basicSellToPool|pool\.code\.length|onlyProxy|noDelegateCall)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_settler_restricted_target", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:selfbalance\(\)|address\(this\)\.balance|fastBalanceOf\(address\(this\)\)|BRIDGE_NATIVE_TO_RELAY|BRIDGE_ERC20_TO_RELAY|bridgeNativeToRelay|bridgeERC20ToRelay|BRIDGE_TO_NUCLEUS_TELLER|bridgeToNucleusTeller|BRIDGE_TO_CCIP|bridgeToCCIP|BRIDGE_TO_LAYER_ZERO_OFT|bridgeLayerZeroOFT)\b/i.test(
+      code,
+    )
+    && /\b(?:bridge|settler|relay|refund|native|fee|balance|selfbalance|full)\b/i.test(`${code} ${nearbySignals.join(" ")}`)
+  ) {
+    out.push(fact({ ...common, kind: "evm_settler_full_balance_bridge_sink", sourceExpression: code }));
+  }
+
   if (/\b(?:IERC1271|isValidSignature|EIP1271|EIP1271_MAGICVALUE|SignatureType\.EIP1271|InvalidEIP1271Signature)\b/.test(code)) {
     out.push(fact({ ...common, kind: "evm_eip1271_signature", sourceExpression: code }));
   }
@@ -170,6 +326,14 @@ function factsFromLine(
     )
   ) {
     out.push(fact({ ...common, kind: "evm_mint_redeem_order", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:requestDeposit|requestRedeem|solveRequestsVault|solveRequestsDirect|solveRequests|refundRequest|refundDeposit|asyncDepositHashes|asyncRedeemHashes|syncDepositHashes|RequestType|TokenDetails|PriceType|solver|solverTip|deadline|maxPriceAge|depositCap|userUnitsRefundableUntil|areUserUnitsLocked|Provisioner|provisioner|unitPrice|unitsAmount|tokensAmount|convertTokenToUnits|convertUnitsToToken|_getRequestHash|_getDepositHash)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_async_request_settlement", sourceExpression: code }));
   }
 
   if (
@@ -202,6 +366,26 @@ function factsFromLine(
     )
   ) {
     out.push(fact({ ...common, kind: "evm_governance_payload", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:GovPool|GovValidators|GovUserKeeper|GovSettings|Proposal|proposal|proposalId|latestProposalId|createProposal|executeProposal|moveProposalToValidators|vote|voteFor|voteAgainst|VoteType|votesFor|votesAgainst|rawPower|votingPower|power|quorum|quorumReached|threshold|validator|validators|micropool|delegat|undelegat|lockVotes|canCreate|canVote|canExecute|proposalState|ProposalState|settingsId|executor|distribution|rewardAddress|ERC721Expert|multiplier)\b/i.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_dao_governance", sourceExpression: code }));
+  }
+
+  if (looksLikeNameRegistryLine(code)) {
+    out.push(fact({ ...common, kind: "evm_name_registry_resolution", sourceExpression: code }));
+  }
+
+  if (
+    /\b(?:SSVNetwork|SSVClusters|SSVValidators|SSVOperators|SSVViews|ClusterLib|OperatorLib|ProtocolLib|operatorIds|ClusterEBSnapshot|clusterEB|operatorEthVUnits|effectiveBalance|vUnits|validatorCount|ethValidatorCount|burnRate|updateClusterBalance|registerValidator|bulkRegisterValidator|removeValidator|bulkRemoveValidator|exitValidator|migrateClusterToETH|reactivate|liquidate|updateClusterOperators|updateDAOEthVUnits|minimumBlocksBeforeLiquidation|minimumLiquidationCollateral|currentNetworkFeeIndex|ethNetworkFee|networkTotalEarnings|daoTotalEthVUnits|ethDaoBalance|ebRoots|latestCommittedBlock|minBlocksBetweenUpdates|MerkleProof|RootNotFound|MustUseLatestRoot|StaleUpdate|EBExceedsMaximum|EBBelowMinimum|OperatorFee|withdrawOperatorEarnings|declareOperatorFee|executeOperatorFee)\b/.test(
+      code,
+    )
+  ) {
+    out.push(fact({ ...common, kind: "evm_validator_cluster_accounting", sourceExpression: code }));
   }
 
   if (
@@ -253,6 +437,30 @@ function solidityRoutingObligations(facts: ProvenanceFact[]): ProofObligation[] 
       "Delegatecall and proxy execution paths should be tied to explicit authorization and storage-layout compatibility assumptions.",
     keywords: ["delegatecall", "proxy", "storage", "authorization"],
   });
+  pushObligation(obligations, facts, "evm_selector_forwarding", {
+    id: "solidity-selector-forwarding-allowlist-collision",
+    property:
+      "Fallback, router, or manager paths that forward msg.data by msg.sig should bind selector, caller, target, calldata, value, and local function collisions so a selector allowlist cannot route an authorized caller into an unintended asset-moving function.",
+    keywords: ["selector", "fallback", "msg.sig", "msg.data", "function allowlist", "collision"],
+    priorityPathPattern: /\b(?:Wallet|Manager|Forwarder|Router|Proxy|TokenLock|Authoriz|Managed)\b/i,
+    priorityPattern: /\b(?:fallback|getAuthFunctionCallTarget|setAuthFunctionCall|authFnCalls|msg\.sig|msg\.data|functionCall)\b/i,
+  });
+  pushObligation(obligations, facts, "evm_recurring_agreement", {
+    id: "solidity-recurring-agreement-authorization-accounting",
+    property:
+      "Recurring agreement collectors should bind payer, data service, service provider, active and pending terms, signer or stored-offer authorization, cancellation scope, collection window, max claim, callbacks, and escrow side effects before agreement state advances or funds move.",
+    keywords: ["recurring agreement", "payer", "stored offer", "cancellation", "collection window", "max claim"],
+    priorityPathPattern: /\b(?:Recurring|Agreement|Collector|Payment|Escrow|DataService)\b/i,
+    priorityPattern: /\b(?:RecurringCollectionAgreement|AgreementData|storedOffer|cancelledOffers|lastCollectionAt|getMaxNextClaim|beforeCollection|afterCollection|collect)\b/i,
+  });
+  pushObligation(obligations, facts, "evm_payment_distribution", {
+    id: "solidity-payment-distribution-route-binding",
+    property:
+      "Payment distribution paths should bind payer, collector, receiver, data service, protocol cut, service cut, delegation-pool cut, receiver destination, escrow balance deltas, and rounding order so one participant cannot redirect or over-collect another participant's payment share.",
+    keywords: ["payment distribution", "receiver destination", "data service cut", "delegation pool", "escrow"],
+    priorityPathPattern: /\b(?:GraphPayments|PaymentsEscrow|Payment|Escrow|Collector|DataService)\b/i,
+    priorityPattern: /\b(?:receiverDestination|dataServiceCut|PROTOCOL_PAYMENT_CUT|tokensDataService|tokensDelegationPool|EscrowCollected|GraphPaymentCollected|stakeTo|addToDelegationPool|escrowBalanceBefore)\b/i,
+  });
   pushObligation(obligations, facts, "evm_upgrade_hook", {
     id: "solidity-upgrade-initializer-storage",
     property:
@@ -264,6 +472,62 @@ function solidityRoutingObligations(facts: ProvenanceFact[]): ProofObligation[] 
     property:
       "Signature acceptance should bind signer, action, amount or authority, nonce, deadline, chain id, verifying contract, and domain separator.",
     keywords: ["signature", "permit", "nonce", "domain separator", "replay"],
+  });
+  pushObligation(obligations, facts, "evm_permit2_witness_binding", {
+    id: "solidity-permit2-witness-action-binding",
+    property:
+      "Permit2 and metatransaction witness checks should bind signer, spender, payer, recipient, permit token and amount, nonce, deadline, witness type, slippage, and the exact ordered action bytes before user funds move.",
+    keywords: ["permit2", "witness", "action bytes", "spender", "nonce", "deadline", "slippage"],
+    priorityPathPattern: /\b(?:Permit2Payment|SettlerMetaTxn|SettlerIntent|ISettlerActions|Permit2Signature)\b/i,
+    priorityPattern: /\b(?:permitWitnessTransferFrom|_transferFrom|_hashArrayOfBytes|_hashActionsAndSlippage|_hashSlippage|_witnessTypeSuffix|metaTx|PermitTransferFrom)\b/,
+  });
+  pushObligation(obligations, facts, "evm_settler_action_dispatch", {
+    id: "solidity-settler-action-dispatch-integrity",
+    property:
+      "Settler action dispatch should enforce the intended first VIP action, ordered calldata bytes, selector validity, payer source, recipient, route parameters, and post-action payout so a relayer, solver, callback, or calldata alias cannot execute a different asset-moving route than the user authorized.",
+    keywords: ["settler", "action dispatch", "vip action", "selector", "route", "recipient", "calldata"],
+    priorityPathPattern: /\b(?:Settler|SettlerMetaTxn|SettlerIntent|SettlerBase|ISettlerActions|Common)\b/i,
+    priorityPattern: /\b(?:_dispatchVIP|_dispatch\(|decodeCall|executeMetaTxn|_executeMetaTxn|revertActionInvalid|actions\.decodeCall|ISettlerActions)\b/,
+  });
+  pushObligation(obligations, facts, "evm_settler_slippage_binding", {
+    id: "solidity-settler-slippage-payout-binding",
+    property:
+      "Settler slippage and payout checks should bind recipient, buy token, minimum amount, exact-limit behavior, positive-slippage recipient, and final balance delta to the user-signed or solver-constrained route before residual funds leave the contract.",
+    keywords: ["settler", "slippage", "payout", "recipient", "minimum amount", "positive slippage"],
+    priorityPathPattern: /\b(?:SettlerBase|SettlerMetaTxn|SettlerIntent|ISettlerActions|RebateClaimer)\b/i,
+    priorityPattern: /\b(?:AllowedSlippage|_checkSlippageAndTransfer|_hashActionsAndSlippage|_hashSlippage|amountOutMin|minAmountOut|POSITIVE_SLIPPAGE)\b/,
+  });
+  pushObligation(obligations, facts, "evm_settler_calldata_decoder", {
+    id: "solidity-settler-calldata-aliasing-boundary",
+    property:
+      "Custom calldata decoding that permits unchecked offsets, implicit zero padding, or action-array aliasing should be audited against every dispatch and witness hash consumer so malformed calldata cannot change the executed action relative to the hashed or validated bytes.",
+    keywords: ["calldata decoder", "aliasing", "offset", "zero padding", "dispatch", "witness"],
+    priorityPathPattern: /\b(?:SettlerBase|SettlerMetaTxn)\b/i,
+    priorityPattern: /\b(?:CalldataDecoder|decodeCall|calldataload|args\.offset|actions\.offset|_hashArrayOfBytes)\b/,
+  });
+  pushObligation(obligations, facts, "evm_settler_transient_context", {
+    id: "solidity-settler-transient-context-isolation",
+    property:
+      "Transient payer, operator, witness, and callback context should be set, consumed, and cleared across taker-submitted, metatransaction, intent, multicall, and callback paths so reentrancy or forwarding cannot confuse the asset owner or authorized operator.",
+    keywords: ["transient storage", "payer", "operator", "witness", "callback", "msgSender"],
+    priorityPathPattern: /\b(?:TransientStorage|Permit2Payment|Context|MultiCallContext|Settler|SettlerMetaTxn|SettlerIntent)\b/i,
+    priorityPattern: /\b(?:setPayer|clearPayer|_operator|_msgSender|metaTx|takerSubmitted|_PAYER_SLOT|_OPERATOR_SLOT|_WITNESS_SLOT|tstore|tload)\b/,
+  });
+  pushObligation(obligations, facts, "evm_settler_restricted_target", {
+    id: "solidity-settler-restricted-target-confused-deputy",
+    property:
+      "BASIC, callback, approval, multicall, proxy, and arbitrary target paths should enforce restricted-target policy at the final call target so user funds cannot be routed into Settler, Permit2, AllowanceHolder, proxy, or other protocol-critical contracts as a confused deputy.",
+    keywords: ["restricted target", "BASIC", "confused deputy", "arbitrary call", "allowance holder", "permit2"],
+    priorityPathPattern: /\b(?:Basic|Settler|Permit2Payment|AllowanceHolder|Context|MultiCall)\b/i,
+    priorityPattern: /\b(?:_isRestrictedTarget|revertConfusedDeputy|basicSellToPool|InvalidTarget|onlyProxy|noDelegateCall|FULL_RESTRICTED|SOFT_RESTRICTED)\b/,
+  });
+  pushObligation(obligations, facts, "evm_settler_full_balance_bridge_sink", {
+    id: "solidity-settler-full-balance-bridge-sweep",
+    property:
+      "Settler bridge, relay, and refund paths that consume selfbalance(), address(this).balance, or token.fastBalanceOf(address(this)) should prove residual native/token balances cannot be swept by unrelated later callers and that bridge refunds return to the originating payer or an authorized beneficiary.",
+    keywords: ["settler", "bridge", "selfbalance", "refund", "full balance", "relay", "residual funds"],
+    priorityPathPattern: /\b(?:BridgeSettler|Relay|NucleusTeller|LayerZero|CCIP|Mayan|Stargate|Across|DeBridge)\b/i,
+    priorityPattern: /\b(?:selfbalance\(\)|address\(this\)\.balance|fastBalanceOf\(address\(this\)\)|BRIDGE_NATIVE_TO_RELAY|bridgeNativeToRelay|bridgeToNucleusTeller|bridgeToCCIP|bridgeLayerZeroOFT)\b/i,
   });
   pushObligation(obligations, facts, "evm_oracle_read", {
     id: "solidity-oracle-freshness-manipulation",
@@ -292,26 +556,34 @@ function solidityRoutingObligations(facts: ProvenanceFact[]): ProofObligation[] 
   pushObligation(obligations, facts, "evm_bridge_message", {
     id: "solidity-bridge-message-domain-and-payload-binding",
     property:
-      "Bridge message send and receive paths should bind source chain, destination chain, peer, asset id, receiver, amount, compose payload, nonce or ticket, refund, and message type before value is minted or released.",
-    keywords: ["bridge message", "layerzero", "payload", "peer", "replay", "receiver"],
+      "Bridge message send and receive paths should bind source chain, destination chain, peer, mailbox or endpoint, asset id, receiver, sender, amount, compose payload, metadata, nonce or ticket, refund, and message type before value is minted, released, or handled.",
+    keywords: ["bridge message", "layerzero", "hyperlane", "payload", "mailbox", "peer", "replay", "receiver"],
   });
   pushObligation(obligations, facts, "evm_bridge_asset_mapping", {
     id: "solidity-bridge-asset-id-route-binding",
     property:
-      "Bridge asset mappings should prevent asset-id, route, endpoint, and implementation confusion across local and remote pools or OFTs.",
-    keywords: ["asset id", "route", "endpoint", "stargate", "implementation"],
+      "Bridge asset mappings should prevent asset-id, route, endpoint or mailbox, remote-router, and implementation confusion across local and remote pools, OFTs, or warp routes.",
+    keywords: ["asset id", "route", "endpoint", "mailbox", "remote router", "stargate", "implementation"],
   });
   pushObligation(obligations, facts, "evm_bridge_credit_accounting", {
     id: "solidity-bridge-credit-and-liquidity-conservation",
     property:
-      "Bridge credit, pool balance, treasury fee, reward, deficit, and shared-decimal accounting should conserve value across local settlement, remote release, and planner-driven credit movement.",
-    keywords: ["credit", "liquidity", "pool balance", "treasury fee", "shared decimals"],
+      "Bridge credit, pool balance, treasury fee, hook or gas payment, reward, deficit, threshold metadata, and shared-decimal accounting should conserve value and authority across local settlement, remote release, verification, and planner-driven credit movement.",
+    keywords: ["credit", "liquidity", "pool balance", "hook", "gas payment", "threshold", "shared decimals"],
   });
   pushObligation(obligations, facts, "evm_bridge_native_drop", {
     id: "solidity-bridge-native-drop-fee-isolation",
     property:
       "Native-drop, fare, refund, and planner-fee handling should keep user transfer value, execution gas value, and protocol fees isolated under failed receiver callbacks and partial delivery.",
     keywords: ["native drop", "fare", "refund", "planner fee", "callback"],
+  });
+  pushObligation(obligations, facts, "evm_wormhole_vaa", {
+    id: "solidity-wormhole-vaa-guardian-emitter-binding",
+    property:
+      "Wormhole VAA acceptance and message publication paths should bind guardian-set index, guardian quorum, signature ordering, VAA body hash, emitter chain, emitter address, sequence, consistency level, governance chain/contract, replay consumption, and bridge-contract mapping before governance execution or token release.",
+    keywords: ["wormhole", "vaa", "guardian set", "quorum", "emitter", "sequence", "governance", "replay"],
+    priorityPathPattern: /\b(?:Messages|Governance|Bridge|NFTBridge|WormholeDelegatedGuardians|DelegatedManagerSet|IWormhole)\b/i,
+    priorityPattern: /\b(?:parseAndVerifyVM|verifyVM|verifySignatures|guardianSetIndex|governanceActionIsConsumed|emitterChainId|emitterAddress|sequence|bridgeContracts|completeTransfer|publishMessage)\b/i,
   });
   pushObligation(obligations, facts, "evm_oft_supply_change", {
     id: "solidity-oft-mint-burn-lock-unlock-conservation",
@@ -324,6 +596,13 @@ function solidityRoutingObligations(facts: ProvenanceFact[]): ProofObligation[] 
     property:
       "Mint and redeem orders should bind signer, beneficiary, collateral asset, custodian route, amount, price, nonce, deadline, chain, verifying contract, and transfer direction before minting or releasing value.",
     keywords: ["mint", "redeem", "order", "collateral", "custodian", "nonce", "deadline"],
+  });
+  pushObligation(obligations, facts, "evm_async_request_settlement", {
+    id: "solidity-async-request-solver-settlement-conservation",
+    property:
+      "Async deposit and redeem requests should bind user, token, units, price type, solver, tip, deadline, max price age, refund path, and vault settlement so direct or authorized solvers cannot steal, strand, or over-settle user assets.",
+    keywords: ["async request", "solver", "refund", "deadline", "unit price", "vault settlement"],
+    priorityPattern: /\b(?:requestDeposit|requestRedeem|solveRequests|refundRequest|refundDeposit|asyncDepositHashes|asyncRedeemHashes|_getRequestHash|areUserUnitsLocked|userUnitsRefundableUntil)\b/i,
   });
   pushObligation(obligations, facts, "evm_erc4626_cooldown", {
     id: "solidity-erc4626-cooldown-share-asset-conservation",
@@ -367,6 +646,47 @@ function solidityRoutingObligations(facts: ProvenanceFact[]): ProofObligation[] 
       "Governance payload execution should bind the approved payload address, codehash, selector, deadline, executability predicate, delegatecall context, and post-execution authority invariants.",
     keywords: ["governance payload", "spell", "codehash", "deadline", "delegatecall", "ward"],
   });
+  pushObligation(obligations, facts, "evm_dao_governance", {
+    id: "solidity-dao-vote-result-and-execution-integrity",
+    property:
+      "DAO proposal, voting, validator, delegation, NFT-power, quorum, reward, and execution paths should preserve one-person/one-token/one-NFT voting assumptions, prevent double counting or stale voting power, and execute only the action approved by the final governance result.",
+    keywords: ["dao governance", "proposal", "vote", "quorum", "validator", "delegation", "execution"],
+    priorityPathPattern: /\b(?:GovPool|GovValidators|GovUserKeeper|GovSettings|ERC721Expert|ERC721Multiplier)\b/i,
+    priorityPattern: /\b(?:createProposal|executeProposal|moveProposalToValidators|vote|VoteType|votesFor|votesAgainst|quorum|validator|validators|GovUserKeeper|votingPower|rawPower|delegat|proposalState|ProposalState)\b/i,
+  });
+  pushObligation(obligations, facts, "evm_name_registry_resolution", {
+    id: "solidity-name-registry-resolution-integrity",
+    property:
+      "Name-service registry, registrar, resolver, wrapper, fuse, expiry, reverse-record, DNSSEC import, and migration paths should preserve the intended owner/controller authority and resolution result for each name without allowing unauthorized name theft, freezing, fuse escalation, expiry shortening, resolver substitution, or metadata/content alteration.",
+    keywords: [
+      "ens",
+      "name registry",
+      "resolver",
+      "registrar",
+      "name wrapper",
+      "fuses",
+      "subname",
+      "migration",
+    ],
+    priorityPathPattern: /\b(?:ENSRegistry|NameWrapper|BaseRegistrar|ETHRegistrar|ETHRegistrarController|PublicResolver|UniversalResolver|ReverseRegistrar|Registry|Registrar|Resolver|WrapperRegistry|PermissionedRegistry|PermissionedResolver|DNSTLDResolver|DNSRegistrar|MigrationController|WrapperReceiver)\b/i,
+    priorityPattern: /\b(?:setSubnodeOwner|setSubnodeRecord|setRecord|setResolver|setOwner|register|renew|wrap|unwrap|setFuses|ownerOf|resolver|addr|contenthash|setNameForAddr|claimWithResolver|migrate|permissions|roles|expiry|expires|rentPrice|commitment)\b/i,
+  });
+  pushObligation(obligations, facts, "evm_validator_cluster_accounting", {
+    id: "solidity-validator-cluster-fee-liquidation-conservation",
+    property:
+      "Validator-cluster accounting should settle operator and network fee indexes, validator counts, effective-balance or vUnits roots, DAO totals, operator earnings, cluster balances, migration, reactivation, withdrawal, and liquidation paths without allowing stale roots, rounding, removed operators, or mismatched snapshots to steal, freeze, overcharge, or prematurely liquidate funds.",
+    keywords: [
+      "validator cluster",
+      "operator fee",
+      "effective balance",
+      "vUnits",
+      "liquidation",
+      "fee index",
+      "root",
+    ],
+    priorityPathPattern: /\b(?:SSVClusters|SSVValidators|SSVOperators|SSVViews|ClusterLib|OperatorLib|ProtocolLib|SSVStorageEB)\b/i,
+    priorityPattern: /\b(?:updateClusterBalance|registerValidator|removeValidator|migrateClusterToETH|reactivate|liquidate|withdraw|updateClusterOperators|updateDAOEthVUnits|operatorEthVUnits|effectiveBalance|vUnits|validatorCount|ethValidatorCount|currentNetworkFeeIndex)\b/i,
+  });
   return obligations;
 }
 
@@ -374,9 +694,17 @@ function pushObligation(
   out: ProofObligation[],
   facts: ProvenanceFact[],
   kind: ProvenanceFactKind,
-  input: { id: string; property: string; keywords: string[] },
+  input: { id: string; property: string; keywords: string[]; priorityPattern?: RegExp; priorityPathPattern?: RegExp },
 ): void {
-  const refs = facts.filter((fact) => fact.kind === kind).map((fact) => `${fact.path}:${fact.line}`).slice(0, 16);
+  const matchingFacts = facts.filter((fact) => fact.kind === kind);
+  const sortedFacts = input.priorityPattern || input.priorityPathPattern
+    ? [...matchingFacts].sort((left, right) => {
+        const leftPriority = factPriority(left, input.priorityPattern, input.priorityPathPattern);
+        const rightPriority = factPriority(right, input.priorityPattern, input.priorityPathPattern);
+        return leftPriority - rightPriority;
+      })
+    : matchingFacts;
+  const refs = sortedFacts.map((fact) => `${fact.path}:${fact.line}`).slice(0, 16);
   if (refs.length === 0) return;
   out.push({
     id: input.id,
@@ -387,6 +715,13 @@ function pushObligation(
     evidenceRefs: refs,
     keywords: input.keywords,
   });
+}
+
+function factPriority(fact: ProvenanceFact, pattern?: RegExp, pathPattern?: RegExp): number {
+  let priority = 0;
+  if (pathPattern && !pathPattern.test(fact.path)) priority += 2;
+  if (pattern && !pattern.test(`${fact.sourceExpression ?? ""} ${fact.functionName ?? ""}`)) priority += 1;
+  return priority;
 }
 
 function fact(input: {
@@ -417,6 +752,77 @@ function looksLikeSolidityDoc(doc: Doc): boolean {
   return doc.path.endsWith(".sol");
 }
 
+function looksLikeNameRegistryLine(code: string): boolean {
+  const strongNameSignals =
+    /\b(?:ENS|ENSRegistry|NameWrapper|INameWrapper|BaseRegistrar|ETHRegistrar|ETHRegistrarController|PublicResolver|UniversalResolver|ReverseRegistrar|WrapperRegistry|PermissionedRegistry|PermissionedResolver|DNSTLDResolver|DNSSEC|DNSRegistrar|MigrationController|WrapperReceiver|namehash|labelhash|subnode|subname|contenthash|setResolver|setContenthash|setSubnodeOwner|setSubnodeRecord|setNameForAddr|claimWithResolver|setFuses|CANNOT_UNWRAP|PARENT_CANNOT_CONTROL|reverseNode)\b/i;
+  if (strongNameSignals.test(code)) return true;
+
+  const weakTerms = [
+    /\bresolver\b/i,
+    /\bregistrar\b/i,
+    /\bregister\b/i,
+    /\brenew\b/i,
+    /\bwrap\b/i,
+    /\bunwrap\b/i,
+    /\bfuses?\b/i,
+    /\bexpiry\b/i,
+    /\bexpires\b/i,
+    /\brentPrice\b/i,
+    /\bcommitment\b/i,
+    /\bregistrant\b/i,
+  ];
+  return weakTerms.filter((term) => term.test(code)).length >= 2;
+}
+
+function looksLikeSelectorForwardingLine(code: string, nearbySignals: string[]): boolean {
+  const context = nearbySignals.join(" ");
+  const selectorPattern =
+    /\b(?:msg\.sig|msg\.data|authFnCalls?|getAuthFunctionCallTarget|setAuthFunctionCall(?:Many)?|unsetAuthFunctionCall|_toFunctionSigHash|_convertToBytes4|abi\.encodeWithSignature|function selector|selector allowlist|selector whitelist)\b/i.test(
+      code,
+    ) || /\bmapping\s*\(\s*bytes4\s*=>\s*address\s*\)/i.test(code);
+  const forwardingPattern =
+    /\b(?:fallback\s*\(|functionCall\s*\(|Address\.functionCall|msg\.data|msg\.sig|getAuthFunctionCallTarget|authFnCalls?|setAuthFunctionCall(?:Many)?|unsetAuthFunctionCall)\b/i.test(
+      code,
+    ) || /\.(?:call|staticcall|delegatecall)\s*(?:\{|\.|\()/.test(code);
+  const contextualSelector = /\b(?:selector|msg\.sig|msg\.data|auth function|allowlist)\b/i.test(context);
+  const contextualForwarding = /\b(?:fallback|msg\.data|msg\.sig|auth function)\b/i.test(context);
+  return (selectorPattern && (forwardingPattern || contextualForwarding)) || (forwardingPattern && contextualSelector);
+}
+
+function looksLikeRecurringAgreementLine(code: string, nearbySignals: string[]): boolean {
+  if (/^(?:import\b|\/\*|\*|\/\/|\})/.test(code)) return false;
+  if (/^[A-Z][A-Za-z0-9_]*,\s*$/.test(code)) return false;
+  const context = nearbySignals.join(" ");
+  const directPattern =
+    /\b(?:RecurringCollectionAgreement(?:Update)?|IAgreementCollector|IAgreementOwner|AgreementData|AgreementState|CollectParams|StoredOffer|storedOffers?|rcaOffers|rcauOffers|cancelledOffers|activeTermsHash|updateNonce|lastCollectionAt|getMaxNextClaim|collectionStart|collectionEnd|minSecondsPerCollection|maxSecondsPerCollection|maxInitialTokens|maxOngoingTokensPerSecond|beforeCollection|afterCollection|OfferStored|OfferCancelled|AgreementAccepted|AgreementUpdated|AgreementCanceled|PaymentCollected|RCACollected)\b/.test(
+      code,
+    );
+  const entrypointPattern = /\bfunction\s+(?:accept|update|offer|cancel|collect|getMaxNextClaim|getAgreementDetails|getAgreementOfferAt)\s*\(/.test(
+    code,
+  );
+  const lifecyclePattern =
+    /\b(?:isEligible|termsHash|versionHash|offerHash|agreementId|maxSlippage|collectionSeconds|tokensToCollect|collection window|max claim|_requireAuthorization|_requireValidCollect|_getMaxNextClaimScoped|_preCollectCallbacks|_postCollectCallback)\b/i.test(
+      code,
+    );
+  const contextualAgreement = /\b(?:agreement|recurring|payer|max claim)\b/i.test(context);
+  return directPattern || entrypointPattern || (lifecyclePattern && contextualAgreement);
+}
+
+function looksLikePaymentDistributionLine(code: string, nearbySignals: string[]): boolean {
+  if (/^(?:import\b|\/\*|\*|\/\/|\})/.test(code)) return false;
+  const context = nearbySignals.join(" ");
+  const directPattern =
+    /\b(?:GraphPaymentCollected|EscrowCollected|PaymentCollected|PROTOCOL_PAYMENT_CUT|dataServiceCut|receiverDestination|tokensProtocol|tokensDataService|tokensDelegationPool|tokensRemaining|escrowBalanceBefore|escrowBalanceAfter|PaymentsEscrowInconsistentCollection|mulPPMRoundUp|getDelegationFeeCut|addToDelegationPool|stakeTo|pushTokens|pullTokens|burnTokens)\b/.test(
+      code,
+    );
+  const routePattern =
+    /\b(?:paymentType|payer|collector|receiver|dataService|delegation pool|protocol cut|service cut|receiver destination|escrow balance|payment cut)\b/i.test(
+      code,
+    );
+  const contextualPayment = /\b(?:payment|escrow|receiver|data service|delegation|collector)\b/i.test(context);
+  return directPattern || (routePattern && contextualPayment);
+}
+
 function looksLikeStateWrite(code: string): boolean {
   if (!/[+\-*/%|&^]?=/.test(code)) return false;
   if (/^\s*\(/.test(code)) return false;
@@ -435,7 +841,8 @@ function nearbySignalsFor(lines: string[], idx: number): string[] {
 
 function enclosingFunction(lines: string[], idx: number): string | undefined {
   for (let pos = idx; pos >= 0 && pos >= idx - 120; pos -= 1) {
-    const line = lines[pos] ?? "";
+    const line = stripInlineComment(lines[pos] ?? "").trim();
+    if (line.length === 0 || /^(?:\/\*|\*|\/\/)/.test(line)) continue;
     const functionMatch = /\bfunction\s+([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(line);
     if (functionMatch?.[1]) return functionMatch[1];
     if (/\breceive\s*\(/.test(line)) return "receive";

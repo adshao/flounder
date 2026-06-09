@@ -32,6 +32,28 @@ const SIGNAL_TERMS = [
   "withdraw",
 ];
 
+const ZK_SIGNAL_TERMS = [
+  "aggregation",
+  "batch",
+  "block",
+  "bundle",
+  "chunk",
+  "coordinator",
+  "metadata",
+  "pi_hash",
+  "proof",
+  "prover",
+  "public",
+  "snark",
+  "stark",
+  "task",
+  "universal",
+  "verifier",
+  "vk",
+  "witness",
+  "zkvm",
+];
+
 export function extractRustSolanaProvenance(source: Doc[]): ProvenanceGraph {
   const facts: ProvenanceFact[] = [];
   let files = 0;
@@ -43,6 +65,28 @@ export function extractRustSolanaProvenance(source: Doc[]): ProvenanceGraph {
   const obligations = solanaRoutingObligations(facts);
   return {
     domain: "solana-rust",
+    facts,
+    obligations,
+    summary: {
+      files,
+      facts: facts.length,
+      byKind: countBy(facts, (fact) => fact.kind),
+      assignmentFlowObligations: obligations.length,
+    },
+  };
+}
+
+export function extractRustZkProvenance(source: Doc[]): ProvenanceGraph {
+  const facts: ProvenanceFact[] = [];
+  let files = 0;
+  for (const doc of source) {
+    if (!looksLikeZkProofOrchestrationDoc(doc)) continue;
+    files += 1;
+    facts.push(...extractZkFactsFromDoc(doc));
+  }
+  const obligations = zkProofOrchestrationObligations(facts);
+  return {
+    domain: "zk-proof-orchestration",
     facts,
     obligations,
     summary: {
@@ -66,6 +110,54 @@ function extractFactsFromDoc(doc: Doc): ProvenanceFact[] {
       out.push(fact);
     }
   }
+  return out;
+}
+
+function extractZkFactsFromDoc(doc: Doc): ProvenanceFact[] {
+  const out: ProvenanceFact[] = [];
+  const lines = doc.content.split(/\r?\n/);
+  for (let idx = 0; idx < lines.length; idx += 1) {
+    const code = stripInlineComment(lines[idx] ?? "").trim();
+    if (code.length === 0) continue;
+    const functionName = enclosingRustOrGoFunction(lines, idx);
+    const nearbySignals = nearbyZkSignalsFor(lines, idx);
+    for (const fact of zkFactsFromLine(doc.path, idx + 1, code, functionName, nearbySignals)) {
+      out.push(fact);
+    }
+  }
+  return out;
+}
+
+function zkFactsFromLine(
+  path: string,
+  line: number,
+  code: string,
+  functionName: string | undefined,
+  nearbySignals: string[],
+): ProvenanceFact[] {
+  const out: ProvenanceFact[] = [];
+  const common = { path, line, functionName, nearbySignals, code };
+
+  if (/\b(BlockWitness|block_hashes|block_hash|try_fetch_.*witness|fetch.*Witness|witness)\b/i.test(code)) {
+    out.push(zkFact({ ...common, kind: "zk_witness_source", sourceExpression: code }));
+  }
+
+  if (/\b(ChunkTask|BatchProvingTask|BundleProvingTask|ProvingTask|task_data|task_id|identifier|GenerateUniversalTask|universal)\b/i.test(code)) {
+    out.push(zkFact({ ...common, kind: "zk_task_statement", sourceExpression: code }));
+  }
+
+  if (/\b(pi_hash|public_?inputs?|metadata|post_blockhash|prev_state_root|post_state_root|withdraw_root|batch_hash|BundleInfo|BatchInfo|ChunkInfo)\b/i.test(code)) {
+    out.push(zkFact({ ...common, kind: "zk_public_input_metadata", sourceExpression: code }));
+  }
+
+  if (/\b(aggregated_proofs|chunk_proofs|batch_proofs|check_aggregation|AggregationInput|aggregate|aggregation|into_stark_proof|public_values)\b/i.test(code)) {
+    out.push(zkFact({ ...common, kind: "zk_proof_aggregation", sourceExpression: code }));
+  }
+
+  if (/\b(submit_?proof|SubmitProof|verify_?proof|Verifier|verifier|ProofMetadata|ProofResult|taskID|stark_proof|snark|vk)\b/i.test(code)) {
+    out.push(zkFact({ ...common, kind: "zk_verifier_submission", sourceExpression: code }));
+  }
+
   return out;
 }
 
@@ -112,6 +204,41 @@ function factsFromLine(
   }
 
   return out;
+}
+
+function zkProofOrchestrationObligations(facts: ProvenanceFact[]): ProofObligation[] {
+  const obligations: ProofObligation[] = [];
+  pushObligation(obligations, facts, "zk_witness_source", {
+    id: "zk-witness-source-request-binding",
+    property:
+      "Every witness returned by a coordinator, RPC, interpreter, or prover-side source should be cryptographically or structurally bound to the requested block, batch, task id, fork, and statement before requested identifiers are dropped.",
+    keywords: ["witness", "block", "task", "binding", "proof"],
+  });
+  pushObligation(obligations, facts, "zk_task_statement", {
+    id: "zk-task-statement-identity-binding",
+    property:
+      "Universal or serialized proving tasks should preserve the requested statement identity across checkout, serialization, prover execution, coordinator storage, and verifier submission.",
+    keywords: ["task", "statement", "identity", "proof"],
+  });
+  pushObligation(obligations, facts, "zk_public_input_metadata", {
+    id: "zk-public-input-metadata-binding",
+    property:
+      "Public-input hashes and metadata should be derived from, and later rebound to, the same requested statement rather than only the returned witness, proof wrapper, or coordinator cache.",
+    keywords: ["public input", "metadata", "pi_hash", "binding"],
+  });
+  pushObligation(obligations, facts, "zk_proof_aggregation", {
+    id: "zk-aggregation-proof-metadata-binding",
+    property:
+      "Recursive aggregation should length-check, order-check, and metadata-check every inner proof and public input before constructing chunk, batch, bundle, or final verifier claims.",
+    keywords: ["aggregation", "proof", "metadata", "public input"],
+  });
+  pushObligation(obligations, facts, "zk_verifier_submission", {
+    id: "zk-verifier-submission-task-binding",
+    property:
+      "Submit-proof and verifier paths should bind submitted proof bytes to the stored task id, verification key, metadata, assignment state, and downstream finalized claim.",
+    keywords: ["verifier", "submit", "task", "metadata", "vk"],
+  });
+  return obligations;
 }
 
 function solanaRoutingObligations(facts: ProvenanceFact[]): ProofObligation[] {
@@ -186,6 +313,28 @@ function pushObligation(
   });
 }
 
+function zkFact(input: {
+  kind: ProvenanceFactKind;
+  path: string;
+  line: number;
+  functionName?: string | undefined;
+  sourceExpression?: string | undefined;
+  nearbySignals: string[];
+  code: string;
+}): ProvenanceFact {
+  return {
+    id: `${input.kind}-${slug(input.path)}-${input.line}`,
+    domain: "zk-proof-orchestration",
+    kind: input.kind,
+    path: input.path,
+    line: input.line,
+    ...(input.functionName ? { functionName: input.functionName } : {}),
+    ...(input.sourceExpression ? { sourceExpression: input.sourceExpression.trim() } : {}),
+    nearbySignals: input.nearbySignals,
+    code: input.code,
+  };
+}
+
 function fact(input: {
   kind: ProvenanceFactKind;
   path: string;
@@ -225,6 +374,38 @@ function looksLikeSolanaRustDoc(doc: Doc): boolean {
   );
 }
 
+function looksLikeZkProofOrchestrationDoc(doc: Doc): boolean {
+  if (!/\.(rs|go)$/.test(doc.path)) return false;
+  const text = doc.content.toLowerCase();
+  const terms = [
+    "provingtask",
+    "prover",
+    "verifier",
+    "proof",
+    "witness",
+    "public input",
+    "public_inputs",
+    "pi_hash",
+    "stark",
+    "snark",
+    "zkvm",
+    "submitproof",
+    "proofmetadata",
+    "proofresult",
+    "taskid",
+    "chunk",
+    "batch",
+    "bundle",
+    "universal",
+    "coordinator",
+  ];
+  let hits = 0;
+  for (const term of terms) {
+    if (text.includes(term)) hits += 1;
+  }
+  return hits >= 3;
+}
+
 function nearbySignalsFor(lines: string[], idx: number): string[] {
   const start = Math.max(0, idx - 4);
   const end = Math.min(lines.length, idx + 5);
@@ -232,10 +413,27 @@ function nearbySignalsFor(lines: string[], idx: number): string[] {
   return SIGNAL_TERMS.filter((term) => text.includes(term)).slice(0, 12);
 }
 
+function nearbyZkSignalsFor(lines: string[], idx: number): string[] {
+  const start = Math.max(0, idx - 4);
+  const end = Math.min(lines.length, idx + 5);
+  const text = lines.slice(start, end).join("\n").toLowerCase();
+  return ZK_SIGNAL_TERMS.filter((term) => text.includes(term)).slice(0, 12);
+}
+
 function enclosingFunction(lines: string[], idx: number): string | undefined {
   for (let pos = idx; pos >= 0 && pos >= idx - 120; pos -= 1) {
     const match = /\b(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<(]/.exec(lines[pos] ?? "");
     if (match?.[1]) return match[1];
+  }
+  return undefined;
+}
+
+function enclosingRustOrGoFunction(lines: string[], idx: number): string | undefined {
+  for (let pos = idx; pos >= 0 && pos >= idx - 120; pos -= 1) {
+    const rust = /\b(?:pub\s+)?fn\s+([A-Za-z_][A-Za-z0-9_]*)\s*[<(]/.exec(lines[pos] ?? "");
+    if (rust?.[1]) return rust[1];
+    const go = /\bfunc\s+(?:\([^)]+\)\s*)?([A-Za-z_][A-Za-z0-9_]*)\s*\(/.exec(lines[pos] ?? "");
+    if (go?.[1]) return go[1];
   }
   return undefined;
 }

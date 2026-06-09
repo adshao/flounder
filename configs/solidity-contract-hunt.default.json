@@ -40,7 +40,12 @@
       "admin, keeper, guardian, operator, pauser, timelock, and governance authority",
       "proxy implementation, initializer, and storage-layout integrity",
       "oracle-dependent pricing, liquidation, mint, redeem, swap, and settlement decisions",
+      "pending deposit or redeem requests, unit-price snapshots, solver tips, and refundable vault shares",
+      "validator cluster balances, operator fee indexes, network fee indexes, effective-balance roots, vUnits snapshots, liquidation collateral, and staking reward pools",
+      "name registry ownership, resolver records, registrar expiries, wrapped-name permissions, fuses, subname authority, reverse records, and migration mappings",
+      "Wormhole VAA body hashes, guardian-set indexes, guardian quorum, emitter chain/address pairs, message sequences, governance action replay state, and bridge-contract mappings",
       "signature, permit, cross-chain message, and delegated-action authorization",
+      "DAO proposal state, voting power, quorum thresholds, validator votes, NFT voting rights, delegated votes, and approved execution payloads",
       "public and external entrypoints that mutate state or move assets"
     ],
     "attackerCapabilities": [
@@ -54,7 +59,13 @@
       "external call or token callback to finalized local accounting",
       "token balance movement to internal credit, share, debt, and fee accounting",
       "oracle read to value-sensitive state transition",
+      "async deposit or redeem request to solver, direct settlement, vault settlement, and refund execution",
+      "validator cluster state to operator snapshots, network fee indexes, effective-balance root proofs, migration or reactivation paths, and liquidation decisions",
+      "name owner, controller, resolver, registrar, wrapper, role, fuse, expiry, and migration state to the final resolution result and NFT representation",
+      "Wormhole VAA parsing and signature verification to governance execution, message replay consumption, and token bridge release or minting",
       "signature or cross-chain message to domain, nonce, deadline, chain id, and target contract binding",
+      "DAO proposal lifecycle to vote accounting, quorum or threshold checks, validator review, and final execution effects",
+      "user-signed bridge limits and route fields to quote results, final send parameters, and settlement receipts",
       "proxy admin or initializer path to implementation code and storage layout"
     ],
     "securityInvariants": [
@@ -62,7 +73,13 @@
       "Every privileged, upgrade, pause, rescue, keeper, and governance path must enforce the intended caller and lifecycle boundary at the point of mutation.",
       "External calls must not allow callbacks to observe or mutate inconsistent accounting state.",
       "Oracle-dependent decisions must validate freshness, sign, decimals, liveness, and manipulation assumptions before state changes.",
+      "Async request settlement must preserve user token and unit balances across pending, solved, skipped, expired, and refunded states.",
+      "Validator cluster accounting must reconcile cluster balances, validator counts, operator earnings, DAO network fees, effective-balance/vUnits roots, and liquidation thresholds across registration, removal, migration, reactivation, withdrawal, and update paths.",
+      "Name registry and resolution state must preserve owner-authorized changes to records, resolvers, wrappers, subnames, fuses, expiries, reverse records, and migrations without unintended name theft, freezing, or metadata/content alteration.",
+      "Wormhole VAA consumers must verify the guardian-set index, quorum, ordered signatures, body hash, emitter chain/address, sequence, governance origin, and replay-consumption state before executing governance or releasing bridged value.",
       "Signatures, permits, and cross-chain messages must bind the exact action, signer, nonce, deadline, chain id, and verifying contract.",
+      "DAO governance results must not be altered by stale snapshots, double-counted votes, delegation aliases, NFT power confusion, validator state drift, or execution payload substitution.",
+      "Bridge quotes must not weaken user-authorized limits; final send or settlement parameters must preserve signed minimums, receivers, routes, deadlines, and refund boundaries.",
       "Upgradeable contracts must protect initialization, authorization, implementation compatibility, and storage layout."
     ],
     "focusAreas": [
@@ -71,9 +88,16 @@
       "external calls, callbacks, hooks, fallback, receive, and delegatecall",
       "proxy, initializer, implementation, storage gap, and upgrade authorization",
       "oracle, TWAP, sequencer, decimal, stale-price, and market-manipulation assumptions",
+      "async deposit/redeem queues, request hashes, solver settlement, direct fills, deadline expiry, refunds, and unit locks",
+      "validator cluster registration/removal, operator fee accrual, effective-balance root updates, vUnits accounting, migration/reactivation, and liquidation thresholds",
+      "name registry ownership, resolver profile writes, registrar commit/reveal and renewal, wrapper fuse permissions, subname issuance, DNSSEC import, reverse registrar, and v1-to-v2 migration",
       "permit, EIP-712, nonce, deadline, domain separator, and delegated execution",
+      "DAO proposal creation, vote power accounting, delegation, quorum, validator voting, proposal execution, rewards, and NFT governance powers",
       "governance, timelock, role, pause, rescue, keeper, and emergency paths",
-      "cross-chain message validation, replay protection, source-chain binding, and receiver authorization"
+      "cross-chain message validation, replay protection, source-chain binding, and receiver authorization",
+      "bridge quote-to-execution value binding for minAmount, receiver, refund address, route, fee, and settlement receipt fields",
+      "Wormhole VAA parsing, guardian quorum, emitter/sequence replay binding, governance action consumption, and Portal Token Bridge release or mint accounting",
+      "Hyperlane Mailbox dispatch/process, ISM verification, remote router enrollment, validator threshold/checkpoint binding, and hook or gas-payment execution"
     ],
     "outOfScope": [
       "public-network transactions",
@@ -126,6 +150,68 @@
       ]
     },
     {
+      "id": "evm-dao-governance-voting",
+      "displayName": "EVM DAO Governance Voting And Execution",
+      "description": "Audit proposal creation, vote accounting, quorum and threshold checks, validator review, delegation, NFT voting power, rewards, and final proposal execution.",
+      "failureModes": [
+        "evm_dao_governance_integrity",
+        "access_control",
+        "privilege_boundary",
+        "supply_balance_integrity",
+        "race_condition",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_dao_governance_integrity",
+          "id": "evm-dao-governance-integrity-auditor",
+          "displayName": "EVM DAO Governance Integrity Auditor",
+          "guidance": "Trace proposal creation, voter eligibility, voting power sources, delegation, micropools, validator voting, quorum or threshold math, proposal state transitions, execution payload binding, and post-execution reward distribution together. Check stale snapshots, double counting, vote-type confusion, NFT power aliasing, delegation cycles, validator bypass, proposal-id mismatch, executor substitution, and actions executing with a result different from the final approved outcome."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate proposal creation, personal vote, delegated vote, micropool vote, validator vote, cancellation, unlock, reward claim, and execute paths as separate state-machine items.",
+        "Create separate items for voting-power snapshot timing, quorum and threshold math, for/against result transitions, validator handoff, proposal-id binding, executor/action binding, NFT voting power, and delegation or undelegation side effects.",
+        "Map every final execution effect to the proposal state and vote totals that authorize it."
+      ],
+      "auditGuidance": [
+        "Do not treat governance economics or majority control as a code bug. Focus on code paths where the recorded result can diverge from the voted result, where one asset or voter is counted incorrectly, or where a different payload executes than the one approved.",
+        "Check all vote power sources together: ERC20 balances, ERC721 power, expert NFTs, multipliers, delegated balances, locked proposal balances, micropool balances, and validator votes.",
+        "Tie any finding to an in-scope impact such as governance result manipulation, direct theft or freezing of funds/NFTs, unauthorized NFT minting, or unintended NFT representation changes."
+      ]
+    },
+    {
+      "id": "evm-name-registry-resolution-integrity",
+      "displayName": "EVM Name Registry And Resolution Integrity",
+      "description": "Audit ENS-like name registries, resolvers, registrars, name wrappers, fuses, subname permissions, reverse records, DNSSEC imports, and v1-v2 migration paths.",
+      "failureModes": [
+        "evm_name_registry_resolution",
+        "access_control",
+        "privilege_boundary",
+        "signature_replay",
+        "race_condition",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_name_registry_resolution",
+          "id": "evm-name-registry-resolution-auditor",
+          "displayName": "EVM Name Registry Resolution Auditor",
+          "guidance": "Trace name ownership, controller authority, resolver records, registrar expiry, commit/reveal, wrapped-name fuses, subname creation, reverse records, DNSSEC imports, and migration state together. Check unauthorized name ownership changes, resolver/profile substitution, expiry shortening, permanent name freezing, fuse escalation or bypass, reverse-record spoofing, migration aliasing, and unintended alteration of NFT representation or content records."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate registry owner/resolver/TTL writes, registrar registration and renewal, resolver profile writes, wrapper wrap/unwrap/fuse updates, subname issuance, reverse registrar writes, DNSSEC import, and migration paths as separate authority-sensitive items.",
+        "Create separate items for parent versus child control, controller roles, expiry and grace-period math, commitment binding, resolver fallback or wildcard resolution, permissioned resolver roles, canonical ID mapping, wrapped-name fuse inheritance, and v1-to-v2 ownership transfer.",
+        "Map every final name resolution result and NFT representation to the owner, role, wrapper fuse, registrar expiry, resolver, and migration state that authorizes it."
+      ],
+      "auditGuidance": [
+        "Do not treat malicious DAO or privileged registry owner behavior as a bug unless the program accepts that impact or code grants more authority than intended. Focus on non-privileged paths, role confusion, stale migration state, and state-machine races.",
+        "Check for divergence between registry ownership, wrapped token ownership, resolver permissions, registrar expiry, and reverse-record ownership after transfer, expiry, renewal, unwrap, fuse changes, migration, and resolver replacement.",
+        "Tie any finding to a concrete impact such as unauthorized name/NFT theft, permanent freezing of names/NFTs, unintended alteration of resolver records or token metadata, unauthorized NFT minting, or governance-result manipulation."
+      ]
+    },
+    {
       "id": "evm-value-share-accounting",
       "displayName": "EVM Value, Share, And Token Accounting",
       "description": "Audit value conservation across ERC20/ERC721/ERC1155/ERC4626, vault shares, debt, collateral, rewards, fees, donations, and rounding boundaries.",
@@ -163,6 +249,67 @@
       "auditGuidance": [
         "Follow every branch that changes token balances, shares, debt, collateral, rewards, fees, or accounting indexes.",
         "Treat rounding direction, zero amounts, first-depositor state, donations, decimals, and stale cached balances as first-class security conditions."
+      ]
+    },
+    {
+      "id": "evm-staking-rewarder-accounting",
+      "displayName": "EVM Staking Rewarder Accounting",
+      "description": "Audit non-ERC4626 staking pools, rewarders, allocation points, reward indexes, reward debt, claim paths, rewarder replacement, and staking-token/reward-token overlap.",
+      "failureModes": [
+        "evm_token_accounting",
+        "supply_balance_integrity",
+        "input_validation",
+        "privilege_boundary",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_token_accounting",
+          "id": "evm-staking-rewarder-accounting-auditor",
+          "displayName": "EVM Staking Rewarder Accounting Auditor",
+          "guidance": "Trace stake balances, totalSupply, allocation points, accRewardPerShare-style indexes, per-user reward debt, pending reward calculation, claim/withdraw/emergency paths, and rewarder replacement together. Check zero amounts, duplicate or mismatched token arrays, reward-token/staking-token overlap, small-amount rounding, stale debt across rewarder changes, and whether old rewarder claims remain reachable."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate each stake, depositTo, withdraw, emergencyWithdraw, claim, reward schedule, allocation, and rewarder connection or replacement path with the caller role and affected accounting state.",
+        "Create separate items for reward debt migration, active-stake rewarder replacement, allocation-point array pairing, reward-token/staking-token overlap, zero-amount operations, recipient binding, and reward schedule rounding.",
+        "When rewarder configuration is privileged, separate owner/admin misconfiguration from non-privileged paths that can strand or steal user rewards."
+      ],
+      "auditGuidance": [
+        "Do not treat source-confirmed owner-only rewarder changes as bounty-ready without proving an in-scope non-privileged trigger or a program that accepts privileged-configuration impacts.",
+        "Check that every accrued reward has a reachable claim path across pool replacement, rewarder migration, disabled rewards, emergency withdrawal, and duplicate token inputs.",
+        "Tie any staking/reward finding to a concrete live impact: theft or freezing of user funds, theft or freezing of unclaimed yield, griefing, or protocol insolvency."
+      ]
+    },
+    {
+      "id": "evm-validator-cluster-staking-accounting",
+      "displayName": "EVM Validator Cluster Staking Accounting",
+      "description": "Audit DVT and validator-cluster contracts that combine operator fees, network fees, validator counts, effective-balance roots, vUnits snapshots, migration/reactivation, withdrawals, staking rewards, and liquidation thresholds.",
+      "failureModes": [
+        "evm_validator_cluster_accounting",
+        "evm_token_accounting",
+        "supply_balance_integrity",
+        "evm_liquidation_solvency",
+        "race_condition",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_validator_cluster_accounting",
+          "id": "evm-validator-cluster-accounting-auditor",
+          "displayName": "EVM Validator Cluster Accounting Auditor",
+          "guidance": "Trace validator registration, removal, exit, migration, reactivation, deposit, withdrawal, effective-balance root update, operator fee change, operator earnings withdrawal, network fee accrual, DAO fee accounting, and liquidation together. Check that validatorCount, ethValidatorCount, cluster balance, operator snapshot indexes, network fee indexes, effectiveBalance, vUnits, operatorEthVUnits, daoTotalEthVUnits, and liquidation thresholds stay synchronized when roots are stale, operators are removed, clusters migrate versions, fees change, or rounding truncates value."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate each registerValidator, bulkRegisterValidator, removeValidator, bulkRemoveValidator, updateClusterBalance, liquidate, reactivate, withdraw, migrateClusterToETH, operator fee change, and operator earnings withdrawal path with the exact cluster and operator accounting state it mutates.",
+        "Create separate items for effective-balance root proof freshness, vUnits delta accounting, operatorEthVUnits and daoTotalEthVUnits conservation, validatorCount versus ethValidatorCount drift, network fee index settlement, operator snapshot settlement, migration from legacy token accounting to ETH accounting, and liquidation threshold computation.",
+        "Map every cluster balance decrease, operator earnings increase, DAO fee increase, staking reward claim, and liquidation payout to the paired validator count and effective-balance units that authorize it."
+      ],
+      "auditGuidance": [
+        "Treat public known issues about stale root commitments as exclusions until a distinct source path and impact are proven; use them as negative examples for duplicate filtering.",
+        "Do not treat an offchain beacon oracle, liquidator service, operator owner, or DAO parameter change as a bug by itself. Prove a code-level path where an in-scope caller can steal, freeze, overcharge, undercharge, or prematurely liquidate funds without relying only on privileged compromise.",
+        "Check rounding at deducted-digit packing, block-based fee indexes, zero/removed operator snapshots, empty clusters, version migration, and stale-but-valid root updates as value-affecting state transitions."
       ]
     },
     {
@@ -290,6 +437,39 @@
       ]
     },
     {
+      "id": "evm-async-request-solver-settlement",
+      "displayName": "EVM Async Request And Solver Settlement",
+      "description": "Audit asynchronous deposit/redeem request queues, direct or vault solver fills, request hashes, deadline expiry, refunds, unit-price limits, and refundable unit locks.",
+      "failureModes": [
+        "evm_async_request_settlement",
+        "supply_balance_integrity",
+        "evm_token_accounting",
+        "evm_vault_share_accounting",
+        "evm_mev_slippage",
+        "privilege_boundary",
+        "race_condition",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_async_request_settlement",
+          "id": "evm-async-request-solver-settlement-auditor",
+          "displayName": "EVM Async Request Solver Settlement Auditor",
+          "guidance": "Trace async deposit and redeem requests from initial token or unit custody through request-hash storage, solver selection, direct fill, vault fill, expiry, refund, and cleanup. Verify the hash binds user, token, request type, token amount, unit amount, solver tip, deadline, max price age, and price mode; check that solvers cannot receive value without paying the paired asset, that skipped or expired requests remain refundable, and that sync-deposit refund locks cannot freeze or double-spend user units."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate each requestDeposit, requestRedeem, solveRequestsVault, solveRequestsDirect, refundRequest, refundDeposit, and unit-lock path with its caller role and asset custody transition.",
+        "Create separate items for request-hash binding, deadline and max-price-age enforcement, fixed-price versus auto-price settlement, solver-tip accounting, skipped invalid requests, expired refunds, deposit caps, and refundable sync-deposit unit locks.",
+        "Map every pending token or unit balance to exactly one reachable solved, skipped, expired, or refunded terminal state."
+      ],
+      "auditGuidance": [
+        "Do not treat an authorized solver or accountant assumption as a finding by itself; prove a code-level path where an in-scope caller can steal, strand, or over-settle assets outside the program's trusted-role exclusions.",
+        "Check that direct public fills and authorized vault fills enforce the same user, token, units, price, recipient, deadline, and cleanup invariants.",
+        "Verify that refunds, request deletion, approvals, and unit locks remain consistent under reverts, partial batches, stale prices, disabled tokens, paused vaults, and boundary timestamps."
+      ]
+    },
+    {
       "id": "evm-upgradeability-storage",
       "displayName": "EVM Upgradeability And Storage Layout",
       "description": "Audit UUPS, transparent proxies, beacons, delegatecall, initializer/reinitializer, storage gaps, and implementation compatibility.",
@@ -324,6 +504,8 @@
         "evm_bridge_message_replay",
         "evm_bridge_credit_accounting",
         "evm_oft_supply_conservation",
+        "evm_mev_slippage",
+        "signature_replay",
         "supply_balance_integrity",
         "spec_impl_mismatch",
         "access_control",
@@ -347,16 +529,129 @@
           "id": "evm-bridge-message-binding-auditor",
           "displayName": "EVM Bridge Message Binding Auditor",
           "guidance": "Trace message construction and receipt across source chain, destination chain, peer, endpoint, asset id, receiver bytes, amount, compose payload, ticket or nonce, and refund fields. Check same-chain, cross-chain, fork, clone, stale-peer, and malformed-payload replay or misdelivery."
+        },
+        {
+          "failureMode": "evm_mev_slippage",
+          "id": "evm-bridge-signed-constraint-auditor",
+          "displayName": "EVM Bridge Signed Constraint Auditor",
+          "guidance": "Trace user-signed or caller-supplied bridge constraints from the authorization boundary through quote, fee, dust, route, and final send execution. Check that quote results cannot overwrite signed minimum received amounts, receivers, destination routes, refund addresses, deadlines, or fee limits without an explicit check against the original user constraint."
         }
       ],
       "enumerationGuidance": [
         "Enumerate every LayerZero/OFT send and receive path with its payload fields, peer binding, asset-id lookup, receiver conversion, and amount conversion.",
+        "Create separate items for user-signed or caller-supplied minAmount, receiver, refund address, route, deadline, and fee fields when a later quote or receipt can rewrite final send parameters.",
         "Create separate items for planner credit movement, bus ticket validation, taxi delivery, failed outflow retry, native-drop refunds, and treasury/planner fee isolation.",
         "Map each lock/burn on the source side to the corresponding mint/unlock on the destination side and the credit or path accounting that authorizes it."
       ],
       "auditGuidance": [
         "Do not treat trusted planner liveness as value-safety permission. Identify the exact code that prevents planner, driver, relayer, or owner actions from creating unauthorized spendable value.",
+        "Do not treat a bridge quote as slippage enforcement. Verify the final send or settlement check still enforces the original user-authorized minimum, receiver, route, refund, deadline, and fee constraints.",
         "Check shared-decimal rounding, dust removal, minAmount/slippage, failed token delivery caches, compose-message sender binding, and native-drop failure branches as value-affecting edges."
+      ]
+    },
+    {
+      "id": "evm-wormhole-vaa-governance-bridge",
+      "displayName": "EVM Wormhole VAA, Governance, And Token Bridge",
+      "description": "Audit Wormhole VAA parsing, guardian-set quorum, signature ordering, governance-origin checks, replay consumption, message publication, and Portal Token Bridge lock/mint/release conservation.",
+      "failureModes": [
+        "evm_wormhole_vaa_verification",
+        "evm_wormhole_governance_binding",
+        "evm_bridge_message_replay",
+        "evm_bridge_credit_accounting",
+        "signature_replay",
+        "supply_balance_integrity",
+        "access_control",
+        "privilege_boundary",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_wormhole_vaa_verification",
+          "id": "evm-wormhole-vaa-verification-auditor",
+          "displayName": "EVM Wormhole VAA Verification Auditor",
+          "guidance": "Trace encoded VAA parsing through body hashing, guardian-set lookup, guardian-set expiry, quorum, signature ordering, guardian index bounds, ecrecover results, emitter chain/address, sequence, and consistency level. Check whether any consumer trusts parsed VM fields without the matching parseAndVerifyVM or verifyVM protection needed for that path."
+        },
+        {
+          "failureMode": "evm_wormhole_governance_binding",
+          "id": "evm-wormhole-governance-binding-auditor",
+          "displayName": "EVM Wormhole Governance Binding Auditor",
+          "guidance": "Audit governance VAA consumers from parseAndVerifyVM to governance chain, governance contract, module/action/payload parsing, current guardian set requirements, replay-consumption state, and final privileged mutation. Check whether a valid VAA for another module, chain, emitter, action, or already-consumed hash can execute an unintended state change."
+        },
+        {
+          "failureMode": "evm_bridge_credit_accounting",
+          "id": "evm-wormhole-token-bridge-accounting-auditor",
+          "displayName": "EVM Wormhole Token Bridge Accounting Auditor",
+          "guidance": "Map Portal Token Bridge transfers from local lock or burn and publishMessage sequence to remote completeTransfer release or mint. Check source bridgeContracts binding, payload token chain/address, amount, decimals, recipient, relayer fee, payload handoff, wrapped-token metadata sequence, AssetMeta source generation, and replay protection."
+        },
+        {
+          "failureMode": "evm_bridge_message_replay",
+          "id": "evm-wormhole-message-replay-auditor",
+          "displayName": "EVM Wormhole Message Replay Auditor",
+          "guidance": "Trace message uniqueness through emitter address, emitter chain id, sequence, VAA hash, consumed transfer/governance state, and bridge-contract mappings. Check same-chain, fork, clone, stale guardian-set, stale bridge-contract, malformed payload, and partially completed transfer replay."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate every parseAndVerifyVM, verifyVM, verifySignatures, publishMessage, governanceActionIsConsumed, completeTransfer, and bridgeContracts check with the fields it is expected to bind.",
+        "Create separate items for VAA body hash binding, guardian-set index and expiry, quorum threshold, signature ordering/index bounds, governance chain/contract/module/action binding, and replay consumption.",
+        "For Portal Token Bridge paths, map each source-chain lock or burn to destination-chain release or mint, including emitter chain/address, sequence, payload token identity, decimals, recipient, relayer fee, AssetMeta creation, and wrapped-token metadata update rules."
+      ],
+      "auditGuidance": [
+        "Do not treat parseVM as verification. A consumer must either call parseAndVerifyVM or perform equivalent hash, quorum, guardian-set, and signature checks before trusting VM fields.",
+        "Do not treat a valid guardian-signed VAA as sufficient for a consumer-specific action. Check module/action/payload, governance origin, source bridge contract, chain id, recipient, token identity, and replay state before value or authority moves.",
+        "Treat Wormhole's publicly documented guardian-set rotation window as a known exclusion: GitHub issue #1901 and SECURITY_CONTEXT.md already cover old-but-unexpired guardian sets, including EVM Portal Token Bridge governance accepting them for 24 hours. Do not report that behavior alone unless a distinct code path proves impact without relying on old guardian quorum control or adds a novel non-public variant.",
+        "For AssetMeta and wrapped-token findings, prove the source bridge can emit the claimed metadata without relying on arbitrary guardian-signed payloads or a compromised registered bridge. Check whether attestToken rejects already-wrapped assets, whether createWrapped/updateWrapped bind metadata to the emitting chain, and whether live wrappedAsset entries are also marked isWrappedAsset.",
+        "Separate guardian quorum or governance compromise assumptions from in-scope code bugs that accept the wrong VAA, consume replay state incorrectly, or release/mint value for the wrong source message."
+      ]
+    },
+    {
+      "id": "evm-hyperlane-mailbox-ism-transport",
+      "displayName": "EVM Hyperlane Mailbox And ISM Transport",
+      "description": "Audit Hyperlane Mailbox dispatch/process flows, ISM verification, remote router enrollment, validator threshold metadata, hooks, gas payments, and warp-route value conservation.",
+      "failureModes": [
+        "evm_bridge_message_replay",
+        "evm_bridge_credit_accounting",
+        "signature_replay",
+        "supply_balance_integrity",
+        "access_control",
+        "privilege_boundary",
+        "spec_impl_mismatch",
+        "dos_resource"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_bridge_message_replay",
+          "id": "evm-hyperlane-mailbox-process-auditor",
+          "displayName": "EVM Hyperlane Mailbox Process Auditor",
+          "guidance": "Trace Mailbox.dispatch and Mailbox.process from sender, destination domain, recipient, nonce, message id, metadata, ISM selection, and delivered state to the recipient handle call. Check replay, wrong-domain processing, stale mailbox, malformed metadata, default-ISM confusion, and recipient or sender spoofing."
+        },
+        {
+          "failureMode": "access_control",
+          "id": "evm-hyperlane-remote-router-auditor",
+          "displayName": "EVM Hyperlane Remote Router Auditor",
+          "guidance": "Trace remoteRouter enrollment, owner controls, router lookup, onlyMailbox or onlyRemoteRouter gates, and cross-chain recipient handling. Check uninitialized routers, domain collisions, stale enrollment, route replacement, local-domain confusion, and bypasses around router-based authorization."
+        },
+        {
+          "failureMode": "signature_replay",
+          "id": "evm-hyperlane-ism-threshold-auditor",
+          "displayName": "EVM Hyperlane ISM Threshold Auditor",
+          "guidance": "Audit validator, threshold, checkpoint, merkle root, index, message id, origin mailbox, destination domain, and metadata parsing together. Check duplicate validators, unsorted validator sets, threshold underflow, checkpoint replay across domains or mailboxes, and metadata that verifies a different message than the one processed."
+        },
+        {
+          "failureMode": "evm_bridge_credit_accounting",
+          "id": "evm-hyperlane-warp-route-accounting-auditor",
+          "displayName": "EVM Hyperlane Warp Route Accounting Auditor",
+          "guidance": "Trace HypERC20/HypERC721 collateral, synthetic mint/burn, interchain gas payment, hook fee, refund, and recipient handling across dispatch and handle. Check lock/mint and burn/release conservation, decimal mismatch, gas payment isolation, hook side effects, failed delivery recovery, and recipient binding."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate every Mailbox.dispatch, Mailbox.process, recipient handle, ISM.verify, module routing, remoteRouter enrollment, and hook or gas-payment path with its source and destination domain binding.",
+        "Create separate items for default ISM selection, recipient-selected ISM, metadata parsing, delivered-message replay protection, validator threshold/checkpoint validation, and router enrollment lifecycle.",
+        "For warp routes, map every local lock or burn to the remote mint or release, and include gas payment, hook, refund, recipient, and decimal conversion fields in the same item."
+      ],
+      "auditGuidance": [
+        "Do not treat an ISM name, module type, or router mapping as enforcement. Identify the exact message fields and metadata that are hashed, verified, and marked delivered before handle executes.",
+        "Separate owner-controlled enrollment or ISM configuration risks from non-privileged message-processing exploits unless the bounty program accepts privileged configuration impacts.",
+        "Check that hooks, interchain gas payments, and refunds cannot become value-moving side channels or denial-of-service gates for otherwise valid messages."
       ]
     },
     {
@@ -442,6 +737,36 @@
       "auditGuidance": [
         "Follow debt and collateral through time, rounding, stale index, oracle normalization, and partial liquidation branches.",
         "Check whether every path preserves solvency or intentionally assigns loss to a documented reserve."
+      ]
+    },
+    {
+      "id": "evm-emode-risk-configuration",
+      "displayName": "EVM E-Mode And Risk Configuration",
+      "description": "Audit eMode categories, collateral and borrow bitmaps, LTV-zero rules, live risk-parameter toggles, user mode transitions, and L2/API parity.",
+      "failureModes": [
+        "evm_liquidation_solvency",
+        "evm_risk_configuration",
+        "spec_impl_mismatch",
+        "evm_upgradeability_storage"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "evm_risk_configuration",
+          "id": "evm-emode-risk-configuration-auditor",
+          "displayName": "EVM E-Mode Risk Configuration Auditor",
+          "guidance": "Trace effective LTV, liquidation threshold, liquidation bonus, borrowability, and collateral eligibility through eMode category selection, collateralBitmap, borrowableBitmap, ltvzeroBitmap, isolated flags, user collateral toggles, and admin live-parameter changes. Check whether Pool, L2Pool, configurator, config-engine, data-provider, and storage-layout views remain behaviorally aligned."
+        }
+      ],
+      "enumerationGuidance": [
+        "Create separate items for mode entry, mode exit, collateral enable and disable, borrow after mode changes, withdraw or transfer with LTV-zero collateral, liquidation after risk toggles, category creation, category update, bitmap changes, and L2 calldata paths.",
+        "For each item, record which assets contribute effective LTV, liquidation threshold, and borrowability before and after the transition.",
+        "When governance or risk-admin input is required, separate privileged misconfiguration from non-privileged user paths that can exploit stale, inconsistent, or incorrectly applied risk state."
+      ],
+      "auditGuidance": [
+        "Check effective LTV as a contextual property, not just a reserve property: eMode isolation, ltvzero bits, collateral bits, and user category must be evaluated together.",
+        "Verify that assets with zero effective LTV cannot create borrowing power while still preserving documented liquidation-threshold and unwind behavior.",
+        "Compare interface, implementation, config-engine, L2 encoding, event, storage-packing, and data-provider behavior for version skew that can make production risk settings diverge from intended settings.",
+        "Tie any finding to an in-scope impact such as theft or freezing of principal, accrued yield, insolvency, or interest-rate manipulation; do not treat admin-only parameter choices as bounty-ready without a non-privileged trigger or a program rule accepting that impact."
       ]
     },
     {

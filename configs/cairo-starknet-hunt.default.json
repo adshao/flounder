@@ -1,0 +1,220 @@
+{
+  "targetName": "cairo-starknet-hunt",
+  "sourcePaths": [],
+  "corpusPaths": [],
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "thinkingLevel": "xhigh",
+  "rounds": 3,
+  "explorationStrategy": "hybrid",
+  "maxNewItemsPerRound": 28,
+  "trials": 5,
+  "maxWorkers": 4,
+  "maxAuditItems": 140,
+  "highImpactVerification": true,
+  "highImpactMaxFindings": 48,
+  "scopeMode": "augment",
+  "baselineExplorationShare": 0.25,
+  "maxTokens": 9000,
+  "contextCharBudget": 220000,
+  "contextRetrieval": "source-index+qmd",
+  "qmdCommand": "qmd",
+  "qmdLimit": 10,
+  "qmdMinScore": 0.25,
+  "qmdTimeoutMs": 60000,
+  "qmdCollections": [],
+  "portfolioEnumeration": true,
+  "portfolioMaxItems": 28,
+  "projectLearning": true,
+  "dynamicLensDiscovery": true,
+  "localChecklistSeeders": false,
+  "reproductionMode": "off",
+  "reproductionMaxCommands": 3,
+  "reproductionCommandTimeoutMs": 180000,
+  "dryRun": false,
+  "projectContext": {
+    "summary": "Default authorized profile for Cairo and Starknet audits, including Starknet OS, Cairo contracts, StarkGate-style L1/L2 bridge components, and class-hash or state-transition code. Add the target's exact bounty scope, protocol specs, release tag, and safe local reproduction notes before live runs.",
+    "criticalAssets": [
+      "Starknet state transition correctness",
+      "state root, class root, and OS output commitment integrity",
+      "L1 to L2 and L2 to L1 bridge message origin, payload, and replay integrity",
+      "token mapping, mint, burn, lock, unlock, quota, and locked-amount accounting",
+      "class hash, compiled class hash, deploy, and replace-class identity binding",
+      "block context, transaction info, nonce, chain id, fee token, and resource-bound binding",
+      "role, governance, security agent, app governor, upgrade, and replaceability authority",
+      "syscall request, response, revert, gas, and execution-context integrity"
+    ],
+    "attackerCapabilities": [
+      "A contract caller can choose calldata, token addresses, recipients, amounts, callbacks, and timing around public Cairo entrypoints.",
+      "A malicious L1 message sender inside the local harness can try to spoof from_address, payload order, token mapping, recipient, or amount fields.",
+      "A malicious contract can trigger syscalls, callbacks, reverts, resource-bound edges, and nonstandard token behavior exposed by the target code.",
+      "A semi-privileged actor may exercise role, governance, security-agent, upgrade, or replaceability paths when the target threat model includes those roles."
+    ],
+    "trustBoundaries": [
+      "Cairo entrypoint or L1 handler to role, caller, from_address, lifecycle, and storage mutation checks",
+      "L1 bridge message payload to token mapping, amount, recipient, callback, and mint or burn side effects",
+      "Starknet OS transaction execution to state dict updates, squashing, aliases, revert log, state root, and output commitment",
+      "syscall request parsing to caller execution context, gas accounting, response layout, and revert semantics",
+      "declared class hash or compiled class facts to deployment, replacement, token representation, and state transition use",
+      "resource bounds, fee token, withdrawal quota, locked amount, total supply, and balance checks to final value conservation"
+    ],
+    "securityInvariants": [
+      "Every L1/L2 bridge action must bind the intended bridge address, sender, token pair, amount, recipient, payload order, replay assumptions, and callback behavior before value movement.",
+      "Every Starknet OS output must commit to the same finalized state roots, class roots, block header fields, carried messages, public keys hash, and serialized output that execution produced.",
+      "Every deploy or replace-class path must bind class hash, compiled class facts, constructor calldata, salt, mapping uniqueness, governance authorization, and representation changes.",
+      "Every syscall implementation must preserve request and response layout, execution context, gas/resource accounting, failure flags, and revert behavior.",
+      "Every quota, locked amount, fee, mint, burn, and token balance path must conserve value under boundary, day rollover, callback, revert, and legacy-upgrade states."
+    ],
+    "focusAreas": [
+      "Starknet OS block execution, state update, class update, aliases, revert log, and output serialization",
+      "syscall implementations for call_contract, library_call, deploy, replace_class, storage_read, storage_write, get_block_hash, get_execution_info, and send_message_to_l1",
+      "Cairo contract constructors, embedded ABI implementations, external entrypoints, L1 handlers, role checks, upgrade or replaceability paths",
+      "StarkGate-style token bridge deposits, withdrawals, token deployment, token mapping, withdrawal limits, locked-amount monitoring, and callback receivers",
+      "class hash, compiled class hash, declared code identity, deployment salt, constructor calldata, and governance-controlled configuration",
+      "gas, fee, resource bounds, builtin pointer, range-check segregation, quota, mint, burn, and total-supply accounting"
+    ],
+    "outOfScope": [
+      "public-network testing",
+      "mainnet or public testnet message sending",
+      "broadcasting exploit transactions",
+      "sequencer liveness or operator behavior when the bounty excludes sequencer bugs",
+      "malicious privileged operator behavior unless explicitly included by the bounty scope"
+    ],
+    "scenarioGuidance": [
+      "Treat deterministic profiles, source indexes, provenance facts, tool outputs, and local seeders as planning evidence only.",
+      "Do not claim a Starknet OS or bridge bug from a naming pattern. Require source confirmation and a local harness or executable PoC before submission readiness.",
+      "For blind proof runs, keep local checklist seeders disabled so the model must enumerate the relevant Cairo/Starknet item before any audit trial can produce a finding."
+    ]
+  },
+  "lensPacks": [
+    {
+      "id": "cairo-starknet-entrypoint-authority",
+      "displayName": "Cairo Entrypoint Authority And Lifecycle",
+      "description": "Audit Cairo constructors, external entrypoints, embedded ABI implementations, L1 handlers, roles, governance, security agents, and upgrade or replaceability lifecycle boundaries.",
+      "failureModes": [
+        "access_control",
+        "privilege_boundary",
+        "cairo_entrypoint_authority",
+        "cairo_upgrade_lifecycle"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "cairo_entrypoint_authority",
+          "id": "cairo-entrypoint-authority-auditor",
+          "displayName": "Cairo Entrypoint Authority Auditor",
+          "guidance": "Trace each constructor, ABI function, L1 handler, role check, and internal helper from caller or from_address to the exact storage mutation, syscall, event, mint, burn, or message send. Check missing role checks, wrong L1 sender binding, lifecycle bypass, and helper reuse with weaker authority."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate entrypoints and L1 handlers separately from internal helpers when attacker control differs.",
+        "Create separate items for role checks, from_address checks, lifecycle or replaceability gates, and state mutations that move value or affect mappings."
+      ],
+      "auditGuidance": [
+        "Do not accept a role or helper name as proof. Identify the exact condition enforced before mutation.",
+        "Separate malicious governance assumptions from code paths where a less privileged caller gains unintended authority."
+      ]
+    },
+    {
+      "id": "cairo-starknet-l1-l2-bridge-accounting",
+      "displayName": "Starknet L1/L2 Bridge Message And Accounting",
+      "description": "Audit L1/L2 bridge deposits, withdrawals, message payloads, token mappings, locked values, quotas, callbacks, minting, and burning.",
+      "failureModes": [
+        "cairo_l1_l2_message_binding",
+        "supply_balance_integrity",
+        "race_condition",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "cairo_l1_l2_message_binding",
+          "id": "cairo-l1-l2-message-binding-auditor",
+          "displayName": "Cairo L1/L2 Message Binding Auditor",
+          "guidance": "Trace bridge payload construction and handling across from_address, L1 bridge address, token pair mapping, recipient, amount, callback receiver, events, mint, burn, locked amount, and withdrawal quota. Check payload order confusion, stale mappings, callback side effects, replay assumptions, quota bypass, and value conservation under revert or legacy states."
+        }
+      ],
+      "enumerationGuidance": [
+        "Create items that pair each L1 handler or message send with the token mapping, amount, recipient, and accounting side effects it must preserve.",
+        "Separate deposit, withdraw, token deployment, callback receiver, locked amount monitoring, and withdrawal limit items."
+      ],
+      "auditGuidance": [
+        "A matching event is not accounting proof. Verify the storage, mint, burn, and message effects.",
+        "Check day rollover, zero values, legacy upgraded bridge state, callback panics, and token mapping replacement boundaries."
+      ]
+    },
+    {
+      "id": "cairo-starknet-os-state-transition",
+      "displayName": "Starknet OS State Transition And Output Commitment",
+      "description": "Audit Starknet OS execution, state dictionaries, squashing, aliases, class updates, block context, transaction info, carried messages, state roots, and output serialization.",
+      "failureModes": [
+        "cairo_state_transition_integrity",
+        "cairo_os_output_commitment",
+        "soundness_gap",
+        "consensus_divergence",
+        "spec_impl_mismatch"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "cairo_state_transition_integrity",
+          "id": "cairo-state-transition-integrity-auditor",
+          "displayName": "Cairo State Transition Integrity Auditor",
+          "guidance": "Trace state dict updates, class dict updates, squashing, alias allocation, revert logs, block context, transaction info, state roots, and OS output together. Check omitted updates, wrong previous/new value binding, alias-state collisions, output reordering, missing message commitment, and metadata mismatches between execution and serialized output."
+        },
+        {
+          "failureMode": "cairo_os_output_commitment",
+          "id": "cairo-os-output-commitment-auditor",
+          "displayName": "Cairo OS Output Commitment Auditor",
+          "guidance": "Trace finalized roots, carried messages, block header fields, public keys hash, Starknet OS config hash, and serialized output segment. Check that every value affecting consensus or bridge consumption is included once, in the expected order, and tied to the executed block context."
+        }
+      ],
+      "enumerationGuidance": [
+        "Create separate items for state updates, class updates, aliases, block context, transaction info, carried messages, final roots, and output serialization.",
+        "Prefer source-backed items where the same value crosses a dict, commitment, and output boundary."
+      ],
+      "auditGuidance": [
+        "Do not assume hints are trusted unless the loaded design material explicitly places them inside the trusted boundary.",
+        "Check that local assertions bind the exact values later committed or emitted."
+      ]
+    },
+    {
+      "id": "cairo-starknet-syscall-classhash-resource",
+      "displayName": "Starknet Syscall, Class Hash, And Resource Accounting",
+      "description": "Audit syscall request and response layout, execution context, gas and resource accounting, class hash deploy/replace flows, compiled class facts, range checks, builtin pointers, fees, and quotas.",
+      "failureModes": [
+        "cairo_syscall_context_binding",
+        "cairo_class_hash_binding",
+        "cairo_resource_accounting",
+        "integer_overflow",
+        "dos_resource",
+        "cryptographic_misuse"
+      ],
+      "auditorAgents": [
+        {
+          "failureMode": "cairo_syscall_context_binding",
+          "id": "cairo-syscall-context-binding-auditor",
+          "displayName": "Cairo Syscall Context Binding Auditor",
+          "guidance": "Trace syscall request parsing, execution context, class hash, selector, caller address, gas reduction, response header, failure flag, revert behavior, and response pointer movement. Check context substitution, malformed request lengths, inconsistent gas, incorrect failure responses, and response layout divergence."
+        },
+        {
+          "failureMode": "cairo_class_hash_binding",
+          "id": "cairo-class-hash-binding-auditor",
+          "displayName": "Cairo Class Hash Binding Auditor",
+          "guidance": "Trace class hashes, compiled class facts, deploy salt, constructor calldata, replace-class requests, declared code validation, and token or contract mappings. Check missing nonzero checks, stale class facts, mapping aliasing, wrong salt uniqueness, and governance bypass."
+        },
+        {
+          "failureMode": "cairo_resource_accounting",
+          "id": "cairo-resource-accounting-auditor",
+          "displayName": "Cairo Resource Accounting Auditor",
+          "guidance": "Trace gas, resource bounds, fees, range-check and builtin pointer movement, withdrawal quota, locked amount, total supply, mint, burn, and balance checks. Check underflow, overflow, day-boundary resets, fee exclusion rules, revert asymmetry, and resource paths that diverge from value-safety assumptions."
+        }
+      ],
+      "enumerationGuidance": [
+        "Create separate items for syscall request layout, response layout, gas/resource reduction, failure response, class hash deployment, replace-class, compiled class facts, range-check segregation, and quota or fee accounting.",
+        "Prioritize boundaries where an attacker-controlled request field becomes class hash, storage key, selector, amount, gas, or response data."
+      ],
+      "auditGuidance": [
+        "Compare gas/resource deductions to the exact request structure and response path.",
+        "For class hashes, verify both code identity and authorization before deployment, replacement, or asset representation changes."
+      ]
+    }
+  ]
+}

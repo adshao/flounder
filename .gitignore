@@ -1,6 +1,8 @@
 node_modules/
 dist/
 runs/
+out/
+cache/
 .npm-cache/
 .DS_Store
 *.log

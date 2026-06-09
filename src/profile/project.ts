@@ -113,6 +113,8 @@ function detectManifest(path: string, manifests: Set<string>, packageManagers: S
     "yarn.lock": ["Yarn lockfile", "yarn"],
     "cargo.toml": ["Rust package manifest", "cargo"],
     "cargo.lock": ["Cargo lockfile", "cargo"],
+    "scarb.toml": ["Scarb package manifest", "scarb"],
+    "scarb.lock": ["Scarb lockfile", "scarb"],
     "go.mod": ["Go module manifest", "go"],
     "go.sum": ["Go checksum file", "go"],
     "pyproject.toml": ["Python project manifest", "pip/poetry/uv"],
@@ -159,6 +161,7 @@ function detectFrameworks(path: string, content: string, out: Set<string>): void
   if (/(aspnetcore|microsoft\.aspnetcore)/.test(text)) out.add("ASP.NET Core");
   if (/(tokio|async-std)/.test(text)) out.add("Rust async runtime");
   if (/(halo2|constraintsystem|assign_advice|copy_advice)/.test(text)) out.add("Halo2/constraint system");
+  if (/(#\[starknet::contract\]|#\[l1_handler\]|starknet::syscalls|scarb\.toml|func\s+[a-z_][a-z0-9_]*\{|%builtins)/i.test(text)) out.add("Cairo/Starknet");
   if (/(solidity|contract\s+[a-z_][a-z0-9_]*)/i.test(text)) out.add("EVM smart contract");
   if (/(foundry\.toml|forge-std|forge test|vm\.)/.test(text)) out.add("Foundry");
   if (/(hardhat\.config|@nomicfoundation\/hardhat|hardhat-deploy)/.test(text)) out.add("Hardhat");
@@ -177,6 +180,7 @@ function detectSecurityDomains(path: string, content: string, out: Set<string>):
   if (/(oracle|latestrounddata|twap|pricefeed|sequencer|flashloan|mev|sandwich|slippage)/.test(text)) out.add("oracle and market manipulation risk");
   if (/(permit|eip712|domain_separator|nonces?|ecrecover|ecdsa\.recover)/.test(text)) out.add("EVM signature and permit replay security");
   if (/(bridge|cross[- ]?chain|chainid|lzendpoint|wormhole|ccip|message root|merkle proof)/.test(text)) out.add("cross-chain message and bridge security");
+  if (/(starknet|cairo|l1_handler|send_message_to_l1|class_hash|contract_state_changes|os_output|state_update)/.test(text)) out.add("Starknet state transition and bridge security");
   if (/(jwt|oauth|session|cookie|password|login|auth)/.test(text)) out.add("authentication and session security");
   if (/(sql|query|postgres|mysql|sqlite|mongodb)/.test(text)) out.add("data access and injection risk");
   if (/(fetch|httpclient|requests\.|urllib|webhook|callback url|proxy)/.test(text)) out.add("server-side request and proxy safety");
@@ -195,6 +199,9 @@ function detectEntrypoints(path: string, content: string, out: Set<string>): voi
     out.add(path);
   }
   if (path.endsWith(".sol") && /\bfunction\s+[A-Za-z_][A-Za-z0-9_]*\s*\([^)]*\)\s*[^;{]*\b(public|external)\b/.test(content)) {
+    out.add(path);
+  }
+  if (path.endsWith(".cairo") && /(#\[starknet::contract\]|#\[l1_handler\]|\bpub\s+mod\s+|\bfn\s+[A-Za-z_][A-Za-z0-9_]*\s*\()/i.test(content)) {
     out.add(path);
   }
   if (/(server|router|controller|handler|contract|circuit|chip|gadget)/i.test(path)) {

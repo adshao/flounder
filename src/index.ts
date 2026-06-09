@@ -25,6 +25,8 @@ export * from "./profile/project.js";
 export * from "./provenance/halo2.js";
 export * from "./provenance/rust.js";
 export * from "./provenance/solidity.js";
+export * from "./provenance/cairo.js";
+export * from "./provenance/go.js";
 export * from "./reports/coverage.js";
 export * from "./reports/disclosure.js";
 export * from "./reproduce/planner.js";

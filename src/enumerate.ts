@@ -2,6 +2,7 @@ import type { AuditorConfig } from "./config.js";
 import { effectiveFailureModes } from "./config.js";
 import {
   buildBaselineEnumerationPrompt,
+  buildCairoStarknetPortfolioEnumerationPrompt,
   buildEnumerationPrompt,
   buildEvmPortfolioEnumerationPrompt,
   buildPortfolioEnumerationPrompt,
@@ -279,6 +280,7 @@ function portfolioPromptForDomain(input: {
   };
   if (input.domain === "solidity") return buildEvmPortfolioEnumerationPrompt(common);
   if (input.domain === "solana-rust") return buildSolanaPortfolioEnumerationPrompt(common);
+  if (input.domain === "cairo-starknet") return buildCairoStarknetPortfolioEnumerationPrompt(common);
   return buildPortfolioEnumerationPrompt(common);
 }
 
@@ -303,6 +305,8 @@ function reservedForLaterRounds(cfg: Pick<AuditorConfig, "maxAuditItems" | "roun
 function portfolioName(domain: string): string {
   if (domain === "solidity") return "solidity/evm provenance evidence";
   if (domain === "solana-rust") return "solana/rust provenance evidence";
+  if (domain === "cairo-starknet") return "cairo/starknet provenance evidence";
+  if (domain === "go-wormhole") return "wormhole guardian/go provenance evidence";
   return "assignment/dataflow evidence";
 }
 

@@ -3,6 +3,7 @@ import test from "node:test";
 import { defaultConfig } from "../dist/config.js";
 import { enumerateAuditItems } from "../dist/enumerate.js";
 import { SourceIndex } from "../dist/index/source-index.js";
+import { extractCairoStarknetProvenance } from "../dist/provenance/cairo.js";
 import { extractHalo2Provenance } from "../dist/provenance/halo2.js";
 import { extractSolidityProvenance } from "../dist/provenance/solidity.js";
 
@@ -358,6 +359,77 @@ test("Solidity provenance uses EVM-specific portfolio enumeration", async () => 
 
   assert.deepEqual(calls, ["enumerate", "enumerate_solidity_portfolio"]);
   assert.deepEqual(items.map((item) => item.id), ["evm-portfolio-item"]);
+  assert.equal(items[0].enumerationSource, "portfolio");
+});
+
+test("Cairo provenance uses Starknet-specific portfolio enumeration", async () => {
+  const cfg = defaultConfig();
+  cfg.targetName = "cairo-portfolio-test";
+  cfg.contextCharBudget = 14_000;
+  cfg.maxAuditItems = 1;
+  cfg.portfolioMaxItems = 4;
+
+  const source = [
+    {
+      path: "packages/bridge/src/token_bridge.cairo",
+      kind: "source",
+      content: [
+        "#[starknet::contract]",
+        "pub mod TokenBridge {",
+        "    use starknet::syscalls::send_message_to_l1_syscall;",
+        "    #[l1_handler]",
+        "    fn handle_deposit(ref self: ContractState, from_address: felt252, l1_token: EthAddress, amount: u256) {",
+        "        self.only_from_l1_bridge(:from_address);",
+        "        let l2_token = self.l1_l2_token_map.read(l1_token);",
+        "        self.l1_locked_amount.write(l1_token, LockedAmount { monitoring_enabled: true, amount });",
+        "    }",
+        "    fn withdraw(ref self: ContractState, l1_recipient: EthAddress, amount: u256) {",
+        "        let result = send_message_to_l1_syscall(to_address: self.l1_bridge.read().into(), payload: message_payload.span());",
+        "        assert(result.is_ok(), Errors::MESSAGE_SEND_FAILED);",
+        "    }",
+        "}",
+      ].join("\n"),
+    },
+  ];
+  const graph = extractCairoStarknetProvenance(source);
+  const calls = [];
+  const logger = {
+    async artifact() {
+      return "artifact";
+    },
+    async event() {},
+  };
+  const llm = {
+    async complete(input) {
+      calls.push(input.tag);
+      if (input.tag === "enumerate") {
+        return JSON.stringify([raw("broad-cairo", "packages/bridge/src/token_bridge.cairo:5")]);
+      }
+      if (input.tag === "enumerate_cairo-starknet_portfolio") {
+        assert.match(input.user, /cairo\/starknet provenance evidence/i);
+        assert.match(input.user, /L1\/L2 bridge flows/);
+        assert.match(input.user, /syscall implementations/);
+        assert.doesNotMatch(input.user, /Solana\/Rust portfolio/i);
+        return JSON.stringify([raw("cairo-portfolio-item", "packages/bridge/src/token_bridge.cairo:11")]);
+      }
+      return "[]";
+    },
+  };
+
+  const items = await enumerateAuditItems({
+    cfg,
+    corpus: [],
+    source,
+    sourceIndex: new SourceIndex(source),
+    proofObligations: graph.obligations,
+    provenanceGraphs: [graph],
+    llm,
+    logger,
+    round: 1,
+  });
+
+  assert.deepEqual(calls, ["enumerate", "enumerate_cairo-starknet_portfolio"]);
+  assert.deepEqual(items.map((item) => item.id), ["cairo-portfolio-item"]);
   assert.equal(items[0].enumerationSource, "portfolio");
 });
 

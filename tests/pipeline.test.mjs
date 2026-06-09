@@ -36,6 +36,134 @@ test("checklist seeders enumerate scalar-mul advice dataflow questions from sour
   assert.match(bindingItems[0].securityProperty, /enforced by the downstream gates/);
 });
 
+test("checklist seeders enumerate Solidity name registry resolution questions", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "fsa-ens-seeder-"));
+  const file = path.join(dir, "PermissionedRegistry.sol");
+  await writeFile(file, `// SPDX-License-Identifier: MIT
+pragma solidity ^0.8.20;
+
+contract PermissionedRegistry {
+  mapping(uint256 tokenId => address resolver) resolvers;
+
+  function setResolver(uint256 tokenId, address resolver, uint64 expires) external {
+    resolvers[tokenId] = resolver;
+  }
+
+  function renew(uint256 tokenId, uint64 expiry) external {}
+}
+`);
+
+  const source = await loadSource([dir]);
+  const items = runSeeders(source);
+  const ensItems = items.filter((item) => item.seeder === "solidity_name_registry_resolution");
+  assert.equal(ensItems.length, 2);
+  assert.ok(ensItems.every((item) => item.failureMode === "evm_name_registry_resolution"));
+  assert.ok(ensItems.every((item) => item.location.includes("PermissionedRegistry.sol")));
+  assert.match(ensItems[0].securityProperty, /resolver/);
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("checklist seeders enumerate Wormhole VAA and token bridge questions", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "fsa-wormhole-seeder-"));
+  const file = path.join(dir, "Bridge.sol");
+  await writeFile(file, `// SPDX-License-Identifier: Apache-2.0
+pragma solidity ^0.8.20;
+
+interface IWormhole {
+  struct VM {
+    bytes32 hash;
+    uint32 guardianSetIndex;
+    uint16 emitterChainId;
+    bytes32 emitterAddress;
+    uint64 sequence;
+  }
+  function parseAndVerifyVM(bytes memory encodedVM) external view returns (VM memory vm, bool valid, string memory reason);
+  function getCurrentGuardianSetIndex() external view returns (uint32);
+  function governanceChainId() external view returns (uint16);
+  function governanceContract() external view returns (bytes32);
+  function publishMessage(uint32 nonce, bytes memory payload, uint8 consistencyLevel) external payable returns (uint64);
+}
+
+contract Bridge {
+  IWormhole wormhole;
+  mapping(uint16 => bytes32) bridgeContracts;
+  mapping(bytes32 => bool) completedTransfers;
+
+  function completeTransfer(bytes memory encodedVM) external {
+    (IWormhole.VM memory vm, bool valid,) = wormhole.parseAndVerifyVM(encodedVM);
+    require(valid, "invalid VAA");
+    require(bridgeContracts[vm.emitterChainId] == vm.emitterAddress, "bad bridge");
+    require(!completedTransfers[vm.hash], "consumed");
+    completedTransfers[vm.hash] = true;
+    emit TransferRedeemed(vm.emitterChainId, vm.emitterAddress, vm.sequence);
+  }
+
+  function submitGovernance(bytes memory encodedVM) external {
+    (IWormhole.VM memory vm, bool valid,) = wormhole.parseAndVerifyVM(encodedVM);
+    require(valid, "invalid governance VAA");
+    require(vm.guardianSetIndex == wormhole.getCurrentGuardianSetIndex(), "stale guardian set");
+    require(vm.emitterChainId == wormhole.governanceChainId(), "bad chain");
+    require(vm.emitterAddress == wormhole.governanceContract(), "bad emitter");
+    require(!governanceActionIsConsumed(vm.hash), "consumed");
+    consumeGovernanceAction(vm.hash);
+  }
+
+  function publish(uint32 nonce, bytes memory payload, uint8 consistencyLevel) external payable {
+    wormhole.publishMessage{value: msg.value}(nonce, payload, consistencyLevel);
+  }
+}
+`);
+
+  const source = await loadSource([dir]);
+  const items = runSeeders(source);
+  assert.ok(items.some((item) => item.seeder === "solidity_wormhole_vaa_verification"));
+  assert.ok(items.some((item) => item.seeder === "solidity_wormhole_governance_binding"));
+  assert.ok(items.some((item) => item.seeder === "solidity_wormhole_token_bridge_accounting"));
+  assert.ok(items.some((item) => item.failureMode === "evm_wormhole_vaa_verification"));
+  assert.ok(items.some((item) => item.failureMode === "evm_wormhole_governance_binding"));
+  assert.ok(items.some((item) => item.seeder === "solidity_wormhole_token_bridge_accounting" && /AssetMeta/.test(item.why)));
+  assert.ok(items.some((item) => item.seeder === "solidity_wormhole_token_bridge_accounting" && /wrapped-token self-attestation/.test(item.why)));
+  assert.ok(items.every((item) => !path.isAbsolute(item.location)));
+  await rm(dir, { recursive: true, force: true });
+});
+
+test("checklist seeders enumerate ZK proof orchestration binding questions", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "fsa-zk-proof-seeder-"));
+  await mkdir(path.join(dir, "crates", "libzkp", "src", "tasks"), { recursive: true });
+  await writeFile(path.join(dir, "crates", "libzkp", "src", "tasks", "chunk.rs"), `
+pub struct ChunkTask {
+    pub block_hashes: Vec<B256>,
+}
+
+impl TryFromWithInterpreter<ChunkTask> for ChunkProvingTask {
+    fn try_from_with_interpret(value: ChunkTask, interpreter: impl ChunkInterpreter) -> Result<Self> {
+        let mut block_witnesses = Vec::new();
+        for block_hash in value.block_hashes {
+            let witness = interpreter.try_fetch_block_witness(block_hash, block_witnesses.last())?;
+            block_witnesses.push(witness);
+        }
+        Ok(Self { block_witnesses })
+    }
+}
+
+impl ChunkProvingTask {
+    pub fn into_proving_task_with_precheck(self) -> Result<(ProvingTask, ChunkInfo, B256)> {
+        let (witness, metadata, pi_hash) = self.precheck()?;
+        let serialized_witness = encode_task_to_witness(&witness)?;
+        Ok((ProvingTask { serialized_witness, aggregated_proofs: vec![] }, metadata, pi_hash))
+    }
+}
+`);
+
+  const source = await loadSource([dir]);
+  const items = runSeeders(source);
+  assert.ok(items.some((item) => item.seeder === "zk_proof_statement_binding"));
+  assert.ok(items.some((item) => item.seeder === "zk_proof_aggregation_binding"));
+  assert.ok(items.some((item) => item.failureMode === "proof_statement_binding"));
+  assert.ok(items.every((item) => !path.isAbsolute(item.location)));
+  await rm(dir, { recursive: true, force: true });
+});
+
 test("source loader includes cross-language code and manifests while skipping run artifacts", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "fsa-loader-"));
   await mkdir(path.join(dir, "src"), { recursive: true });
@@ -58,6 +186,23 @@ test("source loader includes cross-language code and manifests while skipping ru
   assert.equal(loaded.some((entry) => entry.includes("leaked.ts")), false);
   assert.ok(loaded.every((entry) => !path.isAbsolute(entry)));
   assert.ok(loaded.every((entry) => !entry.includes(dir)));
+});
+
+test("source loader keeps external source-root context for duplicate basenames", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "fsa-loader-roots-"));
+  const bridge = path.join(dir, "bridge");
+  const strk = path.join(dir, "strk");
+  await mkdir(path.join(bridge, "src"), { recursive: true });
+  await mkdir(path.join(strk, "src"), { recursive: true });
+  await writeFile(path.join(bridge, "src", "lib.cairo"), "#[starknet::contract]\nmod Bridge {}\n");
+  await writeFile(path.join(strk, "src", "lib.cairo"), "#[starknet::contract]\nmod Strk {}\n");
+
+  const source = await loadSource([bridge, strk]);
+  const loaded = source.map((doc) => doc.path).sort();
+  assert.deepEqual(loaded, ["external/bridge/src/lib.cairo", "external/strk/src/lib.cairo"]);
+  assert.ok(loaded.every((entry) => !path.isAbsolute(entry)));
+  assert.ok(loaded.every((entry) => !entry.includes(dir)));
+  await rm(dir, { recursive: true, force: true });
 });
 
 test("dry-run pipeline writes checklist and summary without model calls", async () => {

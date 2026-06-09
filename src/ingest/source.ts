@@ -153,14 +153,59 @@ export function assemble(docs: Doc[], charBudget: number, withLineNumbers = fals
 async function walk(paths: string[], exts: Set<string>, kind: Doc["kind"]): Promise<Doc[]> {
   const docs: Doc[] = [];
   const cwd = process.cwd();
-  for (const input of paths) {
-    const full = path.resolve(input);
-    await walkOne(full, exts, kind, docs, cwd);
+  for (const root of await buildWalkRoots(paths, cwd)) {
+    await walkOne(root.full, exts, kind, docs, root);
   }
   return docs;
 }
 
-async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], out: Doc[], cwd: string): Promise<void> {
+interface WalkRoot {
+  full: string;
+  cwd: string;
+  isDirectory: boolean;
+  externalLabel?: string;
+}
+
+async function buildWalkRoots(inputs: string[], cwd: string): Promise<WalkRoot[]> {
+  const roots = await Promise.all(
+    inputs.map(async (input) => {
+      const full = path.resolve(input);
+      const isDirectory = await isDirectoryPath(full);
+      const external = isExternalToCwd(full, cwd);
+      return {
+        full,
+        cwd,
+        isDirectory,
+        ...(external ? { externalLabel: "" } : {}),
+      };
+    }),
+  );
+
+  const externalBases = roots
+    .filter((root) => root.externalLabel !== undefined)
+    .map((root) => sanitizedPathSegment(path.basename(root.full) || "source"));
+  const duplicateBases = new Set(externalBases.filter((base, idx) => externalBases.indexOf(base) !== idx));
+  const usedLabels = new Set<string>();
+
+  return roots.map((root) => {
+    if (root.externalLabel === undefined) return root;
+    const base = sanitizedPathSegment(path.basename(root.full) || "source");
+    const parent = sanitizedPathSegment(path.basename(path.dirname(root.full)) || "external");
+    const preferred = duplicateBases.has(base) ? `${parent}-${base}` : base;
+    const label = uniqueExternalLabel(preferred, usedLabels);
+    return { ...root, externalLabel: label };
+  });
+}
+
+async function isDirectoryPath(fullPath: string): Promise<boolean> {
+  try {
+    return (await stat(fullPath)).isDirectory();
+  } catch {
+    return false;
+  }
+}
+
+async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], out: Doc[], root: WalkRoot): Promise<void> {
   let info;
   try {
     info = await stat(fullPath);
@@ -172,7 +217,7 @@ async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], o
     const entries = await readdir(fullPath, { withFileTypes: true });
     for (const entry of entries) {
       if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
-      await walkOne(path.join(fullPath, entry.name), exts, kind, out, cwd);
+      await walkOne(path.join(fullPath, entry.name), exts, kind, out, root);
     }
     return;
   }
@@ -185,7 +230,42 @@ async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], o
 
   const content = await readDoc(fullPath, ext);
   if (content.trim().length === 0) return;
-  out.push({ path: publicPath(fullPath, cwd), content, kind });
+  out.push({ path: publicSourcePath(fullPath, root), content, kind });
+}
+
+function publicSourcePath(fullPath: string, root: WalkRoot): string {
+  if (root.externalLabel === undefined) return publicPath(fullPath, root.cwd);
+  if (!root.isDirectory) return toPosix(path.posix.join("external", root.externalLabel));
+
+  const relative = path.relative(root.full, fullPath);
+  if (relative === "" || relative.startsWith("..") || path.isAbsolute(relative)) {
+    return toPosix(path.posix.join("external", root.externalLabel));
+  }
+  return toPosix(path.posix.join("external", root.externalLabel, ...relative.split(path.sep)));
+}
+
+function isExternalToCwd(fullPath: string, cwd: string): boolean {
+  const relative = path.relative(path.resolve(cwd), path.normalize(fullPath));
+  return relative.startsWith("..") || path.isAbsolute(relative);
+}
+
+function uniqueExternalLabel(preferred: string, used: Set<string>): string {
+  let candidate = preferred || "source";
+  let idx = 2;
+  while (used.has(candidate)) {
+    candidate = `${preferred || "source"}-${idx}`;
+    idx += 1;
+  }
+  used.add(candidate);
+  return candidate;
+}
+
+function sanitizedPathSegment(input: string): string {
+  return input.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 80) || "source";
+}
+
+function toPosix(input: string): string {
+  return input.split(path.sep).join("/");
 }
 
 async function readDoc(fullPath: string, ext: string): Promise<string> {

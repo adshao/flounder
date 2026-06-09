@@ -10,6 +10,7 @@
 - Keep the architecture ready for future coding-agent use cases. Separate ingestion, source indexing, checklist enumeration, audit workers, verification, reporting, and security policy guardrails.
 - Prefer typed interfaces, schema validation, deterministic tests, and small extension points over ad hoc agent logic.
 - Treat deterministic project profiles, source indexes, checklist seeders, and lens packs as planning aids only. They may route attention, but they must not produce vulnerability findings.
+- When new learning materials appear during a specialized audit, study the target domain first so the audit has the required protocol, cryptography, proof-system, financial, or application-specific expertise before running or finalizing the audit.
 - In live audits, prefer a project reconnaissance stage that lets the model propose dynamic lens packs from the target's assets, trust boundaries, invariants, and attacker model before checklist enumeration.
 - Treat `rounds` and `trials` as different mechanisms. Rounds must generate novel checklist coverage from prior observations; trials independently audit one item for stochastic agreement.
 - Later exploration rounds must use duplicate filtering and coverage deltas. Do not call repeated single-pass audits "multi-round" unless they add new source-grounded audit items.
@@ -20,6 +21,7 @@
 
 - Audit only code that is authorized by the owner or explicitly in public bug-bounty scope.
 - Verification must run locally or in a sandbox. Use unit tests, fixtures, local devnets, forked nodes, or isolated harnesses.
+- After confirming that a bug exists in a mainnet deployment, perform a final known-issue check before treating it as submission-ready. Check existing audit reports, public disclosures, current GitHub development branches, pull requests, issues, and relevant security advisories to confirm the bug is not already known, fixed, or publicly documented.
 - Never broadcast transactions, exploit public networks, or target systems outside the authorized scope.
 - Treat LLM output as untrusted input. Validate structured output, sanitize paths, and never execute generated commands without policy checks.
 - Treat model-generated lens packs as untrusted planning artifacts. Normalize, bound, log, and review them before using them as audit guidance.

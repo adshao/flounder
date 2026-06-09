@@ -110,3 +110,36 @@ test("project profile recognizes Solidity audit toolchain and EVM risk domains",
   assert.ok(profile.likelySecurityDomains.includes("oracle and market manipulation risk"));
   assert.ok(profile.entrypoints.includes("contracts/upgradeablevault.sol"));
 });
+
+test("project profile recognizes Cairo Starknet code and Scarb manifests", () => {
+  const profile = profileProject([
+    {
+      path: "Scarb.toml",
+      kind: "source",
+      content: "[package]\nname = \"bridge\"",
+    },
+    {
+      path: "packages/bridge/src/token_bridge.cairo",
+      kind: "source",
+      content: `
+        #[starknet::contract]
+        pub mod TokenBridge {
+          use starknet::syscalls::send_message_to_l1_syscall;
+
+          #[l1_handler]
+          fn handle_deposit(ref self: ContractState, from_address: felt252, amount: u256) {
+            let result = send_message_to_l1_syscall(to_address: from_address, payload: array![amount].span());
+            assert(result.is_ok(), 'MESSAGE_SEND_FAILED');
+          }
+        }
+      `,
+    },
+  ]);
+
+  assert.ok(profile.languages.includes("Cairo"));
+  assert.ok(profile.manifests.includes("Scarb package manifest"));
+  assert.ok(profile.packageManagers.includes("scarb"));
+  assert.ok(profile.frameworks.includes("Cairo/Starknet"));
+  assert.ok(profile.likelySecurityDomains.includes("Starknet state transition and bridge security"));
+  assert.ok(profile.entrypoints.includes("packages/bridge/src/token_bridge.cairo"));
+});

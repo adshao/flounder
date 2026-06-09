@@ -31,6 +31,27 @@ export const BUILTIN_AUDITOR_AGENTS: Record<BuiltInFailureMode, AuditorAgentDefi
     guidance:
       "Check whether a prover can convince the verifier of a false statement. Compare the claimed statement to the exact checks enforced.",
   },
+  proof_statement_binding: {
+    failureMode: "proof_statement_binding",
+    id: "proof-statement-binding-auditor",
+    displayName: "Proof Statement Binding Auditor",
+    guidance:
+      "Check whether requested task inputs, witness source results, serialized witness data, metadata, and public inputs all bind to the same statement before proving or accepting a proof.",
+  },
+  proof_aggregation_binding: {
+    failureMode: "proof_aggregation_binding",
+    id: "proof-aggregation-binding-auditor",
+    displayName: "Proof Aggregation Binding Auditor",
+    guidance:
+      "Check whether chunk, batch, bundle, or recursive aggregation consumes proofs and public inputs that are length-checked, order-checked, and rebound to the expected metadata and verification keys.",
+  },
+  proof_verifier_submission_binding: {
+    failureMode: "proof_verifier_submission_binding",
+    id: "proof-verifier-submission-binding-auditor",
+    displayName: "Proof Verifier Submission Binding Auditor",
+    guidance:
+      "Check whether coordinator submit-proof and verifier paths bind submitted proof bytes to the stored task id, statement metadata, verification key, batch assignment, and downstream state transition.",
+  },
   spec_impl_mismatch: {
     failureMode: "spec_impl_mismatch",
     id: "spec-implementation-auditor",

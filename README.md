@@ -198,6 +198,20 @@ fsa run \
 
 See [docs/SOLIDITY.md](docs/SOLIDITY.md) for the Solidity-specific lens packs, provenance extraction, recommended inputs, and local reproduction workflow.
 
+For Cairo and Starknet targets, including Starknet OS and StarkGate-style bridge code, start from the Cairo/Starknet profile:
+
+```bash
+fsa run \
+  --config ./configs/cairo-starknet-hunt.default.json \
+  --target starknet-target-audit \
+  --source <cairo-and-contract-source-paths...> \
+  --corpus <specs-docs-and-prior-audit-material...> \
+  --provider openai \
+  --model gpt-5.5
+```
+
+See [docs/STARKNET.md](docs/STARKNET.md) for the Cairo/Starknet-specific lens packs, provenance extraction, recommended inputs, and local reproduction workflow.
+
 These profiles are live-audit templates, not dry-run templates. They keep deterministic local checklist seeders disabled, enable source-backed portfolio enumeration, use `hybrid` breadth/depth exploration, reserve budget for later rounds, run multiple audit trials per item, force high-impact findings through follow-up beyond the normal topK queue, and keep PoC reproduction off by default. They intentionally leave `sourcePaths`, `corpusPaths`, and `qmdCollections` empty so public package artifacts do not contain local paths or private collection names.
 
 Use `source-index+qmd` only with a QMD collection scoped to the target material when possible:
@@ -236,7 +250,7 @@ Good recall quality is enforced through three mechanisms:
 - proof obligations and provenance facts are extracted before enumeration, then used to prioritize source slices that might otherwise be truncated by a large repository overview;
 - optional QMD retrieval is collection-scoped, score-filtered, traced, and treated as a supplement to structural retrieval, not a replacement for it.
 
-`proof_obligations.json` records spec, source, initialization-learning, and provenance-derived properties that should be turned into source-backed audit items when relevant. `halo2_provenance_graph.json` records Halo2 advice/copy/equality/gate facts when the source uses that API. `solidity_provenance_graph.json` records EVM facts such as external functions, external calls, delegatecall, state writes, authorization guards, signatures, oracle reads, upgrade hooks, token transfers, and unchecked arithmetic. These artifacts are context-routing inputs only. They do not produce findings and should not be treated as static vulnerability rules.
+`proof_obligations.json` records spec, source, initialization-learning, and provenance-derived properties that should be turned into source-backed audit items when relevant. `halo2_provenance_graph.json` records Halo2 advice/copy/equality/gate facts when the source uses that API. `solidity_provenance_graph.json` records EVM facts such as external functions, external calls, delegatecall, state writes, authorization guards, signatures, oracle reads, upgrade hooks, token transfers, and unchecked arithmetic. `zk-proof-orchestration_provenance_graph.json` records Rust/Go zkVM/prover-coordinator facts around witness sources, task statements, public-input metadata, recursive aggregation, and submit-proof verifier boundaries. `cairo-starknet_provenance_graph.json` records Cairo/Starknet facts around entrypoints, syscalls, storage access, L1/L2 messages, class-hash binding, resource accounting, block context, and OS output commitments. These artifacts are context-routing inputs only. They do not produce findings and should not be treated as static vulnerability rules.
 
 ## Continuing A Run
 

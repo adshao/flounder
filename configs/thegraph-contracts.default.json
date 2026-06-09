@@ -1,0 +1,235 @@
+{
+  "targetName": "thegraph-contracts",
+  "sourcePaths": [],
+  "corpusPaths": [],
+  "provider": "openai",
+  "model": "gpt-5.5",
+  "thinkingLevel": "xhigh",
+  "rounds": 3,
+  "explorationStrategy": "hybrid",
+  "maxNewItemsPerRound": 32,
+  "trials": 4,
+  "maxWorkers": 4,
+  "maxAuditItems": 180,
+  "highImpactVerification": true,
+  "highImpactMaxFindings": 48,
+  "scopeMode": "augment",
+  "baselineExplorationShare": 0.2,
+  "maxTokens": 9000,
+  "contextCharBudget": 220000,
+  "contextRetrieval": "source-index+qmd",
+  "qmdLimit": 10,
+  "qmdMinScore": 0.25,
+  "portfolioEnumeration": true,
+  "portfolioMaxItems": 28,
+  "projectLearning": true,
+  "dynamicLensDiscovery": true,
+  "localChecklistSeeders": false,
+  "reproductionMode": "off",
+  "projectContext": {
+    "summary": "Authorized audit profile for The Graph protocol smart contracts. Focus on mainnet and Arbitrum protocol contracts, staking and delegation, subgraph curation, dispute/slashing flows, GRT bridge escrow and mint allowance, Horizon staking/payments, issuance allocation, and token lock vesting contracts. The main bounty-relevant impacts are direct loss or theft of protocol user funds, private information exposure, impersonation of network participants that leads to unwanted fund-moving actions, and economic attacks that can directly affect more than $1M of in-scope protocol smart-contract funds.",
+    "criticalAssets": [
+      "GRT token balances held by staking, curation, rewards, bridge escrow, token lock wallet, Horizon staking, payments, and issuance contracts",
+      "Indexer stake, delegated stake, delegation shares, thawing and withdrawal requests, allocation state, rebate pools, slashing state, and dispute outcomes",
+      "Curator signal, bonding-curve reserves, curation tax, subgraph deployment pools, GNS subgraph ownership, and migration state",
+      "L1 and L2 Graph token gateway escrow, retryable-ticket parameters, bridge counterpart addresses, Arbitrum inbox/outbox authorization, and L2 mint allowance accounting",
+      "Token lock vesting schedules, releasable and surplus balances, protocol participation through locked tokens, and L1/L2 lock transfer tools",
+      "Horizon service-provider provisions, verifier authorization, delegation pools, thaw/deprovision/reprovision state, payment collection, data-service cuts, and receiver destinations",
+      "Recurring Collection Agreement state, pre-approved offers, canceled offer hashes, EIP-712 authorization, payer callbacks, collection windows, max-claim exposure, and slippage bounds",
+      "Issuance allocator rates, default target, self-minting offset, allocator-minting budget, target notifications, and distribution block accounting",
+      "Controller, governor, pause guardian, proxy implementation, staking extension implementation, and upgrade storage-layout integrity"
+    ],
+    "attackerCapabilities": [
+      "A non-privileged network participant may stake, delegate, allocate, close allocations, curate, publish or update subgraphs, interact with token lock wallets they control, and submit payment or bridge flows exposed by public entrypoints.",
+      "An indexer, delegator, curator, payer, data-service provider, verifier, service provider, or token lock beneficiary may act maliciously within their protocol role and sequence calls around thawing, withdrawal, payment, allocation, dispute, and bridge state changes.",
+      "A payer, data service, service provider, or delegated signer may attempt to replay or cancel recurring-collection terms, pre-approve stale offers, abuse contract-signature authorization, grief callbacks, or manipulate collect timing and slippage within the agreement lifecycle.",
+      "A malicious contract may call public entrypoints, re-enter through token transfers, callbacks, multicall, fallback, delegatecall extension paths, or bridge callhooks where those are available.",
+      "A bridge counterparty, Arbitrum retryable-ticket participant, or message sender may attempt address-alias, sender-binding, amount-binding, refund, and replay confusion within local fork or fixture-only testing.",
+      "Privileged actors are only considered attackers when code grants more authority than the intended role, bypasses staged governance/pause/upgrade controls, or lets a less-privileged path impersonate a privileged one."
+    ],
+    "trustBoundaries": [
+      "public entrypoints to indexer, delegator, curator, service-provider, verifier, payer, beneficiary, governor, and pause-guardian authority checks",
+      "staking/delegation/provision state to final withdrawable stake, delegation pool shares, verifier cuts, slashing, and thaw/deprovision outcomes",
+      "allocation lifecycle and dispute status to rewards, rebates, allocation closure, and slashing effects",
+      "curation mint/burn and GNS subgraph migration to reserve accounting, signal ownership, curation tax, and subgraph NFT ownership",
+      "Arbitrum inbox/outbox sender identity to L1/L2 gateway counterpart authorization, token escrow release, L2 mint allowance, retryable-ticket payload, and refund routing",
+      "token lock wallet vesting rules to protocol actions, surplus recovery, bridge transfer tools, and beneficiary-only releases",
+      "token lock manager selector allowlists to beneficiary-only fallback forwarding, target contract authority, msg.data preservation, and local wallet function collision avoidance",
+      "Horizon payment collection to protocol cut, data-service cut, delegation-pool allocation, receiver staking, and direct receiver destination transfers",
+      "RecurringCollector agreement identity, active/pending terms, signer authorization, canceled offers, max-claim accounting, payer interface checks, and payer callbacks to escrow collection side effects",
+      "issuance target configuration and target notification to allocator-minting, self-minting, default target, distribution block, and total issuance upper-bound invariants",
+      "proxy, initializer, extension, and controller-managed address lookups to storage-layout and implementation compatibility"
+    ],
+    "securityInvariants": [
+      "GRT value must be conserved across staking, delegation, curation, rewards, vesting, bridge escrow, Horizon payments, and issuance distribution, including rounding, taxes, fees, and paused states.",
+      "No non-privileged actor may withdraw, redirect, slash, mint, burn, bridge, or lock/unlock GRT belonging to another indexer, delegator, curator, service provider, verifier, payer, or token lock beneficiary.",
+      "Delegation shares, curation signal, provision accounting, and issuance allocation must remain economically consistent under zero/edge amounts, repeated state transitions, migration, thawing, deprovisioning, and partial withdrawals.",
+      "Bridge messages must bind L1/L2 token, amount, sender, receiver, counterpart gateway, Arbitrum inbox/outbox, callhook authorization, retryable-ticket parameters, and mint allowance before escrow is released or GRT is minted.",
+      "Token lock wallets and transfer tools must enforce vesting, revocability, beneficiary authority, protocol participation constraints, surplus accounting, and L1/L2 correspondence before tokens leave the lock boundary.",
+      "Token lock fallback forwarding must bind msg.sender, msg.sig, msg.data, target, revocability state, authorized selector lists, and local wallet selectors so an approved beneficiary cannot route locked GRT through an unintended target or wallet-local action.",
+      "Horizon payments must distribute exactly the intended protocol, data-service, delegation-pool, and receiver amounts without reentrancy, stale fee-cut, zero-address, or destination confusion.",
+      "Recurring collection must bind payer, data service, service provider, terms hash, nonce, deadline, active or pending scope, cancellation state, callback conditions, collection window, requested tokens, max claim, and slippage before escrowed GRT is collected or agreement state advances.",
+      "Issuance allocator total minting must not exceed the configured issuance budget across allocator-minting and self-minting targets, paused/unpaused periods, target changes, notification failures, and block-boundary catch-up.",
+      "Governance, controller, pause, upgrade, and staking-extension paths must not allow a lower-privilege role or stale implementation to mutate fund-moving protocol state."
+    ],
+    "focusAreas": [
+      "Staking.sol, StakingExtension.sol, L1Staking.sol, HorizonStaking.sol, HorizonStakingBase.sol",
+      "allocation creation, allocation closing, allocation proof/signature validation, dispute resolution, slashing, rewards and rebate distribution",
+      "delegation, undelegation, thawing, withdrawal, provision, deprovision, reprovision, verifier authorization, verifier cuts, and delegation-pool accounting",
+      "Curation.sol, L2Curation.sol, GraphCurationToken.sol, GNS.sol, L1GNS.sol, L2GNS.sol, SubgraphNFT.sol",
+      "L1GraphTokenGateway.sol, L2GraphTokenGateway.sol, BridgeEscrow.sol, L1ArbitrumMessenger.sol, L2ArbitrumMessenger.sol, retryable-ticket payloads and refunds",
+      "GraphTokenLockWallet.sol, L2GraphTokenLockWallet.sol, L1GraphTokenLockTransferTool.sol, L2GraphTokenLockTransferTool.sol, lock managers, authFnCalls selector allowlists, fallback msg.sig/msg.data forwarding, and release/revoke/surplus paths",
+      "GraphPayments.sol, PaymentsEscrow.sol, DataService.sol, RecurringCollector.sol, Horizon data-service payment and receiver-destination flows",
+      "Recurring Collection Agreement accept/update/offer/cancel/collect flows, EIP-712 hashes, stored offers, canceledOffers, callbacks, max claim, collection windows, and zero-token collection behavior",
+      "IssuanceAllocator.sol and issuance target notification/distribution/self-minting paths",
+      "Controller, Managed, Governed, Pausable, GraphProxy, GraphUpgradeable, and staking extension delegatecall boundaries"
+    ],
+    "outOfScope": [
+      "public-network or public-testnet testing",
+      "front-running, back-running, sandwich attacks, and ordinary curation economics without a code-level invariant break",
+      "token price impacts, lack of liquidity, Sybil assumptions, and basic 51% governance attacks",
+      "best-practice critiques, testnet-only assets, test/config-only impacts, and third-party service misconfiguration",
+      "attacks requiring leaked credentials, phishing, social engineering, victim machine compromise, or privileged-key compromise without a code privilege escalation"
+    ],
+    "scenarioGuidance": [
+      "Prefer direct-funds, impersonation, and protocol-accounting bugs over style, gas, or best-practice issues.",
+      "Treat public audits and known issues as exclusion filters before calling any candidate submission-ready.",
+      "Use local fork, Foundry, Hardhat, or fixture-only reproduction. Do not interact with mainnet, public testnets, production Graph services, or third-party systems.",
+      "Separate confirmed-source, locally executable, production-boundary, and submission-ready states in every triage note."
+    ]
+  },
+  "lensPacks": [
+    {
+      "id": "graph-staking-allocation-dispute-integrity",
+      "displayName": "The Graph Staking, Allocation, And Dispute Integrity",
+      "description": "Audit indexer stake, delegation shares, allocation lifecycle, dispute resolution, slashing, rewards, and rebate accounting.",
+      "failureModes": ["supply_balance_integrity", "access_control", "privilege_boundary", "signature_replay", "reentrancy", "spec_impl_mismatch"],
+      "auditorAgents": [
+        {
+          "id": "graph-staking-allocation-auditor",
+          "displayName": "Graph Staking Allocation Auditor",
+          "failureMode": "supply_balance_integrity",
+          "guidance": "Trace stake, delegation, allocation, close, dispute, rewards, rebate, thaw, withdrawal, and slashing state together. Check share math, stale allocation state, indexer signature binding, operator identity, dispute status, reward/rebate conservation, and any path where one participant can redirect or prematurely withdraw another participant's GRT."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate indexer stake, delegation, allocation open/close, dispute/slash, reward/rebate distribution, thaw, and withdrawal flows separately.",
+        "Create items for allocation proof/signature binding, epoch and max-allocation boundaries, delegation share accounting, slashing effects, and extension delegatecall storage compatibility."
+      ],
+      "auditGuidance": [
+        "Tie each finding to direct GRT theft, freezing, incorrect slashing, or participant impersonation. Do not count ordinary curation or delegation economics as a bug without a code invariant break."
+      ]
+    },
+    {
+      "id": "graph-curation-gns-signal-integrity",
+      "displayName": "The Graph Curation And GNS Signal Integrity",
+      "description": "Audit subgraph curation signal, bonding-curve reserves, curation tax, GNS subgraph ownership, and migration paths.",
+      "failureModes": ["supply_balance_integrity", "integer_overflow", "input_validation", "access_control", "race_condition", "spec_impl_mismatch"],
+      "auditorAgents": [
+        {
+          "id": "graph-curation-gns-auditor",
+          "displayName": "Graph Curation And GNS Auditor",
+          "failureMode": "supply_balance_integrity",
+          "guidance": "Trace signal mint/burn, reserve ratios, curation tax, subgraph deployment pools, GNS subgraph ownership, NFT mint/burn, migration, deprecation, and withdrawable GRT. Check reserve/signal conservation, migration double-use, owner/controller confusion, zero-signal edge cases, and slippage-min enforcement."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate curation mint, curation burn, GNS publish/update/deprecate, subgraph NFT ownership, legacy migration, and withdrawable GRT paths.",
+        "Create items for bonding-curve rounding, curation tax, signal ownership transfer, slippage minima, and subgraph deployment ID binding."
+      ],
+      "auditGuidance": [
+        "Focus on unauthorized signal/GRT movement, subgraph ownership theft/freezing, and inconsistent query-market state. Ignore pure token-price or natural curation risk."
+      ]
+    },
+    {
+      "id": "graph-arbitrum-bridge-escrow-integrity",
+      "displayName": "The Graph Arbitrum Bridge And Escrow Integrity",
+      "description": "Audit L1/L2 GRT gateway messages, Arbitrum inbox/outbox sender binding, bridge escrow, callhooks, retryable tickets, and mint allowance.",
+      "failureModes": ["supply_balance_integrity", "access_control", "privilege_boundary", "reentrancy", "race_condition", "spec_impl_mismatch"],
+      "auditorAgents": [
+        {
+          "id": "graph-arbitrum-bridge-auditor",
+          "displayName": "Graph Arbitrum Bridge Auditor",
+          "failureMode": "supply_balance_integrity",
+          "guidance": "Trace every bridge deposit and withdrawal from sender, receiver, token, amount, retryable-ticket calldata, callhook permission, inbox/outbox identity, counterpart gateway, escrow balance, totalMintedFromL2, and L2 mint allowance. Check address-alias confusion, stale counterpart/router/inbox, refund redirection, allowance bypass, escrow over-release, and unauthorized callhook execution."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate outbound L1-to-L2 transfer, inbound L2-to-L1 finalization, allowance update, escrow set, counterpart set, callhook allowlist, and router/inbox configuration paths.",
+        "Create items for sender/receiver binding, l1Token/l2Token binding, amount conservation, retryable refund routing, Arbitrum bridge sender verification, and mint allowance accounting."
+      ],
+      "auditGuidance": [
+        "Use local fork or fixtures only. A valid issue must move, mint, burn, freeze, or redirect GRT or allow participant impersonation, not merely critique Arbitrum configuration."
+      ]
+    },
+    {
+      "id": "graph-token-lock-vesting-boundary",
+      "displayName": "The Graph Token Lock And Vesting Boundary",
+      "description": "Audit vesting wallets, lock managers, protocol participation through locked tokens, surplus accounting, revocation, and L1/L2 transfer tools.",
+      "failureModes": ["supply_balance_integrity", "access_control", "privilege_boundary", "signature_replay", "race_condition", "spec_impl_mismatch"],
+      "auditorAgents": [
+        {
+          "id": "graph-token-lock-auditor",
+          "displayName": "Graph Token Lock Auditor",
+          "failureMode": "supply_balance_integrity",
+          "guidance": "Trace locked principal, releasable balance, surplus balance, revocation, beneficiary permissions, manager-created wallet parameters, manager authFnCalls selector allowlists, fallback msg.sig/msg.data forwarding, staking/delegation/curation actions through locked tokens, and L1/L2 transfer tool correspondence. Check premature release, beneficiary bypass, selector collision, unintended target authorization, surplus theft, double release across L1/L2, manager funding mismatch, and protocol action returns to the wrong wallet."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate release, revoke, withdraw surplus, protocol stake/delegate/curate, manager create, manager fund, auth function add/remove/bulk update, wallet fallback forwarding, L1 transfer tool, and L2 withdrawal-to-L1 paths.",
+        "Create items for vesting math, revocable state, beneficiary-only authority, selector collision, msg.data preservation, target contract authority, wallet-clone initialization, protocol returns, bridge receiver binding, and ETH fee/refund handling."
+      ],
+      "auditGuidance": [
+        "Tie issues to locked GRT leaving early, locked/surplus GRT redirected, locked tokens frozen, or a beneficiary/manager impersonation path."
+      ]
+    },
+    {
+      "id": "graph-horizon-payments-issuance-integrity",
+      "displayName": "The Graph Horizon Payments And Issuance Integrity",
+      "description": "Audit Horizon service-provider provisions, verifier authorization, delegation pools, GraphPayments distribution, DataService interactions, and IssuanceAllocator budget accounting.",
+      "failureModes": ["supply_balance_integrity", "access_control", "privilege_boundary", "reentrancy", "integer_overflow", "spec_impl_mismatch"],
+      "auditorAgents": [
+        {
+          "id": "graph-horizon-payments-issuance-auditor",
+          "displayName": "Graph Horizon Payments And Issuance Auditor",
+          "failureMode": "supply_balance_integrity",
+          "guidance": "Trace Horizon staking provisions, verifier cuts, thaw/deprovision/reprovision, delegation pools, payment collection, receiver destination, protocol/data-service/delegation splits, issuance allocator target rates, self-minting offsets, default target, distribution blocks, and target notifications. Check over-minting, underflowed budget, stale fee/cut parameters, receiver impersonation, payment redirection, reentrancy around token pull/push/approve, and target notification bypass that changes issuance distribution."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate GraphPayments collect, Horizon stake/provision/thaw/deprovision/reprovision/delegate/withdraw, DataService authorization, IssuanceAllocator target add/update/remove/distribute, self-minting, and pause/unpause paths.",
+        "Create items for PPM rounding, zero-address destinations, delegation pool share math, verifier authorization, staged provision parameters, default target, self-minting offset, and block catch-up."
+      ],
+      "auditGuidance": [
+        "Valid high-value issues should show direct GRT over-minting, theft, freezing, unauthorized participant action, or incorrect >$1M protocol-fund distribution. Keep pure liveness/gas-limit notes out unless they directly create an in-scope impact."
+      ]
+    },
+    {
+      "id": "graph-recurring-collector-agreement-integrity",
+      "displayName": "The Graph Recurring Collector Agreement Integrity",
+      "description": "Audit RecurringCollector agreement lifecycle, EIP-712 authorization, pre-approved offers, cancellations, collection windows, callbacks, max-claim accounting, and slippage enforcement.",
+      "failureModes": ["supply_balance_integrity", "access_control", "privilege_boundary", "signature_replay", "reentrancy", "race_condition", "spec_impl_mismatch"],
+      "auditorAgents": [
+        {
+          "id": "graph-recurring-collector-auditor",
+          "displayName": "Graph Recurring Collector Auditor",
+          "failureMode": "signature_replay",
+          "guidance": "Trace every RCA and RCAU from agreement ID derivation, EIP-712 hash, signer authorization, stored offer, cancellation scope, active/pending version, nonce, deadline, and terms storage to collect-time escrow movement. Check replay across active and pending scopes, stale pre-approval, cancellation bypass or undo, data-service/provider impersonation, payer contract authorization, and contract-signature or callback side effects that can redirect, over-collect, freeze, or prematurely advance agreement state."
+        },
+        {
+          "id": "graph-recurring-collection-accounting-auditor",
+          "displayName": "Graph Recurring Collection Accounting Auditor",
+          "failureMode": "supply_balance_integrity",
+          "guidance": "Trace collectionStart, collectionEnd, minSecondsPerCollection, maxSecondsPerCollection, maxInitialTokens, maxOngoingTokensPerSecond, requested tokens, maxSlippage, dataServiceCut, receiverDestination, lastCollectionAt, canceledAt, and getMaxNextClaim together. Check zero-token collections, late collections, pending update exposure, payer-cancel windows, slippage deltas, callback failure policy, and whether state advances before escrow collection can strand or misprice GRT."
+        }
+      ],
+      "enumerationGuidance": [
+        "Enumerate accept, update, offer NEW, offer UPDATE, cancel signed scope, cancel pending scope, cancel active scope, collect, getMaxNextClaim, and payer callback paths separately.",
+        "Create items for agreementId uniqueness, EIP-712 field coverage, active versus pending hash selection, update nonce increments, cancelledOffers semantics, stored-offer replay, payer interface checks, callback gas caps, return-value handling, zero-token collect behavior, max-claim consistency, and data-service authorization."
+      ],
+      "auditGuidance": [
+        "Valid issues should show unauthorized collection, over-collection, blocked or prematurely advanced collection state, stale-term execution, cancellation bypass, agreement impersonation, or callback-driven accounting inconsistency affecting escrowed GRT or agreement-controlled payments."
+      ]
+    }
+  ]
+}

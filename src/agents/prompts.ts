@@ -264,6 +264,9 @@ EVM portfolio rules:
 - For external/public functions, enumerate authorization, lifecycle, pause, replay, state-transition, and accounting invariants when the loaded source supports them.
 - For external calls and token transfers, connect the call to preceding and following state writes, balance deltas, callback/reentrancy exposure, return-value handling, and nonstandard token behavior.
 - For delegatecall, proxy, initializer, reinitializer, or upgrade hooks, enumerate authorization, single-use initialization, implementation compatibility, and storage-layout safety.
+- For selector allowlists, fallback forwarding, or msg.sig/msg.data routers, enumerate caller authority, selector-to-target binding, calldata and value preservation, local function selector collisions, target contract trust, approvals held by the wallet/router, and post-call asset/accounting effects.
+- For recurring agreement collectors, enumerate agreement identity, payer/data-service/service-provider roles, active versus pending terms, stored-offer and signer authorization, cancellation scope, nonce/deadline binding, collection-window math, max-claim and slippage bounds, callback failure policy, and whether state can advance before escrow/value side effects are valid.
+- For payment distribution and escrow routes, enumerate payer/collector/receiver identity, protocol cut, data-service or application cut, delegation-pool cut, receiver destination authority, rounding order, balance-delta reconciliation, thawing or escrow accounting side effects, and whether a caller-controlled route can redirect another participant's payment share.
 - For signatures, permits, and delegated actions, enumerate signer, action, amount/authority, nonce, deadline, chain id, verifying contract, and domain binding.
 - For stablecoin mint/redeem systems, enumerate signed order fields, nonce invalidation, EIP-712 and EIP-1271 signature paths, benefactor whitelist, beneficiary approvals, collateral asset, custodian route, token decimals, stable price-delta checks, per-asset/global max mint/redeem limits, delegated relayer authority, settlement direction, and backing/supply conservation.
 - For ERC4626 staking systems, enumerate deposit, mint, withdraw, redeem, donation/reward distribution, cooldown, silo claim, preview/max functions, share/asset rounding, and transfer restrictions.
@@ -353,11 +356,86 @@ ${input.source || "(none provided)"}
 `;
 }
 
+export function buildCairoStarknetPortfolioEnumerationPrompt(input: {
+  target: string;
+  portfolio: string;
+  maxItems: number;
+  failureModes: FailureMode[];
+  projectProfile: string;
+  projectLearning: string;
+  projectContext: string;
+  lensPacks: string;
+  proofObligations: string;
+  provenanceFacts: string;
+  corpus: string;
+  source: string;
+}): string {
+  return `Target: ${input.target}
+Portfolio: ${input.portfolio}
+Maximum items: ${input.maxItems}
+
+Allowed failure modes: ${input.failureModes.join(", ")}
+
+Project profile:
+${input.projectProfile || "(not available)"}
+
+Initialization learning notes:
+${input.projectLearning || "(not available)"}
+
+Project context:
+${input.projectContext || "(none configured)"}
+
+Active lens packs:
+${input.lensPacks || "(none configured)"}
+
+Cairo/Starknet portfolio evidence:
+${input.proofObligations || "(none extracted)"}
+
+Machine-extracted Cairo/Starknet provenance facts:
+${input.provenanceFacts || "(none extracted)"}
+
+Create up to ${input.maxItems} concrete Cairo/Starknet audit items for this evidence portfolio.
+Each item must have:
+- id: short slug
+- location: file + line range or function/component
+- securityProperty: invariant that must hold
+- failureMode: one allowed tag
+- why: why this Cairo/Starknet edge is worth checking
+- specRefs: optional list of cited spec/reference snippets
+- attackerControlledInputs: optional list of callers, L1 senders, calldata, storage keys, class hashes, resource bounds, message payloads, tokens, amounts, or roles
+
+Cairo/Starknet portfolio rules:
+- Treat the machine-extracted facts as routing evidence, not findings.
+- For Starknet contracts, enumerate constructor, embedded ABI, external entrypoint, and L1 handler authority boundaries together with the closest storage write, event, syscall, mint, burn, or message send.
+- For L1/L2 bridge flows, enumerate from_address and L1 bridge binding, token mapping uniqueness, L1 token to L2 token consistency, recipient and amount validation, payload ordering, replay assumptions, callback effects, and locked-value or supply conservation.
+- For Starknet OS flows, enumerate state dict reads/writes, squashing, aliases, revert log, block context, transaction info, class hash, compiled class facts, state root, output segment, and carried message commitment boundaries.
+- For syscall implementations, enumerate request struct parsing, caller execution context, selector and class hash binding, gas and resource accounting, failure responses, revert semantics, and response layout.
+- For deploy, replace-class, and class-hash flows, enumerate governance/role checks, class hash nonzero checks, declared or compiled class fact validation, salt/constructor calldata binding, and mapping uniqueness before token or contract representation changes.
+- For quota, fee, gas, builtin, range-check, mint, burn, and locked-amount accounting, enumerate conservation and boundary conditions across failure, callback, day rollover, legacy upgrade, and rounding paths.
+- Prefer locations that include both the ingress edge and the closest visible assertion, role check, storage mutation, syscall, output commitment, or accounting side effect.
+- Do not convert normal Cairo assertions or Starknet syscalls into findings. The later audit stage must prove the specific invariant break from source.
+
+Return only a JSON array. No markdown fences.
+
+===== REFERENCE / SPEC MATERIAL =====
+${input.corpus || "(none provided)"}
+
+===== SOURCE UNDER AUDIT =====
+${input.source || "(none provided)"}
+`;
+}
+
 function provenanceGuidance(provenanceFacts: string | undefined): string {
   if (!provenanceFacts || provenanceFacts.trim().length === 0) return "";
   const lowered = provenanceFacts.toLowerCase();
+  if (lowered.includes("domain: cairo-starknet")) {
+    return "- When Cairo/Starknet provenance facts are present, prefer audit items that connect entrypoints, L1/L2 messages, syscall context, storage/state commitments, class hashes, and resource accounting to the visible enforcement edge when the loaded material makes that property security-relevant.";
+  }
   if (lowered.includes("domain: solana-rust")) {
     return "- When Solana/Rust provenance facts are present, prefer audit items that connect account/message ingress, signer or PDA authority, token/CPI side effects, and the visible enforcement edge when the loaded material makes that property security-relevant.";
+  }
+  if (lowered.includes("domain: go-wormhole")) {
+    return "- When Wormhole Go provenance facts are present, prefer audit items that connect guardian observations, VAA signing, governor queue/release, chain watcher finality, and P2P gossip inputs to the visible enforcement edge when the loaded material makes that property security-relevant.";
   }
   return "- When provenance facts are present, prefer audit items that connect a value origin, the cell or state that receives it, and the visible enforcement edge when the loaded material makes that property security-relevant.";
 }
