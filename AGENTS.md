@@ -17,6 +17,14 @@
 - Let project-specific configuration add context, lens packs, failure modes, and auditor agents without modifying core code.
 - For blind proof runs, disable deterministic checklist seeders so the model must enumerate the relevant audit item itself before any audit trial can produce a finding.
 
+## Thin-Layer Agentic Mode
+
+- The framework has two drivers: `fsa hunt` (thin agentic) and `fsa run` (staged pipeline). Keep both working over the shared substrate (ingestion, `src/security/sandbox.ts`, verification, reporting, project history, command-safety policy).
+- In agentic mode the framework provides capabilities and guarantees, not strategy. A new component is justified only if it gives the model an affordance it lacks (read/search source, run an isolated local test, recall prior runs) or a guarantee the model cannot self-provide (execution confirmation, sandbox isolation, command safety, durable replayable state). Do not add taxonomy, domain playbooks, or search schedules to the hunt path; if a human prior is useful, expose it as an optional model-callable tool, not as injected prompt preamble.
+- Keep the one hard opinion: a claim is not a finding until a local test confirms it. `report_finding` may only reach `confirmed-executable` by citing a `run_test` that actually passed. Never let the model upgrade confirmation by assertion.
+- All generated-test execution must route through the shared sandbox module and the command-safety policy. Verification stays local-only.
+- Prefer making hunt mode benefit from stronger models without framework changes. Resist re-introducing framework-side direction of how the model should reason.
+
 ## Security And White-Hat Boundaries
 
 - Audit only code that is authorized by the owner or explicitly in public bug-bounty scope.

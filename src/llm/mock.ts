@@ -29,7 +29,64 @@ export class MockAuditLlmClient implements LlmClient {
   }
 }
 
+const HUNT_SUCCESS_PATTERN = "autonomous hunt confirmed the missing constraint locally";
+
+// Deterministic agent for the thin hunt loop. It progresses by inspecting the
+// transcript the loop feeds back, exercising every capability once: explore,
+// read, run a passing local test, report a confirmed-executable finding, bank a
+// memory note, then finish. Keeps mock-hunt and tests fully offline.
+function huntActionFor(user: string): string {
+  const action = (thought: string, tool: string, args: Record<string, unknown>): string => JSON.stringify({ thought, tool, args });
+  if (!user.includes("action: list_files")) {
+    return action("Map the loaded source before forming hypotheses.", "list_files", { kind: "source" });
+  }
+  if (!user.includes("action: read_file")) {
+    return action("Read the region that assigns advice cells to look for a missing enforcement edge.", "read_file", {
+      path: "halo2_missing_constraint.rs",
+    });
+  }
+  if (!user.includes("action: run_test")) {
+    return action("Prove the missing constraint with a local-only test before claiming it.", "run_test", {
+      files: [
+        {
+          path: "hunt_repro.test.mjs",
+          content: `import test from 'node:test';\n\ntest('${HUNT_SUCCESS_PATTERN}', () => {});\n`,
+        },
+      ],
+      command: { program: "node", args: ["--test", "hunt_repro.test.mjs"] },
+      expected_exit_code: 0,
+      success_patterns: [HUNT_SUCCESS_PATTERN],
+    });
+  }
+  if (!user.includes("action: report_finding")) {
+    return action("The local test passed; record the confirmed finding citing that run.", "report_finding", {
+      title: "Unconstrained advice assignment can affect checked logic",
+      severity: "high",
+      location: "halo2_missing_constraint.rs:5",
+      description: "assign_advice writes a prover-controlled value with no visible copy/equality constraint before downstream checks rely on it.",
+      evidence: "vulnerable_region assigns x_p/y_p via assign_advice with no constrain_equal or copy_advice edge.",
+      exploit_sketch: "A malicious prover chooses a different value while still satisfying the downstream checks.",
+      fix: "Constrain the assigned cell with copy_advice/constrain_equal to the trusted source value.",
+      confidence: 0.85,
+      test_run_id: "t1",
+    });
+  }
+  if (!user.includes("action: remember")) {
+    return action("Bank the result so future runs of this target start ahead.", "remember", {
+      note: "halo2_missing_constraint.rs:5 assign_advice lacks an equality constraint; confirmed-executable.",
+      kind: "finding",
+      tags: ["halo2", "missing-constraint"],
+      source_ref: "halo2_missing_constraint.rs:5",
+    });
+  }
+  return action("Coverage of the loaded fixture is sufficient.", "finish", { summary: "One confirmed-executable missing-constraint finding." });
+}
+
 function responseFor(tag: string, user: string): string {
+  if (tag === "hunt") {
+    return huntActionFor(user);
+  }
+
   if (tag === "learn_project") {
     return JSON.stringify({
       scopeSummary: "Mock initialization notes for a small source set with circuit-like checks.",

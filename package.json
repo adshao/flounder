@@ -31,11 +31,12 @@
     "check:public": "node scripts/check-public-surface.mjs",
     "check:blind-discovery": "npm run build && node scripts/check-blind-discovery.mjs",
     "check:source-discovery": "npm run build && node scripts/check-source-discovery.mjs",
-    "verify": "npm run check && npm test && npm run dry-run && npm run mock-run && npm run check:blind-discovery && npm run check:public",
+    "verify": "npm run check && npm test && npm run dry-run && npm run mock-run && npm run mock-hunt && npm run check:blind-discovery && npm run check:public",
     "prepack": "npm run build",
     "start": "node ./dist/cli.js",
     "dry-run": "node ./dist/cli.js run --target dry-run --source ./fixtures --dry-run --local-seeders",
-    "mock-run": "node ./dist/cli.js run --target mock-run --source ./fixtures --mock-llm --trials 2"
+    "mock-run": "node ./dist/cli.js run --target mock-run --source ./fixtures --mock-llm --trials 2",
+    "mock-hunt": "node ./dist/cli.js hunt --target mock-hunt --source ./fixtures --mock-llm --max-steps 8 --out runs"
   },
   "keywords": [
     "pi-package",

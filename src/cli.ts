@@ -2,6 +2,7 @@
 import { readFile } from "node:fs/promises";
 import { defaultConfig, type AuditorConfig } from "./config.js";
 import { runPipeline } from "./pipeline.js";
+import { runHunt } from "./agent/hunt.js";
 import type { AuditItem, AuditResult, AuditorAgentDefinition } from "./types.js";
 import { loadCorpus, loadSource } from "./ingest/source.js";
 import { RunLogger } from "./trace/logger.js";
@@ -37,6 +38,18 @@ async function main(argv: string[]): Promise<void> {
       verifyTopK,
       streamEvents: true,
       ...(resumeRunDir ? { resumeRunDir } : {}),
+      ...(hasFlag(rest, "--mock-llm") ? { llm: new MockAuditLlmClient() } : {}),
+    });
+    printCoverage(result.runDir, result.summary.coverage);
+    return;
+  }
+
+  if (cmd === "hunt") {
+    const { cfg } = await parseConfig(rest);
+    if (cfg.sourcePaths.length === 0) throw new Error("--source <paths...> is required for hunt");
+    if (cfg.dryRun) throw new Error("hunt is an agentic mode and cannot run in --dry-run; use the mock model with --mock-llm for offline checks");
+    const result = await runHunt(cfg, {
+      streamEvents: true,
       ...(hasFlag(rest, "--mock-llm") ? { llm: new MockAuditLlmClient() } : {}),
     });
     printCoverage(result.runDir, result.summary.coverage);
@@ -167,6 +180,9 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig; verify
   cfg.reproductionCommandTimeoutMs = readIntFlag(args, "--repro-timeout-ms") ?? cfg.reproductionCommandTimeoutMs;
   cfg.reproductionMaxFileBytes = readIntFlag(args, "--repro-max-file-bytes") ?? cfg.reproductionMaxFileBytes;
   cfg.reproductionMaxLogBytes = readIntFlag(args, "--repro-max-log-bytes") ?? cfg.reproductionMaxLogBytes;
+  cfg.huntMaxSteps = readIntFlag(args, "--max-steps") ?? cfg.huntMaxSteps;
+  const scopeNote = readFlag(args, "--scope-note");
+  if (scopeNote !== undefined) cfg.huntScopeNote = scopeNote;
   if (args.includes("--dry-run")) cfg.dryRun = true;
   if (args.includes("--no-project-learning")) cfg.projectLearning = false;
   if (args.includes("--no-dynamic-lenses")) cfg.dynamicLensDiscovery = false;
@@ -258,6 +274,10 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof rawReproductionMaxLogBytes === "number" && Number.isFinite(rawReproductionMaxLogBytes)) {
     cfg.reproductionMaxLogBytes = Math.max(1000, Math.floor(rawReproductionMaxLogBytes));
   }
+  const rawHuntMaxSteps = raw.huntMaxSteps ?? raw.hunt_max_steps;
+  if (typeof rawHuntMaxSteps === "number" && Number.isFinite(rawHuntMaxSteps)) cfg.huntMaxSteps = Math.max(1, Math.floor(rawHuntMaxSteps));
+  const rawHuntScopeNote = raw.huntScopeNote ?? raw.hunt_scope_note;
+  if (typeof rawHuntScopeNote === "string" && rawHuntScopeNote.trim().length > 0) cfg.huntScopeNote = rawHuntScopeNote.trim();
   const rawQmdTimeoutMs = raw.qmdTimeoutMs ?? raw.qmd_timeout_ms;
   if (typeof rawQmdTimeoutMs === "number" && Number.isFinite(rawQmdTimeoutMs)) cfg.qmdTimeoutMs = Math.max(1000, Math.floor(rawQmdTimeoutMs));
   const rawQmdCollections = raw.qmdCollections ?? raw.qmd_collections ?? raw.qmdCollection ?? raw.qmd_collection;
@@ -405,10 +425,15 @@ function printHelp(): void {
   console.log(`full-stack-auditor
 
 Usage:
+  fsa hunt --target <name> --source <paths...> [--corpus <paths...>] [--max-steps <n>]
   fsa run --target <name> --source <paths...> [--corpus <paths...>] [--dry-run]
   fsa audit --checklist <file> --source <paths...>
   fsa reproduce --run <dir> --source <paths...> [--repro plan|execute]
   fsa history import-run --target <name> --run <dir> [--history-dir <dir>]
+
+hunt is the thin agentic mode: the model drives its own investigation with
+read/search/run_test tools and durable cross-run memory. The framework supplies
+capability and verification, not a checklist. run is the staged pipeline.
 
 Options:
   --config <file>         JSON config with projectContext, lensPacks, agents, models, paths
@@ -458,7 +483,9 @@ Options:
   --repro-max-commands <n>
                           cap local reproduction commands per finding, default 3
   --repro-timeout-ms <n>  timeout per local reproduction command, default 120000
-  --mock-llm              run full pipeline with deterministic mock model
+  --max-steps <n>         hunt: max agent actions before stopping, default 40
+  --scope-note <text>     hunt: one-line authorized-scope hint for the agent
+  --mock-llm              run with the deterministic mock model
 `);
 }
 

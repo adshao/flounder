@@ -10,6 +10,19 @@
 
 The audit engine should not depend on pi-coding-agent. This keeps batch runs, CI, web UI, RPC mode, and future coding-agent flows on the same underlying artifacts.
 
+## Two Modes: Thin Agentic Hunt vs Staged Pipeline
+
+The project has two audit drivers over a shared substrate (ingestion, sandbox, verification, reporting, project history, command-safety policy):
+
+- `fsa hunt` (`src/agent/`) is the thin agentic mode. A provider-agnostic ReAct loop (`src/agent/loop.ts`) lets the model investigate through a small generic capability surface (`src/agent/tools.ts`) and durable cross-run memory (`src/agent/memory.ts`). The orchestrator (`src/agent/hunt.ts`) wires capability, persistence, and reporting around the model and maps whatever it proves into the same `RankedFinding`/`AuditSummary` artifacts.
+- `fsa run` (`src/pipeline.ts`) is the staged pipeline described below.
+
+The hunt mode follows one design rule: **the framework provides capabilities and guarantees, not strategy.** A component is justified only if it gives the model an affordance it physically lacks (read/search the repo, run an isolated local test, recall prior runs) or a guarantee the model cannot self-provide (execution-grounded confirmation, sandbox isolation, command safety, durable replayable state). It is removed, or demoted to an optional model-callable tool, if it merely tells the model what to look for or how to think. There is no failure-mode taxonomy, domain playbook, provenance adapter, or search schedule imposed on the agent; those belong to the staged pipeline. The intent is that hunt mode improves as the model improves, without framework changes.
+
+The single hard opinion the framework keeps in hunt mode: a claim is not a finding until a local test confirms it. `report_finding` reaches `confirmed-executable` only when it cites a `run_test` (`src/agent/tools.ts`) that actually passed — expected exit status plus model-declared success patterns observed in the sandboxed output. The framework checks the recorded test outcome; the model cannot upgrade a finding by assertion. All sandbox execution, command safety, file safety, and output redaction route through the shared `src/security/sandbox.ts` module, which the reproduction stage also uses.
+
+Hunt runs write `hunt_transcript.json` (the replayable action/observation trace), `hunt_findings.json`, `hunt_test_runs.json`, `summary.json`, and per-finding disclosure reports. Durable per-target memory lives at `<out>/history/<target>/memory.jsonl`; the model decides what to `remember`, and the most relevant or most recent notes are surfaced at the next run's kickoff. Findings carry `failureMode: "autonomous"` because the agent is not constrained to a fixed bug vocabulary.
+
 ## Pipeline
 
 ```mermaid

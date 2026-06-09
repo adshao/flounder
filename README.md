@@ -4,6 +4,21 @@ White-hat full-stack security audit agent framework for model-driven source audi
 
 This implementation is TypeScript-first and uses pi-mono as the agent/runtime integration point. The audit core stays framework-light so it can run as a batch CLI, a pi package extension, a coding-agent workflow, or a future UI/RPC service.
 
+## Two operating modes
+
+There are two ways to audit a target. They share the same ingestion, sandbox, verification, reporting, history, and safety policy.
+
+- `fsa hunt` — the thin agentic mode. The model drives its own investigation through a small, generic capability surface (`read_file`, `search`, `list_files`, `run_test`, `recall`/`remember`, `report_finding`, `finish`) in a provider-agnostic loop. The framework supplies capability and guarantees, not strategy: there is no required failure-mode taxonomy, no domain checklist, and no fixed search schedule. The model decides what to read, what to suspect, what to test, and when to stop, using the full depth of its own knowledge. This mode is designed to get stronger for free as models improve.
+- `fsa run` — the staged pipeline (learning → lens discovery → enumeration → audit trials → deepening → verification → reproduction). It encodes more human structure (failure-mode agents, provenance adapters, portfolio prompts, lens packs) and is useful when you want deterministic, heavily-traced, taxonomy-organized coverage.
+
+The design principle behind `hunt`: the framework should only do the thin layer that the model genuinely cannot do for itself — give it tools and durable memory it physically lacks, isolate execution, enforce safety, persist a replayable trace — and hold exactly one opinion: **a claim is not a finding until a local test confirms it.** Everything about *what* is a bug and *how* to look is the model's job.
+
+```bash
+fsa hunt --target my-target --source ./path/to/src --max-steps 40
+```
+
+A finding only reaches `confirmed-executable` when the agent cites a `run_test` that actually passed (expected exit status plus declared success patterns observed in the sandboxed local test). Otherwise it is recorded as `suspected`. Durable per-target memory under `<out>/history/<target>/memory.jsonl` lets confirmed findings and dead ends from earlier runs surface at the start of the next run.
+
 ## Design
 
 The core workflow is:
