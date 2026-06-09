@@ -1,5 +1,9 @@
 import path from "node:path";
 import type { AuditorConfig } from "../config.js";
+import { AUDITOR_AGENTS } from "../agents/registry.js";
+import { renderProofObligations } from "../obligations/extract.js";
+import { extractAllProvenanceGraphs } from "../provenance/all.js";
+import { renderProvenanceGraph } from "../provenance/halo2.js";
 import {
   firstBlockedSandboxCommand,
   firstBlockedSandboxFile,
@@ -10,7 +14,7 @@ import {
   writeSandboxFiles,
 } from "../security/sandbox.js";
 import type { RunLogger } from "../trace/logger.js";
-import type { ConfirmationStatus, Doc, ReproductionCommand, ReproductionFile, Severity } from "../types.js";
+import type { ConfirmationStatus, Doc, ProvenanceGraph, ReproductionCommand, ReproductionFile, Severity } from "../types.js";
 import type { ProjectMemory } from "./memory.js";
 
 // The capability surface. Each tool gives the model an affordance it physically
@@ -78,7 +82,7 @@ export interface AgentTool {
 }
 
 export function buildTools(): AgentTool[] {
-  return [listFilesTool, readFileTool, searchTool, runTestTool, reportFindingTool, recallTool, rememberTool, finishTool];
+  return [listFilesTool, readFileTool, searchTool, knownBugClassesTool, dataflowTool, runTestTool, reportFindingTool, recallTool, rememberTool, finishTool];
 }
 
 /** Render the tool catalogue for the system prompt. */
@@ -149,6 +153,61 @@ const searchTool: AgentTool = {
     }
     if (hits.length === 0) return { observation: `no matches for /${query}/` };
     return { observation: `${hits.length} match(es):\n${hits.join("\n")}`, meta: { count: hits.length } };
+  },
+};
+
+// Demoted prior #1: the failure-mode taxonomy. In the staged pipeline this is an
+// enforced vocabulary every audit item must use. Here it is an OPTIONAL reference
+// library the model may consult or ignore. A stronger model needs it less; it is
+// never imposed and never limits what the model may report.
+const knownBugClassesTool: AgentTool = {
+  name: "known_bug_classes",
+  description:
+    'Optional reference: common security bug classes and what each looks for. You are NOT required to use these and you may report bugs that fit none of them. args: {"name"?: string for one class\'s detail, else lists all}.',
+  async run(args, _ctx) {
+    const name = asString(args.name);
+    const entries = Object.values(AUDITOR_AGENTS);
+    if (name) {
+      const match = entries.find((agent) => agent.failureMode === name || agent.id === name);
+      if (!match) return { observation: `no class named "${name}". Call known_bug_classes with no args to list them.` };
+      return { observation: `${match.failureMode} (${match.displayName}):\n${match.guidance}` };
+    }
+    const lines = entries.map((agent) => `- ${agent.failureMode}: ${agent.guidance}`);
+    return {
+      observation: `Reference library of ${entries.length} bug classes (optional, non-exhaustive):\n${lines.join("\n")}`,
+      meta: { count: entries.length },
+    };
+  },
+};
+
+// Demoted prior #2: provenance / value-dataflow facts. In the staged pipeline
+// adapters run as a mandatory stage and inject facts into enumeration prompts.
+// Here the model pulls them on demand when it wants help mapping ingress edges.
+// Routing evidence only — never a finding; the model must still read the code.
+const dataflowTool: AgentTool = {
+  name: "dataflow",
+  description:
+    'Optional: machine-extracted value-provenance facts for the loaded source (entrypoints, assignments, external calls, authority/signature edges, token/state mutations, L1/L2 messages, etc.) for supported domains (halo2, solidity, solana-rust, zk, cairo-starknet, go-wormhole). Routing evidence only — not findings. args: {"domain"?: string, "path"?: substring filter, "max_facts"?: int (default 60)}.',
+  async run(args, ctx) {
+    const graphs = extractAllProvenanceGraphs(ctx.source);
+    if (graphs.length === 0) return { observation: "no provenance facts were extracted for the loaded source (no supported domain detected)." };
+    const domain = asString(args.domain)?.toLowerCase();
+    const pathFilter = asString(args.path)?.toLowerCase();
+    const maxFacts = clampInt(args.max_facts, 5, 200, 60);
+    const selected = domain ? graphs.filter((graph) => graph.domain.toLowerCase() === domain) : graphs;
+    if (selected.length === 0) {
+      return { observation: `no provenance for domain "${domain}". Available domains: ${graphs.map((graph) => graph.domain).join(", ")}.` };
+    }
+    const blocks: string[] = [];
+    for (const graph of selected) {
+      const scoped = pathFilter ? filterGraphByPath(graph, pathFilter) : graph;
+      if (scoped.facts.length === 0) continue;
+      const facts = renderProvenanceGraph(scoped, maxFacts);
+      const obligations = renderProofObligations(scoped.obligations, Math.max(8, Math.floor(maxFacts / 4)));
+      blocks.push(`## ${graph.domain} (${scoped.facts.length} facts)\n${facts}${obligations ? `\n\nRouting obligations:\n${obligations}` : ""}`);
+    }
+    if (blocks.length === 0) return { observation: pathFilter ? `no provenance facts touch "${pathFilter}".` : "no provenance facts to show." };
+    return { observation: blocks.join("\n\n"), meta: { domains: selected.map((graph) => graph.domain) } };
   },
 };
 
@@ -290,6 +349,13 @@ const finishTool: AgentTool = {
     return { observation: "hunt finished." };
   },
 };
+
+function filterGraphByPath(graph: ProvenanceGraph, pathFilter: string): ProvenanceGraph {
+  const facts = graph.facts.filter((fact) => fact.path.toLowerCase().includes(pathFilter));
+  const factIds = new Set(facts.map((fact) => fact.id));
+  const obligations = graph.obligations.filter((obligation) => obligation.evidenceRefs.some((ref) => ref.toLowerCase().includes(pathFilter)) || obligation.id.split(":").some((part) => factIds.has(part)));
+  return { ...graph, facts, obligations, summary: { ...graph.summary, facts: facts.length } };
+}
 
 function selectDocs(ctx: ToolContext, kind: "source" | "corpus" | "all"): Doc[] {
   if (kind === "source") return ctx.source;

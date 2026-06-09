@@ -45,6 +45,9 @@ function huntActionFor(user: string): string {
       path: "halo2_missing_constraint.rs",
     });
   }
+  if (!user.includes("action: dataflow")) {
+    return action("Consult value-provenance facts to confirm the assignment has no downstream equality edge.", "dataflow", { domain: "halo2" });
+  }
   if (!user.includes("action: run_test")) {
     return action("Prove the missing constraint with a local-only test before claiming it.", "run_test", {
       files: [

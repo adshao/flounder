@@ -36,7 +36,7 @@
     "start": "node ./dist/cli.js",
     "dry-run": "node ./dist/cli.js run --target dry-run --source ./fixtures --dry-run --local-seeders",
     "mock-run": "node ./dist/cli.js run --target mock-run --source ./fixtures --mock-llm --trials 2",
-    "mock-hunt": "node ./dist/cli.js hunt --target mock-hunt --source ./fixtures --mock-llm --max-steps 8 --out runs"
+    "mock-hunt": "node ./dist/cli.js hunt --target mock-hunt --source ./fixtures --mock-llm --max-steps 10 --out runs"
   },
   "keywords": [
     "pi-package",

@@ -12,11 +12,7 @@ import { discoverLensPacks } from "./lens/discover.js";
 import { createLlmClient } from "./llm/client.js";
 import { extractProofObligations } from "./obligations/extract.js";
 import { profileProject } from "./profile/project.js";
-import { extractCairoStarknetProvenance } from "./provenance/cairo.js";
-import { extractGoWormholeProvenance } from "./provenance/go.js";
-import { extractHalo2Provenance } from "./provenance/halo2.js";
-import { extractRustSolanaProvenance, extractRustZkProvenance } from "./provenance/rust.js";
-import { extractSolidityProvenance } from "./provenance/solidity.js";
+import { extractAllProvenanceGraphs } from "./provenance/all.js";
 import { renderDisclosure, reportArtifactName } from "./reports/disclosure.js";
 import { summarizeChecklist, summarizeRun, summarizeSourceIndex } from "./reports/coverage.js";
 import { reproduceTop } from "./reproduce/planner.js";
@@ -25,7 +21,7 @@ import { deepenAuditItems } from "./rounds/deepen.js";
 import { writeLastRunPointer } from "./trace/last-run.js";
 import { RunLogger } from "./trace/logger.js";
 import { loadResumedRunState } from "./trace/run-state.js";
-import type { AuditItem, AuditLensPackDefinition, AuditResult, AuditSummary, LlmClient, ProjectLearning, ProofObligation, ProvenanceGraph, Reproduction, Verification } from "./types.js";
+import type { AuditItem, AuditLensPackDefinition, AuditResult, AuditSummary, LlmClient, ProjectLearning, ProofObligation, Reproduction, Verification } from "./types.js";
 import { publicPath } from "./util/paths.js";
 import { verifyTop } from "./verify/planner.js";
 
@@ -70,7 +66,7 @@ export async function runPipeline(
   const source = await loadSource(cfg.sourcePaths);
   const projectProfile = profileProject([...source, ...corpus]);
   const sourceIndex = new SourceIndex(source);
-  const provenanceGraphs = extractProvenanceGraphs(source);
+  const provenanceGraphs = extractAllProvenanceGraphs(source);
   await logger.event("knowledge_loaded", { corpusDocs: corpus.length, sourceDocs: source.length });
   await logger.artifact("project_profile.json", projectProfile);
   await logger.artifact("source_index.json", summarizeSourceIndex(source, sourceIndex.symbols));
@@ -293,17 +289,6 @@ function withLensPacks(cfg: AuditorConfig, lensPacks: AuditLensPackDefinition[])
 
 function basename(input: string): string {
   return input.split(/[\\/]/).filter(Boolean).at(-1) ?? input;
-}
-
-function extractProvenanceGraphs(source: Parameters<typeof extractHalo2Provenance>[0]): ProvenanceGraph[] {
-  return [
-    extractHalo2Provenance(source),
-    extractSolidityProvenance(source),
-    extractRustSolanaProvenance(source),
-    extractRustZkProvenance(source),
-    extractCairoStarknetProvenance(source),
-    extractGoWormholeProvenance(source),
-  ].filter((graph) => graph.summary.facts > 0 || graph.summary.assignmentFlowObligations > 0);
 }
 
 function countBy<T, K extends string>(items: T[], keyFn: (item: T) => K): Record<K, number> {

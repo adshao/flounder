@@ -128,6 +128,53 @@ test("read_file and search operate over loaded source without disk access", asyn
   }
 });
 
+test("known_bug_classes is an optional library: lists classes and details one", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    const logger = await tempLogger(dir);
+    const ctx = { cfg, source: [], corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session: newSession() };
+
+    const list = await tool("known_bug_classes").run({}, ctx);
+    assert.match(list.observation, /optional/i);
+    assert.match(list.observation, /missing_constraint/);
+
+    const detail = await tool("known_bug_classes").run({ name: "reentrancy" }, ctx);
+    assert.match(detail.observation, /reentrancy/i);
+
+    const missing = await tool("known_bug_classes").run({ name: "no_such_class" }, ctx);
+    assert.match(missing.observation, /no class named/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("dataflow surfaces provenance facts on demand without producing findings", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    const logger = await tempLogger(dir);
+    const source = [
+      {
+        path: "circuit.rs",
+        kind: "source",
+        content: "fn region(r: &mut Region) {\n  r.assign_advice(|| \"x\", col, 0, || x)?;\n}\n",
+      },
+    ];
+    const session = newSession();
+    const ctx = { cfg, source, corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session };
+
+    const out = await tool("dataflow").run({ domain: "halo2" }, ctx);
+    assert.match(out.observation, /halo2/i);
+    assert.equal(session.findings.length, 0, "dataflow is routing evidence, not a finding");
+
+    const emptyDomain = await tool("dataflow").run({ domain: "solidity" }, ctx);
+    assert.match(emptyDomain.observation, /no provenance|available domains/i);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("hunt produces an execution-confirmed finding and banks cross-run memory", async () => {
   const dir = await tempDir();
   try {
@@ -135,7 +182,7 @@ test("hunt produces an execution-confirmed finding and banks cross-run memory", 
     cfg.targetName = "agent-e2e";
     cfg.sourcePaths = [fixtures];
     cfg.outputDir = path.join(dir, "runs");
-    cfg.huntMaxSteps = 8;
+    cfg.huntMaxSteps = 10;
 
     const { runDir, summary } = await runHunt(cfg, { llm: new MockAuditLlmClient() });
 
@@ -148,6 +195,7 @@ test("hunt produces an execution-confirmed finding and banks cross-run memory", 
     const transcript = JSON.parse(await readFile(path.join(runDir, "hunt_transcript.json"), "utf8"));
     assert.equal(transcript.stoppedReason, "finished");
     assert.ok(transcript.steps.some((step) => step.tool === "run_test"));
+    assert.ok(transcript.steps.some((step) => step.tool === "dataflow"), "agent consulted the demoted provenance tool on demand");
 
     const testRuns = JSON.parse(await readFile(path.join(runDir, "hunt_test_runs.json"), "utf8"));
     assert.equal(testRuns.length, 1);
