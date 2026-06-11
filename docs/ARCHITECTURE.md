@@ -91,7 +91,9 @@ Confirmation is only reachable if the model's local test can compile and run, wh
 
 Warm-up is **lazy**: the `bash` tool runs it once, on the first test/build command (`isAgentConfirmCommand`), rather than eagerly before the loop. So a read-only audit, or a run that fails authentication before it ever runs a test, pays nothing for it.
 
-Remaining hardening targets: an independent-refutation pass (a fresh-context model tries to break a confirmed finding), enforced network isolation for confirm runs, and turning `confirmed-differential` findings into stored regression tests that future runs re-execute.
+Reference-independence is why execution-grounding is the core of confirmation, not a nicety. A reference implementation, spec, book, or prior audit can carry the same bug — some bugs live in the canonical implementation itself — so "matches upstream/spec" inherits the reference's errors and cannot, in principle, catch a bug present in the reference. Only two things are trustworthy because neither depends on an external authority being correct: the security property derived from first principles, and an executable counterexample that the real artifact accepts. The hunt prompts therefore forbid comparison-based clearing (a component is cleared only by naming the invariant and the constraint that enforces it, or by an executable counterexample), and differential confirmation is the framework-side instance of the second anchor.
+
+Remaining hardening targets: an independent-refutation pass (a fresh-context model re-derives the invariant and tries to break a confirmed finding, avoiding a single chain inheriting a wrong assumption), execution-driven discovery on a buildable target (adversarial property tests reveal under-constraint empirically, independent of any reference), enforced network isolation for confirm runs, and turning `confirmed-differential` findings into stored regression tests that future runs re-execute.
 
 ## Memory And History
 

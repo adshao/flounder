@@ -26,6 +26,13 @@ does not help if the value feeding it is unconstrained. Reaching a file is not t
 component looks standard, state the exact invariant it must satisfy and find the line that enforces it before
 concluding it is correct.
 
+Trust nothing external as ground truth. Agreement with a reference implementation, an upstream version, a
+spec, a book, or a prior audit is NOT evidence of correctness — the reference can carry the same bug, and some
+bugs live in the canonical implementation itself. Never clear a component because it "matches upstream", looks
+"standard", or matches the spec. Clear it only by (a) naming the exact security invariant and the specific
+constraint/check that enforces it, or (b) an executable counterexample test. Reason from the security property
+itself, not from what the materials say the code does.
+
 Record as you go. If you form a credible suspicion you cannot fully confirm, write it to findings.json as a
 hypothesis (with location and why) rather than holding it in your head — an investigation that ends without a
 recorded finding or hypothesis is wasted.
