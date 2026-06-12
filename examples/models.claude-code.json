@@ -3,6 +3,7 @@
   "model": "claude-opus-4-8",
   "thinking": "high",
   "models": {
+    "map": { "thinking": "xhigh" },
     "dig": { "thinking": "xhigh" }
   }
 }
