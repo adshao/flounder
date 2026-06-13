@@ -81,14 +81,14 @@ export function analyzeAgentBashCommandSafety(command: StructuredReproductionCom
   const workspaceDecision = analyzeWorkspacePathSafety(args);
   if (workspaceDecision.blocked) return workspaceDecision;
 
-  if (isAllowedLocalTestCommand(program, args) || isAllowedLocalInspectionCommand(program, args)) {
+  if (isAllowedLocalTestCommand(program, args) || isAllowedLocalInspectionCommand(program, args) || isAllowedBuildCommand(program, args)) {
     return { blocked: false };
   }
 
   return {
     blocked: true,
     reason:
-      "Blocked by full-stack-auditor guardrail: agent bash is limited to local inspection commands and local test commands.",
+      "Blocked by full-stack-auditor guardrail: agent bash is limited to local inspection, build/dependency, and local test commands.",
   };
 }
 
@@ -100,6 +100,17 @@ export function analyzeAgentBashCommandSafety(command: StructuredReproductionCom
  */
 export function isAgentConfirmCommand(command: StructuredReproductionCommand): boolean {
   return isAllowedLocalTestCommand(command.program.trim(), command.args.map((arg) => String(arg)));
+}
+
+/**
+ * True for an allowlisted build / dependency-resolution command (cargo build,
+ * npm install, go mod download, forge build, pip install, …). These are the
+ * "prepare/build phase": they may need a package registry to fetch dependencies,
+ * which is categorically different from the exploit/confirm run. They are NOT
+ * confirmation-eligible — a build can never upgrade a finding (only isAgentConfirmCommand can).
+ */
+export function isAgentBuildCommand(command: StructuredReproductionCommand): boolean {
+  return isAllowedBuildCommand(command.program.trim(), command.args.map((arg) => String(arg)));
 }
 
 function analyzeStructuredCommandBaseSafety(command: StructuredReproductionCommand): CommandSafetyDecision {
@@ -211,6 +222,33 @@ function isAllowedLocalTestCommand(program: string, args: string[]): boolean {
   if (name === "gradle" || name === "gradlew") return args.some((arg) => arg.toLowerCase() === "test");
   if (name === "forge") return first === "test";
   if (name === "npx") return first === "hardhat" && second === "test";
+  return false;
+}
+
+/**
+ * Build / dependency-resolution commands across ecosystems. Language-agnostic by
+ * design: the mechanism is "recognize a package manager's build/fetch verb", and a
+ * new ecosystem is added by extending this table, not by new code paths. Content
+ * still passes the base network check (analyzeStructuredCommandBaseSafety), so a
+ * build command cannot smuggle a remote/mainnet/exploit target in its argv.
+ */
+function isAllowedBuildCommand(program: string, args: string[]): boolean {
+  const name = program.toLowerCase();
+  const first = args[0]?.toLowerCase();
+  const second = args[1]?.toLowerCase();
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (name === "cargo") return ["build", "fetch", "check", "generate-lockfile", "vendor", "update"].includes(first ?? "");
+  if (name === "go") return first === "build" || first === "mod"; // go build / go mod download|tidy|vendor
+  if (name === "npm") return ["install", "ci", "i"].includes(first ?? "");
+  if (name === "pnpm" || name === "yarn" || name === "bun") return ["install", "i", "ci"].includes(first ?? "") || (name === "yarn" && args.length === 0);
+  if (name === "pip" || name === "pip3") return first === "install";
+  if (name === "python" || name === "python3") return first === "-m" && second === "pip" && (lower[2] === "install");
+  if (name === "forge") return ["build", "install", "compile", "update"].includes(first ?? "");
+  if (name === "dotnet") return first === "build" || first === "restore";
+  if (name === "deno") return first === "cache";
+  if (name === "mvn") return lower.some((arg) => ["compile", "package", "install", "dependency:resolve", "dependency:go-offline"].includes(arg));
+  if (name === "gradle" || name === "gradlew") return lower.some((arg) => ["build", "assemble", "classes", "compilejava", "dependencies"].includes(arg));
+  if (name === "npx") return first === "hardhat" && second === "compile";
   return false;
 }
 

@@ -1,6 +1,33 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeCommandSafety, analyzeReproductionCommandSafety } from "../dist/security/policy.js";
+import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "../dist/security/policy.js";
+
+const cmd = (program, ...args) => ({ program, args });
+
+test("agent bash allows build/dependency commands (the build phase) across ecosystems", () => {
+  for (const c of [cmd("cargo", "build"), cmd("cargo", "fetch"), cmd("npm", "install"), cmd("go", "mod", "download"), cmd("forge", "build"), cmd("pip", "install", "-r", "requirements.txt")]) {
+    assert.equal(analyzeAgentBashCommandSafety(c).blocked, false, `${c.program} ${c.args.join(" ")} should be allowed`);
+    assert.equal(isAgentBuildCommand(c), true, `${c.program} ${c.args.join(" ")} should be a build command`);
+  }
+});
+
+test("a build command is NOT confirmation-eligible (build cannot mint a finding)", () => {
+  assert.equal(isAgentConfirmCommand(cmd("cargo", "build")), false);
+  assert.equal(isAgentConfirmCommand(cmd("npm", "install")), false);
+  // and a test runner is a confirm command, not a build command
+  assert.equal(isAgentBuildCommand(cmd("cargo", "test")), false);
+  assert.equal(isAgentConfirmCommand(cmd("cargo", "test")), true);
+});
+
+test("a build command still cannot smuggle a remote/mainnet target in its argv", () => {
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "build", "--target-dir", "https://evil.example/x")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("forge", "build", "--fork-url", "https://mainnet.example")).blocked, true);
+});
+
+test("arbitrary non-build, non-test, non-inspection commands stay blocked", () => {
+  assert.equal(analyzeAgentBashCommandSafety(cmd("curl", "https://evil.example")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("rm", "-rf", "x")).blocked, true);
+});
 
 test("command safety policy blocks live-network broadcast-like commands", () => {
   const decision = analyzeCommandSafety("zcash-cli -testnet sendrawtransaction poc");
