@@ -25,6 +25,19 @@
 - All generated-test execution must route through the shared sandbox module and the command-safety policy. Verification stays local-only.
 - Prefer making hunt mode benefit from stronger models without framework changes. Resist re-introducing framework-side direction of how the model should reason.
 
+## Map → Dig Deep Coverage
+
+- `fsa hunt` runs three postures, all sharing the tools, the confirmation gate, and the local-only boundary: breadth (default), `--deep-focus <region>` (skip enumeration and deep-audit one named region), and `--deep` (map → dig).
+- Map → dig: MAP enumerates a complete scope inventory (the model applies general lenses — spec conditions, value/asset flow, trusted-but-unbound inputs — and scores each by exposure × difficulty); DIG deep-audits the highest-scored scopes obligation-by-obligation. The framework encodes no domain analysis — both the enumeration and the scoring are the model's; the framework only parses the inventory the model wrote, sorts by the model's score, and pins each dig to a scope's region.
+- Coverage is resumable and never silently drops a scope. The inventory persists under the project history dir; scopes past `--max-scopes` stay `pending`; re-running the same command audits the next batch; `--remap` re-enumerates. `--scope <id[,id...]>` deep-audits specific inventory items (the human-in-the-loop pick over the complete map). `--dig-samples K` runs K independent dig passes per scope and unions the findings.
+
+## Operating The Deep Audit
+
+- Do not interrupt a deep or dig run. The obligation-driven dig can surface a subtle, implicit obligation only late in its budget (observed: the decisive check appeared around step 31 of 40). Killing it early produces a false "miss". Give dig adequate budget (roughly 40+ steps) when a scope's stated obligation is narrow or off-target, and let it finish.
+- Treat the map's per-scope obligation as a non-limiting hint, not the audit boundary. The region is the boundary; the dig must independently enumerate all of the region's obligations, including operands a design document treats as given (an under-constrained operand/witness is a classic missing-constraint bug).
+- Reliability comes from coverage and repetition, not from tuning. Do not tune map scoring or the dig prompt to a specific known bug: a change validated on one bug, against a stochastic and high-variance per-pass recall, is overfitting and will not be shown to generalize. Prefer coverage (`--max-scopes`, resume) and variance reduction (`--dig-samples`, whose union survives a throttled or unlucky pass) over prompt incantations.
+- Expect that some real findings cannot reach `confirmed-executable` in the lightweight sandbox (for example a circuit soundness bug that needs a full proving-system build). Recording them as high-value `suspected` findings with exact location, root cause, and fix is the expected outcome, not a failure.
+
 ## Security And White-Hat Boundaries
 
 - Audit only code that is authorized by the owner or explicitly in public bug-bounty scope.
