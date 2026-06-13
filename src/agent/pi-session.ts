@@ -56,8 +56,10 @@ export async function runHuntSession(input: {
     model,
     thinkingLevel: mapThinkingLevel(input.cfg.thinkingLevel),
     // Disable pi's built-in read/bash/edit/write (they touch the real filesystem
-    // with no sandbox or confirmation gate) and expose only our isolated tools.
-    noTools: "all",
+    // with no sandbox or confirmation gate) but KEEP our custom tools. Per the pi
+    // SDK, "all" disables every tool (including custom) while "builtin" disables
+    // only the defaults — so "builtin" is required to expose our isolated tools.
+    noTools: "builtin",
     customTools,
     cwd: input.cwd,
     sessionManager: SessionManager.inMemory(),
