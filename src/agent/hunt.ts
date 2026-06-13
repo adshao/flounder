@@ -16,7 +16,7 @@ import { ProjectMemory } from "./memory.js";
 import { loadScopeInventory, saveScopeInventory, scopeProgress } from "./scope-store.js";
 import { isPiSessionProvider, runHuntSession } from "./pi-session.js";
 import type { TranscriptStep } from "./prompts.js";
-import { buildTools, clearScratchFindings, dedupeFindings, ingestFindingsFromScratch, newSession, readScratchScopes, type AgentFinding, type AuditScope, type ToolContext } from "./tools.js";
+import { buildTools, clearScratchFindings, dedupeFindings, ingestFindingsFromScratch, newSession, readScratchScopes, type AgentFinding, type AgentSession, type AuditScope, type ToolContext } from "./tools.js";
 
 // Orchestrates one autonomous hunt: load authorized material, give the model the
 // capability surface, run the ReAct loop, then turn whatever it proved into the
@@ -104,7 +104,10 @@ export async function runHunt(
   const runPhase = async (
     phaseCfg: AuditorConfig,
     opts: { mode: "breadth" | "map" | "dig"; deepFocus?: string; maxSteps: number },
+    over?: { ctx: ToolContext; cwd: string },
   ): Promise<{ steps: TranscriptStep[]; stoppedReason: string }> => {
+    const phaseCtx = over?.ctx ?? ctx;
+    const phaseCwd = over?.cwd ?? workspaceCwd;
     const flags = {
       ...(opts.mode === "dig" ? { deep: true } : {}),
       ...(opts.mode === "map" ? { map: true } : {}),
@@ -113,10 +116,10 @@ export async function runHunt(
     if (!options.llm && isPiSessionProvider(phaseCfg.provider)) {
       return runHuntSession({
         cfg: { ...phaseCfg, huntMaxSteps: opts.maxSteps },
-        ctx,
+        ctx: phaseCtx,
         tools,
         logger,
-        cwd: workspaceCwd,
+        cwd: phaseCwd,
         fileManifest,
         ...(scopeNote ? { scopeNote } : {}),
         ...(memoryHint ? { memoryHint } : {}),
@@ -131,7 +134,7 @@ export async function runHunt(
       cfg: phaseCfg,
       llm,
       tools,
-      ctx,
+      ctx: phaseCtx,
       logger,
       maxSteps: Math.max(1, Math.floor(opts.maxSteps)),
       fileManifest,
@@ -145,6 +148,9 @@ export async function runHunt(
   let stoppedReason: string;
   let manualFindings = false;
   let scopeInventory: AuditScope[] = [];
+  // Set when concurrent digs already ran differential confirmation in their own
+  // isolated workspaces, so the shared post-loop differential stage skips them.
+  let digDifferentialDone = false;
 
   if (cfg.huntDeep && !cfg.huntDeepFocus) {
     // MAP → DIG, resumable. The complete scope inventory is persisted under the
@@ -192,32 +198,73 @@ export async function runHunt(
     }
     const aggregated: AgentFinding[] = [];
     const samples = Math.max(1, Math.floor(cfg.huntDigSamples));
-    for (const scope of toDig) {
-      // The region is the audit boundary; the map's obligation is only a starting
-      // hint, never a limit (the dig system prompt's own rule is to independently
-      // enumerate ALL of a region's obligations).
-      const deepFocus =
-        `code region ${scope.region} — audit this WHOLE region: independently enumerate and discharge ALL of its security obligations; ` +
-        `do NOT limit yourself to any single one. The map flagged one concern as a starting point (not a boundary): "${scope.obligation}"`;
-      // Run the dig independently `samples` times and union the findings. Per-pass
-      // recall on a subtle obligation is < 1 and stochastic; K independent passes
-      // raise cumulative recall (1 - (1-p)^K) without any bug-specific tuning.
+    const concurrency = Math.max(1, Math.floor(cfg.huntDigConcurrency));
+    // The region is the audit boundary; the map's obligation is only a starting
+    // hint, never a limit (the dig system prompt's own rule is to independently
+    // enumerate ALL of a region's obligations).
+    const buildDeepFocus = (scope: AuditScope): string =>
+      `code region ${scope.region} — audit this WHOLE region: independently enumerate and discharge ALL of its security obligations; ` +
+      `do NOT limit yourself to any single one. The map flagged one concern as a starting point (not a boundary): "${scope.obligation}"`;
+    // Run a scope's dig `samples` times and union the findings. Per-pass recall on a
+    // subtle obligation is < 1 and stochastic; K independent passes raise cumulative
+    // recall (1 - (1-p)^K). `over` isolates a concurrent dig in its own session.
+    const digSamples = async (scope: AuditScope, sess: AgentSession, over?: { ctx: ToolContext; cwd: string }): Promise<{ findings: AgentFinding[]; steps: TranscriptStep[] }> => {
+      const deepFocus = buildDeepFocus(scope);
       const perScope: AgentFinding[] = [];
+      const stepsOut: TranscriptStep[] = [];
       for (let sample = 1; sample <= samples; sample += 1) {
-        clearScratchFindings(session);
-        const dig = await runPhase(digCfg, { mode: "dig", deepFocus, maxSteps: cfg.huntDigSteps });
-        aggregatedSteps.push(...dig.steps);
-        ingestFindingsFromScratch(session);
-        for (const finding of session.findings) {
+        clearScratchFindings(sess);
+        const dig = await runPhase(digCfg, { mode: "dig", deepFocus, maxSteps: cfg.huntDigSteps }, over);
+        stepsOut.push(...dig.steps);
+        ingestFindingsFromScratch(sess);
+        for (const finding of sess.findings) {
           finding.scopeId = scope.id;
           perScope.push(finding);
         }
-        if (samples > 1) await logger.event("hunt_dig_sample", { scope: scope.id, sample, of: samples, findings: session.findings.length });
+        if (samples > 1) await logger.event("hunt_dig_sample", { scope: scope.id, sample, of: samples, findings: sess.findings.length });
       }
-      const unioned = dedupeFindings(perScope);
-      aggregated.push(...unioned);
-      scope.status = "audited";
-      await logger.event("hunt_dig_done", { scope: scope.id, samples, findings: unioned.length });
+      return { findings: dedupeFindings(perScope), steps: stepsOut };
+    };
+
+    if (concurrency > 1) {
+      // Concurrent dig: each scope runs in its OWN isolated workspace + session +
+      // differential confirmation, so parallel digs cannot corrupt each other's
+      // test files, build output, or findings. A bounded pool caps simultaneous digs.
+      const workspaceRoots = cfg.buildRoot ? [cfg.buildRoot] : cfg.sourcePaths;
+      const digScope = async (scope: AuditScope): Promise<AgentFinding[]> => {
+        const ws = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, `hunt/dig-${safeScopeDir(scope.id)}`);
+        const digSession = newSession();
+        digSession.workspace = ws;
+        digSession.baselineFiles = await listWorkspaceFiles(ws.absolute);
+        if (session.buildCacheDir) digSession.buildCacheDir = session.buildCacheDir; // shared dep cache; per-dig target/
+        await copyCorpusIntoWorkspace(ws, corpus);
+        const digCtx: ToolContext = { cfg: digCfg, source, corpus, memory, logger, session: digSession };
+        const { findings: unioned } = await digSamples(scope, digSession, { ctx: digCtx, cwd: ws.absolute });
+        for (const finding of unioned) {
+          if (finding.confirmationStatus !== "confirmed-executable" || !finding.fixPatch || !finding.commandRunId) continue;
+          const exploitRun = digSession.commandRuns.find((run) => run.id === finding.commandRunId);
+          if (!exploitRun) continue;
+          const dr = await runDifferentialConfirmation({ workspace: ws, finding, exploitRun, baselineFiles: digSession.baselineFiles, cfg: digCfg, logger, ...(digSession.buildCacheDir ? { cacheDir: digSession.buildCacheDir } : {}) });
+          if (dr.confirmed) finding.confirmationStatus = "confirmed-differential";
+        }
+        scope.status = "audited";
+        await logger.event("hunt_dig_done", { scope: scope.id, samples, findings: unioned.length, concurrent: true });
+        return unioned;
+      };
+      await logger.event("hunt_dig_concurrent_start", { scopes: toDig.length, concurrency });
+      const perScopeFindings = await runWithConcurrency(toDig, concurrency, digScope);
+      for (const findings of perScopeFindings) aggregated.push(...findings);
+      digDifferentialDone = true; // each dig confirmed differentially in its own workspace
+    } else {
+      // Sequential: reuse the shared map workspace (one warm-up) and let the
+      // post-loop differential stage confirm.
+      for (const scope of toDig) {
+        const { findings: unioned, steps: digSteps } = await digSamples(scope, session);
+        aggregatedSteps.push(...digSteps);
+        aggregated.push(...unioned);
+        scope.status = "audited";
+        await logger.event("hunt_dig_done", { scope: scope.id, samples, findings: unioned.length });
+      }
     }
     session.findings = aggregated;
     session.counters.finding = aggregated.length;
@@ -249,7 +296,7 @@ export async function runHunt(
   // machine-applicable fix, apply it to the pristine target source and re-run the
   // same exploit test. A real bug's test is blocked by its fix; a tautology is
   // not. Survivors reach the strongest status, confirmed-differential.
-  if (session.workspace && session.baselineFiles) {
+  if (session.workspace && session.baselineFiles && !digDifferentialDone) {
     const differentials: DifferentialResult[] = [];
     for (const finding of session.findings) {
       if (finding.confirmationStatus !== "confirmed-executable" || !finding.fixPatch || !finding.commandRunId) continue;
@@ -418,6 +465,28 @@ function resolveScopeNote(cfg: AuditorConfig): string {
 function renderMemoryHint(notes: { kind: string; note: string; sourceRef?: string }[]): string {
   if (notes.length === 0) return "";
   return notes.map((note) => `- [${note.kind}] ${note.note}${note.sourceRef ? ` (ref: ${note.sourceRef})` : ""}`).join("\n");
+}
+
+// Bounded worker pool: run `worker` over `items` with at most `limit` in flight,
+// returning results in input order. Used to deep-audit scopes concurrently.
+async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T) => Promise<R>): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let next = 0;
+  const runner = async (): Promise<void> => {
+    for (;;) {
+      const idx = next;
+      next += 1;
+      if (idx >= items.length) return;
+      results[idx] = await worker(items[idx] as T);
+    }
+  };
+  await Promise.all(Array.from({ length: Math.max(1, Math.min(limit, items.length)) }, runner));
+  return results;
+}
+
+/** Sanitize a scope id into a safe per-dig workspace directory name. */
+function safeScopeDir(id: string): string {
+  return id.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48) || "scope";
 }
 
 function renderFileManifest(source: Doc[], corpusEntries: string[] = []): string {

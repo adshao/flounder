@@ -481,6 +481,37 @@ test("map → dig: --deep enumerates scopes then deep-audits each, tagging findi
   }
 });
 
+test("map → dig --dig-concurrency audits scopes in parallel, isolated per-scope workspaces", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.targetName = "conc-e2e";
+    cfg.sourcePaths = [fixtures];
+    cfg.corpusPaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.huntDeep = true;
+    cfg.huntMapSteps = 6;
+    cfg.huntDigSteps = 8;
+    cfg.huntMaxScopes = 2;
+    cfg.huntDigConcurrency = 2; // audit both scopes in parallel
+
+    const { runDir, summary } = await runHunt(cfg, { llm: new MockAuditLlmClient() });
+
+    // Both enumerated scopes were deep-audited concurrently, each producing its finding.
+    assert.equal(summary.findings.length, 2, "both scopes audited in parallel");
+    const findings = JSON.parse(await readFile(path.join(runDir, "hunt_findings.json"), "utf8"));
+    const scopeIds = new Set(findings.map((f) => f.scopeId));
+    assert.ok(scopeIds.has("S1") && scopeIds.has("S2"), "findings are tagged with both scopes");
+    for (const f of findings) assert.equal(f.confirmationStatus, "confirmed-executable");
+
+    // Each concurrent dig ran in its own isolated workspace (no sharing).
+    const digDirs = (await readdir(path.join(runDir, "hunt"))).filter((n) => n.startsWith("dig-"));
+    assert.ok(digDirs.includes("dig-S1") && digDirs.includes("dig-S2"), "each scope got its own workspace");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("map → dig is resumable: a second run skips map and audits the next pending scope", async () => {
   const dir = await tempDir();
   try {
