@@ -129,11 +129,11 @@ For each scope assign:
 - difficulty: how hard to be SURE it is correct (high|medium|low) — a missing constraint you must notice is absent = high.
 - score: 0-10, roughly exposure-weighted, used only to order the dig phase. Low score does NOT drop a scope; it just defers it.
 
-You may use read/bash to explore, but spend little per scope — this phase is broad and shallow.
+You may use read/bash to explore, but spend little per scope — this phase is broad and shallow. On a large codebase do NOT read every file before writing: get the structure with bash (ls/grep for functions, external/public entrypoints, state writes, value transfers) and enumerate from that.
 
-Output: write scopes.json at the workspace root, a JSON array of objects:
+Output: write scopes.json at the workspace root EARLY — after a first broad pass — and then UPDATE it (rewrite the full array) as you discover more, so a complete-as-of-now inventory always exists even if you run out of budget. It is a JSON array of objects:
 [{"id","obligation","region":"file:lines","lenses":["spec"|"value-flow"|"unbound-input"...],"exposure","difficulty","score","why"}]
-Then emit {"done": true, "summary": "..."}. One JSON tool action per turn; no prose outside the JSON; no markdown fences. You CANNOT modify the target source — only write scopes.json and scratch files.`;
+When the inventory is reasonably complete, emit {"done": true, "summary": "..."}. One JSON tool action per turn; no prose outside the JSON; no markdown fences. You CANNOT modify the target source — only write scopes.json and scratch files.`;
 
 export function buildMapKickoff(input: {
   target: string;

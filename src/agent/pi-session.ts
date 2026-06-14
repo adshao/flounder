@@ -214,7 +214,7 @@ Apply THREE lenses (general method, not a hint about this target); be exhaustive
 
 Do not judge importance by gut feel or "looks like a bug". A region whose link to the asset is indirect (e.g. a key/address-integrity check that only matters because breaking it enables a later double-spend) MUST still be listed — those are exactly what a rank-and-pick misses. Assign each scope: exposure (critical|high|medium|low, by asset at risk), difficulty (high|medium|low, how hard to be sure it is correct), score (0-10, only to order the dig phase; low score defers, never drops).
 
-Write scopes.json at the workspace root: a JSON array of {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"}. You may read/bash to explore but spend little per scope — broad and shallow. You CANNOT modify the target source.`;
+Write scopes.json at the workspace root EARLY — after a first broad pass — then UPDATE it (rewrite the full array) as you find more, so a complete-as-of-now inventory survives if you run out of budget. It is a JSON array of {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"}. On a large codebase do NOT read every file first — use bash (ls/grep for public/external entrypoints, state writes, value transfers) to enumerate, and spend little per scope (broad and shallow). You CANNOT modify the target source.`;
 }
 
 function breadthIntro(): string {
