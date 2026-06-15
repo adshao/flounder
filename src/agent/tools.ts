@@ -46,7 +46,7 @@ export interface AgentFinding {
   /** Patterns the cited test prints once the exploit is blocked by the applied fix. */
   patchedSuccessPatterns?: string[];
   /** Independent-skeptic verdict (a fresh-context model that tried to break the claim). */
-  refutation?: { refuted: boolean; reason: string };
+  refutation?: { refuted: boolean; reason: string; unrealistic?: boolean };
   /** An execution-proven finding an independent skeptic disputes — kept, but flagged for humans. */
   disputed?: boolean;
   /** The map-phase scope this finding came from (when the map → dig flow produced it). */

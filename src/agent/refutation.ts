@@ -13,16 +13,19 @@ import type { AgentFinding } from "./tools.js";
 // assumption (including "it matches upstream").
 
 export const REFUTE_SYSTEM = `You are an independent adversarial reviewer. Another auditor produced an UNVERIFIED vulnerability claim. You did NOT do the original investigation; do not assume the claim is right or wrong.
-Your job is to REFUTE it: determine from the actual code and first principles whether the alleged security property is in fact enforced (so the claim is wrong), or whether the exploit reasoning has a flaw that makes it not exploitable.
-Do not clear the code because it "matches upstream", a spec, or looks standard — a reference can carry the same bug. Reason from the security property itself.
-Be skeptical of the claim, but honest: if you genuinely cannot refute it, say so.
-Respond with ONLY a JSON object and nothing else (no prose, no fences): {"refuted": true|false, "reason": "<concise and specific>"}.
-- refuted=true: the claim is wrong — the property IS enforced (cite the exact constraint/line) or the exploit does not work (state the flaw).
-- refuted=false: you could not refute it; the concern appears to stand.`;
+The claim sometimes comes with a PoC test it says confirms the bug. REFUTE it on EITHER of two independent grounds:
+1. INVARIANT: from the actual code and first principles, the alleged security property is in fact enforced (so the claim is wrong), or the exploit reasoning has a flaw that makes it not exploitable.
+2. POC REALISM / TRUST ASSUMPTIONS: even a PoC that "passes" only confirms a real bug if the exploit is reachable in the ACTUALLY DEPLOYED system. Scrutinize the PoC's setup — every mock, stub, vm.store, fake deployed contract, and assumption. If triggering the bug REQUIRES a trusted/fixed component to behave CONTRARY to its real or specified contract (e.g. a verifier that returns false instead of REVERTING on an invalid proof; an oracle/bridge/admin the real system pins and that cannot be replaced or made to misbehave), the "confirmation" is VACUOUS — it proves a counterfactual, not a real bug. A PoC may mock a trusted component ONLY if the mock faithfully matches that component's real/spec'd behavior.
+Do not clear code because it "matches upstream", a spec, or looks standard — a reference can carry the same bug. But DO refute a confirmation whose only triggering path needs an out-of-spec trusted component.
+Be skeptical, but honest: if you genuinely cannot refute it on either ground, say so.
+Respond with ONLY a JSON object and nothing else (no prose, no fences): {"refuted": true|false, "unrealistic": true|false, "reason": "<concise and specific>"}.
+- refuted=true: the claim/confirmation does not hold — say which ground. Set unrealistic=true when it fails ground 2 (the PoC needs a trusted component to act out of its real contract, so the exploit is not reachable in the deployed system); cite the real component's actual behavior.
+- refuted=false: you could not refute it on either ground; the concern appears to stand (then unrealistic must be false).`;
 
 export interface RefutationVerdict {
   findingId: string;
   refuted: boolean;
+  unrealistic: boolean;
   reason: string;
 }
 
@@ -33,10 +36,14 @@ export async function runRefutation(input: {
   llm: LlmClient;
   logger: RunLogger;
   max: number;
+  // PoC/scratch test files the finder wrote, so the skeptic can audit the
+  // confirmation's trust assumptions (e.g. an out-of-spec mocked verifier), not
+  // just the invariant. Keyed by path; passed verbatim.
+  pocFiles?: Array<{ path: string; content: string }>;
 }): Promise<RefutationVerdict[]> {
   const out: RefutationVerdict[] = [];
   for (const finding of input.findings.slice(0, Math.max(0, input.max))) {
-    const user = buildRefutationPrompt(finding, sourceForLocation(input.source, finding.location));
+    const user = buildRefutationPrompt(finding, sourceForLocation(input.source, finding.location), input.pocFiles ?? []);
     try {
       const raw = await input.llm.complete({
         tag: `refute_${finding.id}`,
@@ -47,12 +54,13 @@ export async function runRefutation(input: {
         thinkingLevel: input.cfg.thinkingLevel,
         agentic: true,
       });
-      const parsed = extractJsonObject<{ refuted?: unknown; reason?: unknown }>(raw);
+      const parsed = extractJsonObject<{ refuted?: unknown; unrealistic?: unknown; reason?: unknown }>(raw);
       if (parsed && typeof parsed.refuted === "boolean") {
-        const verdict: RefutationVerdict = { findingId: finding.id, refuted: parsed.refuted, reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 800) : "" };
-        finding.refutation = { refuted: verdict.refuted, reason: verdict.reason };
+        const unrealistic = parsed.unrealistic === true && parsed.refuted === true;
+        const verdict: RefutationVerdict = { findingId: finding.id, refuted: parsed.refuted, unrealistic, reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 800) : "" };
+        finding.refutation = { refuted: verdict.refuted, reason: verdict.reason, unrealistic };
         out.push(verdict);
-        await input.logger.event("hunt_refutation", { findingId: finding.id, refuted: verdict.refuted });
+        await input.logger.event("hunt_refutation", { findingId: finding.id, refuted: verdict.refuted, unrealistic });
       }
     } catch (error) {
       await input.logger.event("hunt_refutation_error", { findingId: finding.id, error: error instanceof Error ? error.message.slice(0, 300) : String(error) });
@@ -61,8 +69,11 @@ export async function runRefutation(input: {
   return out;
 }
 
-function buildRefutationPrompt(finding: AgentFinding, sourceSlice: string): string {
-  return `An unverified vulnerability claim from another auditor:
+function buildRefutationPrompt(finding: AgentFinding, sourceSlice: string, pocFiles: Array<{ path: string; content: string }>): string {
+  const poc = pocFiles.length > 0
+    ? pocFiles.map((file) => `----- ${file.path} -----\n${file.content.length > 6000 ? file.content.slice(0, 6000) + "\n…(truncated)" : file.content}`).join("\n\n")
+    : "(no PoC test files were provided)";
+  return `A vulnerability claim from another auditor:
 - Title: ${finding.title}
 - Location: ${finding.location}
 - Asserted status: ${finding.confirmationStatus}
@@ -74,7 +85,10 @@ function buildRefutationPrompt(finding: AgentFinding, sourceSlice: string): stri
 Relevant source:
 ${sourceSlice}
 
-Independently determine whether this claim holds. Try to refute it. Respond with the JSON verdict only.`;
+PoC / scratch test file(s) the finder wrote to confirm it (audit their setup, mocks, and trust assumptions — a passing test against an out-of-spec mocked component is a vacuous confirmation):
+${poc}
+
+Independently determine whether this claim/confirmation holds, on EITHER the invariant ground or the PoC-realism ground. Respond with the JSON verdict only.`;
 }
 
 function sourceForLocation(source: Doc[], location: string): string {

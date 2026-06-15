@@ -369,11 +369,27 @@ export async function runHunt(
     if (candidates.length > 0) {
       const refuteCfg = withRole(cfg, "refute");
       const refuteLlm = options.llm ?? createLlmClient(refuteCfg, logger);
-      const verdicts = await runRefutation({ findings: candidates, source, cfg: refuteCfg, llm: refuteLlm, logger, max: 8 });
+      // Give the skeptic the PoC/scratch test files so it can audit the
+      // confirmation's TRUST ASSUMPTIONS (e.g. an out-of-spec mocked verifier that
+      // makes a vacuous "confirmation"), not just re-derive the invariant.
+      const pocFiles = [...session.scratchFiles.entries()]
+        .filter(([scratchPath]) => /\.t\.(sol|rs|ts|js)$/i.test(scratchPath) || /(^|\/)tests?\//i.test(scratchPath) || /(poc|exploit)/i.test(scratchPath))
+        .map(([scratchPath, content]) => ({ path: scratchPath, content }));
+      const verdicts = await runRefutation({ findings: candidates, source, cfg: refuteCfg, llm: refuteLlm, logger, max: 8, ...(pocFiles.length > 0 ? { pocFiles } : {}) });
       for (const finding of candidates) {
         if (!finding.refutation?.refuted) continue;
-        if (finding.confirmationStatus === "confirmed-executable") finding.confirmationStatus = "suspected";
-        else if (finding.confirmationStatus === "confirmed-differential") finding.disputed = true;
+        if (finding.refutation.unrealistic) {
+          // Vacuous confirmation: the PoC only triggers under an out-of-spec trusted
+          // component, so the exploit is NOT reachable in the deployed system.
+          // Execution is ground truth only for a realistic scenario — downgrade even
+          // a confirmed-differential to a (disputed) hypothesis.
+          finding.confirmationStatus = "suspected";
+          finding.disputed = true;
+        } else if (finding.confirmationStatus === "confirmed-executable") {
+          finding.confirmationStatus = "suspected";
+        } else if (finding.confirmationStatus === "confirmed-differential") {
+          finding.disputed = true;
+        }
       }
       if (verdicts.length > 0) await logger.artifact("hunt_refutation.json", verdicts);
     }
