@@ -60,6 +60,24 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Metadata
     return;
   }
 
+  // Create a project as its own step (GitHub "New repository" style): name + materials +
+  // config, no run yet. Rejects a duplicate name. Runs happen afterwards inside it.
+  if (method === "POST" && path === "/api/projects") {
+    const body = (await readBody(req)) as { name?: string; sourcePaths?: string[]; buildRoot?: string; corpusPaths?: string[]; config?: unknown };
+    const name = (body.name ?? "").trim();
+    if (!name) {
+      sendJson(res, 400, { error: "project name is required" });
+      return;
+    }
+    if (store.listProjects().some((row) => row.name === name)) {
+      sendJson(res, 409, { error: `a project named "${name}" already exists` });
+      return;
+    }
+    store.upsertProject({ name, sourcePaths: body.sourcePaths, buildRoot: body.buildRoot, corpusPaths: body.corpusPaths, config: body.config });
+    sendJson(res, 200, { ok: true, name });
+    return;
+  }
+
   if (path.startsWith("/api/projects/")) {
     const tail = path.slice("/api/projects/".length);
     const slash = tail.indexOf("/");

@@ -135,29 +135,36 @@
   <span class="spacer"></span>
   <span id="livePill" class="counter">connecting…</span>
   <button class="icon-btn" id="themeBtn" title="Toggle theme"></button>
-  <button class="btn primary" id="newRunBtn"><svg class="octicon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M7.75 2a.75.75 0 0 1 .75.75V7h4.25a.75.75 0 0 1 0 1.5H8.5v4.25a.75.75 0 0 1-1.5 0V8.5H2.75a.75.75 0 0 1 0-1.5H7V2.75A.75.75 0 0 1 7.75 2Z"></path></svg>New run</button>
+  <button class="btn primary" id="newProjectBtn"><svg class="octicon" width="16" height="16" viewBox="0 0 16 16" aria-hidden="true"><path d="M7.75 2a.75.75 0 0 1 .75.75V7h4.25a.75.75 0 0 1 0 1.5H8.5v4.25a.75.75 0 0 1-1.5 0V8.5H2.75a.75.75 0 0 1 0-1.5H7V2.75A.75.75 0 0 1 7.75 2Z"></path></svg>New project</button>
 </header>
 <main>
   <div id="list"></div>
-  <div id="detail"><div class="empty">Select a project, or start a new run.</div></div>
+  <div id="detail"><div class="empty">Select a project, or create one with “New project”.</div></div>
 </main>
 
-<dialog id="runDialog"><form method="dialog" id="runForm">
-  <div class="dlg-head">Start a new run</div>
+<dialog id="projDialog"><form method="dialog" id="projForm">
+  <div class="dlg-head">Create project</div>
   <div class="body">
-    <div class="grid2">
-      <div><label>Verb</label><select name="verb"><option value="run">run — map → audit</option><option value="map">map — enumerate scopes</option><option value="audit">audit — dig inventory/region</option><option value="confirm">confirm — reproduce on real target</option></select></div>
-      <div><label>Target (project name)</label><input name="target" required placeholder="my-protocol" /></div>
-    </div>
+    <label>Project name</label><input name="name" required placeholder="my-protocol" />
     <label>Source paths (space-separated)</label><input name="sourcePaths" placeholder="./contracts ./src" required />
     <div class="grid2"><div><label>Build root</label><input name="buildRoot" placeholder="." /></div><div><label>Corpus paths</label><input name="corpusPaths" placeholder="./docs/specs" /></div></div>
     <div class="grid2"><div><label>Provider</label><input name="provider" placeholder="openai-codex" /></div><div><label>Model</label><input name="model" placeholder="(default)" /></div></div>
     <div class="grid2"><div><label>Thinking</label><select name="thinking"><option value="">(default)</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option value="xhigh">xhigh</option></select></div><div><label>Max scopes</label><input name="maxScopes" type="number" min="1" placeholder="10" /></div></div>
     <div class="grid2"><div><label>Map steps</label><input name="mapSteps" type="number" min="1" placeholder="(unbounded)" /></div><div><label>Dig steps</label><input name="digSteps" type="number" min="1" placeholder="(unbounded)" /></div></div>
     <div class="grid2"><div><label>Dig samples</label><input name="digSamples" type="number" min="1" placeholder="1" /></div><div><label>Dig concurrency</label><input name="digConcurrency" type="number" min="1" placeholder="1" /></div></div>
+    <div class="hint">Creates the project with its materials &amp; config — no run starts yet. Open it and click “Start audit”.</div>
+  </div>
+  <div class="dlg-foot"><button type="button" class="btn" id="projCancelBtn">Cancel</button><button class="btn primary" id="projCreateBtn" value="create">Create project</button></div>
+</form></dialog>
+
+<dialog id="runDialog"><form method="dialog" id="runForm">
+  <div class="dlg-head">Run audit — <span id="runTarget" class="mono"></span></div>
+  <div class="body">
+    <label>Verb</label><select name="verb"><option value="run">run — map → audit</option><option value="map">map — enumerate scopes only</option><option value="audit">audit — dig inventory / region</option><option value="confirm">confirm — reproduce on real target</option></select>
+    <div class="grid2" id="auditOnly" style="display:none"><div><label>Region (optional)</label><input name="region" placeholder="src/Foo.sol:120-180" /></div><div><label>Scope ids (optional)</label><input name="scope" placeholder="s1,s2" /></div></div>
     <div class="grid2" id="confirmOnly" style="display:none"><div><label>Input run dir (confirm)</label><input name="inputRunDir" placeholder="runs/my-protocol-…" /></div><div></div></div>
     <div class="checks"><label><input type="checkbox" name="quick" /> quick (breadth)</label><label><input type="checkbox" name="mockLlm" /> mock (offline)</label></div>
-    <div class="hint">Budgets are unbounded by default. Continue resumes; Restart re-maps. Source &amp; config are remembered per project.</div>
+    <div class="hint">Uses this project's source &amp; config (Edit config to change). Budgets unbounded by default.</div>
   </div>
   <div class="dlg-foot"><button type="button" class="btn" id="cancelBtn">Cancel</button><button class="btn primary" id="launchBtn" value="launch">Launch run</button></div>
 </form></dialog>
@@ -171,7 +178,7 @@
     <div class="grid2"><div><label>Thinking</label><select name="thinking"><option value="">(default)</option><option>minimal</option><option>low</option><option>medium</option><option>high</option><option value="xhigh">xhigh</option></select></div><div><label>Max scopes</label><input name="maxScopes" type="number" min="1" /></div></div>
     <div class="grid2"><div><label>Map steps</label><input name="mapSteps" type="number" min="1" placeholder="(unbounded)" /></div><div><label>Dig steps</label><input name="digSteps" type="number" min="1" placeholder="(unbounded)" /></div></div>
     <div class="grid2"><div><label>Dig samples</label><input name="digSamples" type="number" min="1" /></div><div><label>Dig concurrency</label><input name="digConcurrency" type="number" min="1" /></div></div>
-    <div class="hint">Saved to the project. The next Continue / Restart / New run uses it. Leave a budget blank for unbounded.</div>
+    <div class="hint">Saved to the project. The next Start / Continue / Restart / Run uses it. Leave a budget blank for unbounded.</div>
   </div>
   <div class="dlg-foot"><button type="button" class="btn" id="cfgCancelBtn">Cancel</button><button class="btn primary" id="cfgSaveBtn" value="save">Save config</button></div>
 </form></dialog>
@@ -208,7 +215,7 @@ function renderList() {
   const el = $("#list");
   const shown = state.projects.filter((p) => p.name.toLowerCase().includes(state.filter.toLowerCase()));
   const search = '<input class="searchbar" id="projSearch" placeholder="Filter projects…" value="' + esc(state.filter) + '" />';
-  if (state.projects.length === 0) { el.innerHTML = search + '<div class="box"><div class="empty">No projects yet.<br>Start one with “New run”.</div></div>'; bindSearch(); return; }
+  if (state.projects.length === 0) { el.innerHTML = search + '<div class="box"><div class="empty">No projects yet.<br>Create one with “New project”.</div></div>'; bindSearch(); return; }
   const rows = shown.map((p) => {
     const pr = p.progress || { total: 0, audited: 0, pending: 0 };
     const labels = Object.entries(p.findingCounts || {}).map(([s, n]) => labelWithCount(s, n)).join(" ");
@@ -262,7 +269,7 @@ async function loadFindings(reset) {
 function renderDetail() {
   const el = $("#detail");
   const d = state.detail;
-  if (!d) { el.innerHTML = '<div class="empty">Select a project, or start a new run.</div>'; return; }
+  if (!d) { el.innerHTML = '<div class="empty">Select a project, or create one with “New project”.</div>'; return; }
   const cfg = (() => { try { return JSON.parse(d.project.config_json); } catch { return {}; } })();
   const pr = d.progress;
   const running = state.active.filter((a) => a.target === d.project.name);
@@ -282,8 +289,9 @@ function renderDetail() {
       + '<div class="stat"><div class="n">' + d.runsTotal + '</div><div class="k">runs</div></div>'
     + '</div>'
     + '<div class="actions">'
-      + '<button class="btn primary" id="continueBtn">' + icon("play") + 'Continue audit</button>'
-      + '<button class="btn" id="restartBtn">' + icon("sync") + 'Restart (re-map)</button>'
+      + '<button class="btn primary" id="continueBtn">' + icon("play") + (d.runsTotal > 0 ? "Continue audit" : "Start audit") + '</button>'
+      + (d.runsTotal > 0 ? '<button class="btn" id="restartBtn">' + icon("sync") + 'Restart (re-map)</button>' : "")
+      + '<button class="btn" id="runBtn">' + icon("play") + 'Run…</button>'
       + '<button class="btn" id="editBtn">' + icon("gear") + 'Edit config</button>'
       + running.map((a) => '<button class="btn danger" data-kill="' + a.pid + '">' + icon("x") + 'Stop ' + a.verb + ' · pid ' + a.pid + '</button>').join("")
     + '</div>'
@@ -294,7 +302,8 @@ function renderDetail() {
     + (d.confirmDecisions.length ? '<div class="section-title">Confirm decisions</div><table><thead><tr><th>bug</th><th>reproduced</th><th>recommendation</th></tr></thead><tbody>'
         + d.confirmDecisions.map((c) => '<tr><td>' + esc(c.bug) + '</td><td class="mono">' + esc(c.reproduced) + '</td><td class="mono">' + esc(c.recommendation) + '</td></tr>').join("") + '</tbody></table>' : "");
   $("#continueBtn").onclick = () => command("continue");
-  $("#restartBtn").onclick = () => command("restart");
+  const rb = $("#restartBtn"); if (rb) rb.onclick = () => command("restart");
+  $("#runBtn").onclick = openRun;
   $("#editBtn").onclick = openEdit;
   el.querySelectorAll("[data-kill]").forEach((b) => b.onclick = () => fetch("/api/kill", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ pid: Number(b.dataset.kill) }) }));
   renderChips();
@@ -366,23 +375,46 @@ $("#cfgForm").onsubmit = async (e) => {
   setTimeout(loadDetail, 200);
 };
 
-// --- new run dialog ---
-const dialog = $("#runDialog");
-$("#newRunBtn").onclick = () => dialog.showModal();
-$("#cancelBtn").onclick = () => dialog.close();
-$("#runForm").querySelector("[name=verb]").onchange = (e) => { $("#confirmOnly").style.display = e.target.value === "confirm" ? "grid" : "none"; };
-$("#runForm").onsubmit = async (e) => {
-  if (e.submitter && e.submitter.id !== "launchBtn") return;
-  const f = new FormData($("#runForm"));
+// --- create project dialog ---
+const projDialog = $("#projDialog");
+$("#newProjectBtn").onclick = () => { $("#projForm").reset(); projDialog.showModal(); };
+$("#projCancelBtn").onclick = () => projDialog.close();
+$("#projForm").onsubmit = async (e) => {
+  if (e.submitter && e.submitter.id !== "projCreateBtn") return;
+  const f = new FormData($("#projForm"));
   const num = (k) => { const v = f.get(k); return v ? Number(v) : undefined; };
   const list = (k) => { const v = (f.get(k) || "").trim(); return v ? v.split(/\s+/) : []; };
-  const spec = { verb: f.get("verb"), target: f.get("target"), sourcePaths: list("sourcePaths"),
-    buildRoot: f.get("buildRoot") || undefined, corpusPaths: list("corpusPaths"),
-    provider: f.get("provider") || undefined, model: f.get("model") || undefined, thinking: f.get("thinking") || undefined,
-    maxScopes: num("maxScopes"), mapSteps: num("mapSteps"), digSteps: num("digSteps"), digSamples: num("digSamples"), digConcurrency: num("digConcurrency"),
+  const name = (f.get("name") || "").trim();
+  const body = { name, sourcePaths: list("sourcePaths"), buildRoot: f.get("buildRoot") || undefined, corpusPaths: list("corpusPaths"),
+    config: { provider: f.get("provider") || undefined, model: f.get("model") || undefined, thinking: f.get("thinking") || undefined,
+      maxScopes: num("maxScopes"), mapSteps: num("mapSteps"), digSteps: num("digSteps"), digSamples: num("digSamples"), digConcurrency: num("digConcurrency") } };
+  const res = await fetch("/api/projects", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  if (!res.ok) { const err = await res.json().catch(() => ({})); alert(err.error || "could not create project"); return; }
+  setTimeout(() => selectProject(name), 200);
+};
+
+// --- run dialog (acts on the selected project; uses its source & config) ---
+const dialog = $("#runDialog");
+function openRun() { if (!state.selected) return; $("#runForm").reset(); $("#runTarget").textContent = state.selected; $("#auditOnly").style.display = "none"; $("#confirmOnly").style.display = "none"; dialog.showModal(); }
+$("#cancelBtn").onclick = () => dialog.close();
+$("#runForm").querySelector("[name=verb]").onchange = (e) => {
+  $("#auditOnly").style.display = e.target.value === "audit" ? "grid" : "none";
+  $("#confirmOnly").style.display = e.target.value === "confirm" ? "grid" : "none";
+};
+$("#runForm").onsubmit = async (e) => {
+  if (e.submitter && e.submitter.id !== "launchBtn") return;
+  const d = state.detail; if (!d) return;
+  const pf = projectFields(d);
+  const f = new FormData($("#runForm"));
+  const spec = { verb: f.get("verb"), target: state.selected,
+    sourcePaths: pf.sourcePaths, buildRoot: pf.buildRoot || undefined, corpusPaths: pf.corpusPaths,
+    provider: pf.cfg.provider, model: pf.cfg.model, thinking: pf.cfg.thinking,
+    maxScopes: pf.cfg.maxScopes ?? undefined, mapSteps: pf.cfg.mapSteps ?? undefined, digSteps: pf.cfg.digSteps ?? undefined,
+    digSamples: pf.cfg.digSamples ?? undefined, digConcurrency: pf.cfg.digConcurrency ?? undefined,
+    region: f.get("region") || undefined, scope: f.get("scope") || undefined,
     inputRunDir: f.get("inputRunDir") || undefined, quick: f.get("quick") === "on", mockLlm: f.get("mockLlm") === "on" };
   await fetch("/api/launch", { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(spec) });
-  setTimeout(() => selectProject(spec.target), 400);
+  setTimeout(loadDetail, 400);
 };
 
 // --- live stream ---
