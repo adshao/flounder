@@ -221,7 +221,7 @@ Try the package locally from this directory:
 pi -e .
 ```
 
-The extension registers `fsa_run` and installs the shared command-safety guardrail for shell commands.
+The extension registers two tools — `fsa_run` (the sealed map→dig audit) and `fsa_confirm` (the open-world reproduction of a finished run's findings) — and installs the shared command-safety guardrail for shell commands. They mirror the `fsa run` / `fsa confirm` CLI verbs so a pi agent can orchestrate audit→confirm.
 
 ## Outputs
 

@@ -21,9 +21,16 @@ test("pi extension registers agentic audit tool", async () => {
   extension(fakePi);
 
   assert.ok(tools.has("fsa_run"));
+  assert.ok(tools.has("fsa_confirm"));
   assert.ok(commands.has("fsa"));
   assert.ok(handlers.has("tool_call"));
   assert.ok(handlers.has("user_bash"));
+
+  // fsa_confirm mirrors the `fsa confirm` CLI surface: it needs the prior run dir + the
+  // target code to reproduce against.
+  const confirmParams = tools.get("fsa_confirm").parameters;
+  assert.ok(confirmParams.required.includes("runDir"));
+  assert.ok(confirmParams.required.includes("sourcePaths"));
 });
 
 test("pi extension blocks live-network exploit-like bash commands", async () => {
