@@ -12,10 +12,11 @@ import { RunManager, type LaunchSpec } from "./run-manager.js";
 
 // The SPA is a static asset copied to dist/server/public at build (scripts/copy-assets.mjs),
 // kept as a real .html file so its own backticks/${} do not fight a TS template literal.
-const UI_HTML = loadUiHtml();
+// Read per request (a tiny file) so a rebuilt asset shows on reload without a server restart.
+const UI_HTML_PATH = fileURLToPath(new URL("./public/index.html", import.meta.url));
 function loadUiHtml(): string {
   try {
-    return readFileSync(fileURLToPath(new URL("./public/index.html", import.meta.url)), "utf8");
+    return readFileSync(UI_HTML_PATH, "utf8");
   } catch {
     return "<!doctype html><meta charset=utf-8><body style='font-family:sans-serif;padding:2rem'>fsa UI asset missing — run <code>npm run build</code>.</body>";
   }
@@ -50,7 +51,7 @@ async function handle(req: IncomingMessage, res: ServerResponse, store: Metadata
 
   if (method === "GET" && path === "/") {
     res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-    res.end(UI_HTML);
+    res.end(loadUiHtml());
     return;
   }
 
