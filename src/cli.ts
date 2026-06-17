@@ -309,7 +309,7 @@ run / map / audit deep-phase options:
   --dig-steps <n>         cap each scope's dig (default: UNBOUNDED; the dig stops when its obligations are discharged)
   --dig-samples <n>       independent dig passes per scope, findings unioned (raises recall), default 1
   --dig-concurrency <n>   scopes deep-audited in parallel (isolated workspaces), default 1
-  --max-scopes <n>        un-audited scopes the dig audits per run, default 6
+  --max-scopes <n>        un-audited scopes the dig audits per run, default 10
   --remap                 re-enumerate scopes from scratch (default resumes the persisted inventory)
 
 fsa audit selectors (choose one; default digs the existing inventory):

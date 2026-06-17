@@ -146,7 +146,7 @@ export function defaultConfig(): AuditorConfig {
     auditDeep: false,
     auditMapSteps: 20,
     auditDigSteps: 30,
-    auditMaxScopes: 6,
+    auditMaxScopes: 10,
     auditDigSamples: 1,
     auditDigConcurrency: 1,
     auditRemap: false,
