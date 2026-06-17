@@ -36,7 +36,7 @@ interface ConfirmProvenance {
 
 export async function runConfirm(
   cfg: AuditorConfig,
-  options: { inputRunDir: string; maxSteps?: number; streamEvents?: boolean },
+  options: { inputRunDir: string; maxSteps?: number; fresh?: boolean; streamEvents?: boolean },
 ): Promise<ConfirmRunResult> {
   // Confirm needs a real agent that can fork a live network and run real nodes; the
   // mock/CLI fallbacks cannot, so this mode requires a pi-session provider.
@@ -70,7 +70,15 @@ export async function runConfirm(
   if (priorFindings.length === 0) {
     throw new Error(`fsa confirm: no confirmed findings in ${path.join(inputRunDir, "audit_findings.json")} (point it at a completed run dir).`);
   }
-  const seed = renderFindingsSeed(priorFindings);
+  // RESUME (auto, unless --fresh): an interrupted prior confirm of THIS input run left a
+  // decision sheet; carry its already-SETTLED rows (reproduced yes/no) forward and tell
+  // the model to skip them, so a re-run continues instead of re-reproducing from scratch.
+  const settled = options.fresh ? [] : await loadSettledFromPriorConfirm(confirmCfg.outputDir, confirmCfg.targetName, inputRunDir, logger.runDir);
+  let seed = renderFindingsSeed(priorFindings);
+  if (settled.length > 0) {
+    seed += `\n\n=== ALREADY SETTLED in a prior confirm run — copy these rows into confirm_decision.json VERBATIM and do NOT reproduce them again; work ONLY on findings not settled here ===\n${JSON.stringify(settled, null, 1)}`;
+    await logger.event("audit_confirm_resume", { settled: settled.length });
+  }
 
   // 3. Workspace: copy the build root (reproducible) and the FROZEN report + per-finding
   // disclosures as corpus, so the model can read each finding's claimed exploit/fix.
@@ -116,6 +124,12 @@ export async function runConfirm(
   // PoC) and merge rows a single fix neutralizes. This is the framework's call, not the
   // model's — "distinct bugs" is decided by execution, not by the model's grouping alone.
   let rows = readConfirmDecision(session);
+  // Resume safety net: guarantee every prior-settled row survives even if the model
+  // dropped it from confirm_decision.json (it was told to carry them verbatim).
+  if (settled.length > 0) {
+    const present = new Set(rows.map((row) => row.bug.trim().toLowerCase()));
+    for (const row of settled) if (!present.has(row.bug.trim().toLowerCase())) rows.push(row);
+  }
   let equivalence: { clusters: string[][]; edges: FixEquivEdge[]; skipped?: boolean } = { clusters: rows.map((_, idx) => [String(idx)]), edges: [] };
   if (rows.length > 1 && session.workspace && session.baselineFiles) {
     const items: FixEquivItem[] = rows.map((row, idx) => {
@@ -264,7 +278,7 @@ function renderFileManifest(source: Doc[], corpusEntries: string[]): string {
 
 // --- decision sheet ----------------------------------------------------------
 
-interface ConfirmDecisionRow {
+export interface ConfirmDecisionRow {
   bug: string;
   members: string[];
   distinctFix: string;
@@ -347,6 +361,39 @@ function asStringList(value: unknown): string[] {
   if (typeof value === "string") return value.trim() ? [value.trim()] : [];
   if (!Array.isArray(value)) return [];
   return value.map((entry) => (typeof entry === "string" ? entry.trim() : "")).filter(Boolean).slice(0, 16);
+}
+
+// Find the latest prior confirm run of THIS input run (same output dir + target, matched
+// by frozen provenance) and return its SETTLED decision rows (reproduced yes/no) — the
+// resume basis. Skips the current run dir; falls through to an older run if the latest has
+// no decision sheet yet (killed before its first checkpoint).
+export async function loadSettledFromPriorConfirm(outputDir: string, targetName: string, inputRunDir: string, currentRunDir: string): Promise<ConfirmDecisionRow[]> {
+  const prefix = `${targetName}-confirm-`;
+  const currentBase = path.basename(currentRunDir);
+  const wantInput = publicPath(inputRunDir);
+  let names: string[] = [];
+  try {
+    names = await readdir(outputDir);
+  } catch {
+    return [];
+  }
+  const candidates = names.filter((name) => name.startsWith(prefix) && name !== currentBase).sort().reverse();
+  for (const name of candidates) {
+    const dir = path.join(outputDir, name);
+    try {
+      const prov = JSON.parse(await readFile(path.join(dir, "confirm_provenance.json"), "utf8")) as { inputRunDir?: unknown };
+      if (prov?.inputRunDir !== wantInput) continue;
+      const raw: unknown = JSON.parse(await readFile(path.join(dir, "confirm_decision.json"), "utf8"));
+      const items = Array.isArray(raw) ? raw : [];
+      const rows = items
+        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
+        .map(normalizeDecisionRow);
+      return rows.filter((row) => row.reproduced === "yes" || row.reproduced === "no");
+    } catch {
+      // unreadable provenance/decision (e.g. killed before first checkpoint) — try the next-older run
+    }
+  }
+  return [];
 }
 
 // Collapse the model's rows per the fix-equivalence clusters: each cluster of row ids

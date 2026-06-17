@@ -89,12 +89,32 @@ export async function runAuditSession(input: {
   let finalizing = false;
   let finalizeTurns = 0;
   let finalizeAborted = false;
+  // Confirm-mode resume: checkpoint the model's decision sheet to the run dir each turn,
+  // so an interrupted `fsa confirm` keeps the rows reproduced so far (raw; the end-of-run
+  // write replaces them with the consolidated set).
+  const checkpointConfirm = async (): Promise<void> => {
+    let raw: string | undefined;
+    for (const [key, value] of input.ctx.session.scratchFiles) {
+      if (key === "confirm_decision.json" || key.endsWith("/confirm_decision.json")) {
+        raw = value;
+        break;
+      }
+    }
+    if (raw === undefined) return;
+    try {
+      const parsed: unknown = JSON.parse(raw);
+      if (Array.isArray(parsed)) await input.logger.artifact("confirm_decision.json", parsed);
+    } catch {
+      // partial / mid-write JSON — skip this checkpoint
+    }
+  };
   const unsubscribe = session.subscribe((event) => {
     if (event.type === "tool_execution_start") {
       void input.logger.event("audit_step", { step: stepNo + 1, tool: event.toolName });
     } else if (event.type === "tool_execution_end" && event.isError) {
       void input.logger.event("audit_tool_error", { tool: event.toolName });
     } else if (event.type === "turn_end") {
+      if (input.confirm) void checkpointConfirm();
       if (finalizing) {
         finalizeTurns += 1;
         if (finalizeTurns >= MAX_FINALIZE_TURNS && !finalizeAborted) {

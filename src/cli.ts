@@ -18,10 +18,21 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  if (cmd === "run") {
+  // The three sealed agentic verbs share one driver (runAudit); the verb selects the
+  // posture. `run` = map -> audit one-stop; `map` = enumerate scopes only; `audit` =
+  // the dig stage (a region, inventory scopes, or claims to verify).
+  if (cmd === "run" || cmd === "map" || cmd === "audit") {
     const { cfg } = await parseConfig(rest);
     if (cfg.sourcePaths.length === 0) throw new Error("--source <paths...> is required");
-    if (cfg.dryRun) throw new Error("fsa run is an agentic mode and cannot run in --dry-run; use the mock model with --mock-llm for offline checks");
+    if (cfg.dryRun) throw new Error("agentic mode cannot run in --dry-run; use the mock model with --mock-llm for offline checks");
+    applyAuditPosture(cmd, rest, cfg);
+    // Sealed audit verbs default to UNBOUNDED step budgets (like `fsa confirm`): a real
+    // audit's decisive obligation can surface late, and a fixed budget silently truncates
+    // it. The model finishes early by emitting done; the budget is only a ceiling. Pass
+    // --max-steps / --map-steps / --dig-steps to cap a phase.
+    if (readIntFlag(rest, "--max-steps") === undefined) cfg.auditMaxSteps = Number.POSITIVE_INFINITY;
+    if (readIntFlag(rest, "--map-steps") === undefined) cfg.auditMapSteps = Number.POSITIVE_INFINITY;
+    if (readIntFlag(rest, "--dig-steps") === undefined) cfg.auditDigSteps = Number.POSITIVE_INFINITY;
     const result = await runAudit(cfg, {
       streamEvents: true,
       ...(hasFlag(rest, "--mock-llm") ? { llm: new MockAuditLlmClient() } : {}),
@@ -30,7 +41,7 @@ async function main(argv: string[]): Promise<void> {
     console.log(`[report] ${result.runDir}/audit_report.md  ← consolidated results (findings, hypotheses, scope coverage)`);
     if (result.scopeCoverage) {
       const { total, audited, pending } = result.scopeCoverage;
-      console.log(`[scopes] audited ${audited}/${total}` + (pending > 0 ? `, ${pending} pending — run the same command again to audit the next batch (or --remap to re-enumerate).` : " — inventory fully audited."));
+      console.log(`[scopes] audited ${audited}/${total}` + (pending > 0 ? `, ${pending} pending — \`fsa audit\` again for the next batch (or --remap to re-enumerate).` : " — inventory fully audited."));
     }
     return;
   }
@@ -45,8 +56,10 @@ async function main(argv: string[]): Promise<void> {
     if (!inputRunDir) throw new Error("fsa confirm needs a prior run directory: fsa confirm <run-dir> --source <paths...>");
     if (cfg.sourcePaths.length === 0) throw new Error("--source <paths...> is required (the target code to reproduce against)");
     // Confirm is UNBOUNDED by default (run until the model finishes); --max-steps caps it only if given.
+    // It auto-RESUMES a prior interrupted confirm of the same run dir (carries settled rows forward); --fresh ignores that.
     const maxSteps = readIntFlag(rest, "--max-steps");
-    const result = await runConfirm(cfg, { inputRunDir, ...(maxSteps !== undefined ? { maxSteps } : {}), streamEvents: true });
+    const fresh = rest.includes("--fresh");
+    const result = await runConfirm(cfg, { inputRunDir, ...(maxSteps !== undefined ? { maxSteps } : {}), ...(fresh ? { fresh: true } : {}), streamEvents: true });
     console.log(`[confirm dir] ${result.runDir}`);
     console.log(`[report] ${result.runDir}/confirm_report.md  ← decision sheet (distinct bugs, reproduced?, novelty, recommendation)`);
     console.log(`[provenance] ${result.runDir}/confirm_provenance.json  ← fingerprints of the findings frozen before any network access`);
@@ -83,34 +96,57 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   cfg.auditPrepareTimeoutMs = readIntFlag(args, "--prepare-timeout-ms") ?? cfg.auditPrepareTimeoutMs;
   if (args.includes("--no-refute")) cfg.auditRefute = false;
   if (args.includes("--no-appeal")) cfg.auditAppeal = false;
-  if (args.includes("--deep")) cfg.auditDeep = true;
+  // The audit POSTURE (map / dig region / dig scope / verify) is set by the command
+  // verb in applyAuditPosture, not here. parseConfig only reads shared, posture-agnostic
+  // knobs (materials, models, budgets, deep-phase parameters).
   cfg.auditMaxScopes = readIntFlag(args, "--max-scopes") ?? cfg.auditMaxScopes;
   cfg.auditMapSteps = readIntFlag(args, "--map-steps") ?? cfg.auditMapSteps;
   cfg.auditDigSteps = readIntFlag(args, "--dig-steps") ?? cfg.auditDigSteps;
   cfg.auditDigSamples = readIntFlag(args, "--dig-samples") ?? cfg.auditDigSamples;
   cfg.auditDigConcurrency = readIntFlag(args, "--dig-concurrency") ?? cfg.auditDigConcurrency;
   if (args.includes("--remap")) cfg.auditRemap = true;
-  const scopeSel = readFlag(args, "--scope");
-  if (scopeSel) {
-    const ids = scopeSel.split(",").map((id) => id.trim()).filter(Boolean);
-    if (ids.length > 0) {
-      cfg.auditScopeIds = ids;
-      cfg.auditDeep = true; // picking a scope is a deep (map → dig) operation
-    }
-  }
-  const verifyPath = readFlag(args, "--verify");
-  if (verifyPath !== undefined) cfg.auditVerify = verifyPath;
-  const deepFocus = readFlag(args, "--deep-focus");
-  if (deepFocus !== undefined) {
-    cfg.auditDeep = true;
-    cfg.auditDeepFocus = deepFocus;
-  }
   if (args.includes("--dry-run")) cfg.dryRun = true;
   const thinking = readFlag(args, "--thinking");
   if (thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh") {
     cfg.thinkingLevel = thinking;
   }
   return { cfg };
+}
+
+/** Map a sealed agentic verb (run/map/audit) + its args to the runAudit posture flags. */
+function applyAuditPosture(cmd: string, rest: string[], cfg: AuditorConfig): void {
+  if (cmd === "map") {
+    // Enumerate + persist the scope inventory only; no dig.
+    cfg.auditDeep = true;
+    cfg.auditMapOnly = true;
+    return;
+  }
+  if (cmd === "audit") {
+    // The dig stage. `audit --verify <file>` confirms given claims; `audit <region>`
+    // deep-audits a pinned region; `audit [--scope id,...]` digs the existing inventory
+    // (which requires a prior `fsa map`).
+    const verifyFile = readFlag(rest, "--verify");
+    if (verifyFile !== undefined) {
+      cfg.auditVerify = verifyFile;
+      return;
+    }
+    const region = rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined;
+    if (region) {
+      cfg.auditDeep = true;
+      cfg.auditDeepFocus = region;
+      return;
+    }
+    cfg.auditDeep = true;
+    cfg.auditRequireInventory = true; // dig the existing inventory; never auto-map here
+    const scopeSel = readFlag(rest, "--scope");
+    if (scopeSel) {
+      const ids = scopeSel.split(",").map((id) => id.trim()).filter(Boolean);
+      if (ids.length > 0) cfg.auditScopeIds = ids;
+    }
+    return;
+  }
+  // cmd === "run": map -> audit one-stop, unless --quick (a single breadth pass).
+  if (!rest.includes("--quick")) cfg.auditDeep = true;
 }
 
 function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>): void {
@@ -232,51 +268,59 @@ function projectHistoryLocation(cfg: AuditorConfig): { outputDir: string; target
 }
 
 function printHelp(): void {
-  console.log(`full-stack-auditor
+  console.log(`full-stack-auditor — white-hat agentic security audit.
 
 Usage:
-  fsa run --target <name> --source <paths...> [--corpus <paths...>] [--max-steps <n>]
-  fsa confirm <run-dir> --source <paths...> [--target <name>] [--max-steps <n>]   (unbounded by default; --max-steps caps it)
-  fsa history import-run --target <name> --run <dir> [--history-dir <dir>]
+  fsa run     --target <name> --source <paths...> [--corpus <paths...>]      sealed audit: map -> audit (--quick = one breadth pass)
+  fsa map     --target <name> --source <paths...> [--corpus <paths...>]      enumerate the scope inventory only (writes audit_scopes.json)
+  fsa audit   [<region> | --scope <id,...> | --verify <file>] --source ...   deep-audit a region, inventory scopes, or given claims
+  fsa confirm <run-dir> --source <paths...>                                  open-world: reproduce a run's findings on the real target
+  fsa history import-run --target <name> --run <dir>
 
-run is the network-SEALED discovery pass: the model finds + proves bugs blind, with no
-network access (provably no online lookup). confirm is the open-world counterpart: it
-freezes a prior run's findings, then — WITH the network — reproduces each against real
-ground truth (e.g. a mainnet fork), consolidates duplicates into distinct bugs, checks
-novelty/corroboration online (leads, never proof), and emits a submit/no-submit decision
-sheet. Found blind, then confirmed open.
+Sealed vs open world:
+  run / map / audit are NETWORK-SEALED — the model finds and proves bugs blind, with no
+  network access (provably no online lookup). confirm is the OPEN-WORLD counterpart: it
+  freezes a prior run's findings, then WITH the network reproduces each against real
+  ground truth (e.g. a mainnet fork), consolidates duplicates, checks novelty, and emits a
+  submit/no-submit decision sheet. Found blind (run/map/audit), reproduced open (confirm).
 
-audit is the thin agentic mode: the model drives its own investigation with
-pi-style read/write/edit/bash tools and durable cross-run memory. The framework
-supplies capability and verification, not a checklist.
+The model drives its own investigation with read/write/edit/bash tools and durable
+cross-run memory. The framework supplies capability and verification, not a checklist.
 
-Options:
+Shared options:
   --source <paths...>     code under audit; the model reads (not modifies) these. Point at a buildable root (or use --build-root) to enable execution confirmation.
-  --corpus <paths...>     design/reference MATERIALS the model reads to derive what the code MUST enforce: specifications, whitepapers, design notes, protocol docs, prior audit reports, incident write-ups/post-mortems, even a relevant book chapter. Copied into the sandbox under corpus/; the map/dig prompts treat them as design intent (lens 1). This is the supported way to give the audit context — it is CONTEXT (what the system is supposed to guarantee), not answers. Do not put the suspected bug or its location here; provide the spec and let the model find the gap.
+  --corpus <paths...>     design/reference MATERIALS the model reads to derive what the code MUST enforce (specs, whitepapers, design notes, prior audits, incident briefs). Context, not answers — never the bug, its location, or mechanism.
+  --build-root <path>     directory copied into the sandbox so it is buildable (e.g. a workspace root); defaults to --source
+  --target <name>         run/artifact name and durable-memory key
   --config <file>         JSON config with project context, models, and paths
   --provider <name>       pi-ai provider (default openai-codex); codex-cli/claude-code are CLI fallbacks
   --model <name>          set the audit model
-  --history-dir <dir>     project history directory, default <out>/history
   --thinking <level>      minimal|low|medium|high|xhigh
-  --max-steps <n>         audit: max agent turns/actions before stopping, default 40
-  --scope-note <text>     audit: one-line authorized-scope hint for the agent
-  --no-prepare            audit: skip the toolchain warm-up (deps fetch/build)
-  --prepare-timeout-ms <n>
-                          audit: per-command timeout for the warm-up, default 600000
-  --build-root <path>     audit: directory copied into the sandbox so it is buildable (e.g. a workspace root); defaults to --source
-  --no-refute             audit: skip the independent-refutation pass on confirmed findings
-  --no-appeal             audit: skip the one faithful-PoC appeal a refuted finding may make
-  --deep                  audit: map → dig flow (map enumerates scopes, dig deep-audits the top ones)
-  --deep-focus <path>     audit: skip map and deep-audit one pinned region (implies --deep)
-  --max-scopes <n>        audit: how many un-audited scopes the dig phase audits per run, default 6
-  --map-steps <n>         audit: action budget for the map phase, default 20
-  --dig-steps <n>         audit: per-scope action budget for the dig phase, default 30
-  --dig-samples <n>       audit: independent dig passes per scope, findings unioned (raises recall), default 1
-  --dig-concurrency <n>   audit: how many scopes to deep-audit in parallel (isolated workspaces), default 1
-  --remap                 audit: re-enumerate scopes from scratch (default resumes the persisted inventory)
-  --scope <id[,id...]>    audit: deep-audit specific scope id(s) from the inventory (implies --deep; run --deep once first to enumerate)
-  --verify <file>         audit: confirm-or-refute existing suspected finding(s) by execution. <file> is JSON (one finding or an array; each: title, location, description, exploit_sketch?, fix_patch?). Skips map/dig; writes a PoC, builds, runs it through the confirmation gate + differential, and marks each confirmed-differential / confirmed-executable / REFUTED. Needs a buildable target (do not pass --no-prepare).
-  --mock-llm              run with the deterministic mock model
+  --out <dir>             artifact output directory (default runs)
+  --history-dir <dir>     project history directory, default <out>/history
+  --scope-note <text>     one-line authorized-scope hint for the agent
+  --max-steps <n>         cap agent turns for a breadth pass / pinned audit (default: UNBOUNDED — the model stops when done)
+  --no-prepare            skip the toolchain warm-up (deps fetch/build)
+  --prepare-timeout-ms <n>  per-command timeout for the warm-up, default 600000
+  --no-refute / --no-appeal  skip the independent-refutation / one-appeal passes on confirmed findings
+  --mock-llm              use the deterministic mock model (offline)
+
+run / map / audit deep-phase options:
+  --quick                 run only: a single breadth pass instead of map -> audit
+  --map-steps <n>         cap the map phase (default: UNBOUNDED)
+  --dig-steps <n>         cap each scope's dig (default: UNBOUNDED; the dig stops when its obligations are discharged)
+  --dig-samples <n>       independent dig passes per scope, findings unioned (raises recall), default 1
+  --dig-concurrency <n>   scopes deep-audited in parallel (isolated workspaces), default 1
+  --max-scopes <n>        un-audited scopes the dig audits per run, default 10
+  --remap                 re-enumerate scopes from scratch (default resumes the persisted inventory)
+
+fsa audit selectors (choose one; default digs the existing inventory):
+  <region>                deep-audit one pinned region, e.g. src/Foo.sol:120-180 (no map needed)
+  --scope <id[,id...]>    deep-audit specific scope id(s) from the inventory (run fsa map first)
+  --verify <file>         confirm-or-refute given suspected finding(s) by execution. <file> is JSON (one finding or an array; each: title, location, description, exploit_sketch?, fix_patch?). Writes a PoC, builds, runs it through the confirmation gate + differential, marking each confirmed-differential / confirmed-executable / REFUTED. Needs a buildable target.
+
+fsa confirm: unbounded by default (ends when the model finishes); --max-steps caps it. Auto-resumes an
+interrupted prior confirm of the same run dir (carries already-settled rows forward); --fresh ignores it.
 `);
 }
 

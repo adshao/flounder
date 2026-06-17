@@ -49,6 +49,12 @@ export interface AuditorConfig {
   // Re-enumerate the scope inventory from scratch instead of resuming the
   // persisted one (which would otherwise continue with the next un-audited scopes).
   auditRemap: boolean;
+  // `fsa map`: run only the MAP phase (enumerate + persist the scope inventory) and
+  // stop — no dig. The resumable `fsa audit` then digs from the persisted inventory.
+  auditMapOnly: boolean;
+  // `fsa audit` (dig stage): require an existing scope inventory rather than auto-mapping.
+  // `fsa run` (the map -> audit one-stop) leaves this false so it enumerates first.
+  auditRequireInventory: boolean;
   // Manually pick specific scope ids from the persisted inventory to deep-audit
   // (the human-in-the-loop seam), instead of the automatic top-by-score selection.
   auditScopeIds?: string[];
@@ -140,10 +146,12 @@ export function defaultConfig(): AuditorConfig {
     auditDeep: false,
     auditMapSteps: 20,
     auditDigSteps: 30,
-    auditMaxScopes: 6,
+    auditMaxScopes: 10,
     auditDigSamples: 1,
     auditDigConcurrency: 1,
     auditRemap: false,
+    auditMapOnly: false,
+    auditRequireInventory: false,
     confirmMode: false,
     dryRun: false,
   };

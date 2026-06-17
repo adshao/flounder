@@ -32,6 +32,7 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
       if (params.scopeNote) cfg.auditScopeNote = params.scopeNote;
       cfg.outputDir = params.outputDir ?? cfg.outputDir;
       if (params.historyDir !== undefined) cfg.historyDir = params.historyDir;
+      cfg.auditDeep = true; // fsa_run = map -> audit, matching the `fsa run` CLI verb
 
       const result = await runAudit(cfg);
       const confirmed = result.summary.findings.filter((finding) => finding.confirmationStatus === "confirmed-executable").length;
