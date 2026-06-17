@@ -181,6 +181,23 @@ export async function runAudit(
     manualFindings = true;
     steps = aggregatedSteps;
     stoppedReason = "finished";
+  } else if (cfg.auditMapOnly) {
+    // MAP only (`fsa map`): enumerate and persist the scope inventory, then stop — no
+    // dig. The resumable `fsa audit` digs from this inventory afterwards.
+    const inventoryDir = projectHistoryDir(historyLocation(cfg));
+    const mapPhase = await runPhase(withRole(cfg, "map"), { mode: "map", maxSteps: cfg.auditMapSteps });
+    scopeInventory = readScratchScopes(session);
+    for (const scope of scopeInventory) if (!scope.status) scope.status = "pending";
+    await saveScopeInventory(inventoryDir, scopeInventory);
+    await logger.artifact("audit_scopes.json", scopeInventory);
+    await logger.event("audit_map_done", { scopes: scopeInventory.length });
+    await logger.event("audit_scope_progress", { ...scopeProgress(scopeInventory), resumed: false });
+    clearScratchFindings(session);
+    session.findings = [];
+    session.counters.finding = 0;
+    manualFindings = true; // map produces a scope inventory, not findings
+    steps = mapPhase.steps;
+    stoppedReason = "finished";
   } else if (cfg.auditDeep && !cfg.auditDeepFocus) {
     // MAP → DIG, resumable. The complete scope inventory is persisted under the
     // project history dir; each run deep-audits the next batch of un-audited
@@ -192,8 +209,8 @@ export async function runAudit(
     const picked = cfg.auditScopeIds ?? [];
     scopeInventory = cfg.auditRemap ? [] : await loadScopeInventory(inventoryDir);
     const resuming = scopeInventory.length > 0;
-    if (picked.length > 0 && !resuming) {
-      throw new Error("--scope needs an existing scope inventory; run `fsa run --deep` first to enumerate scopes, then pick from audit_scopes.json.");
+    if (!resuming && (picked.length > 0 || cfg.auditRequireInventory)) {
+      throw new Error("`fsa audit` needs an existing scope inventory; run `fsa map` first to enumerate scopes (then pick with `--scope` from audit_scopes.json), or `fsa run` to map and audit in one pass.");
     }
     if (!resuming) {
       const mapPhase = await runPhase(withRole(cfg, "map"), { mode: "map", maxSteps: cfg.auditMapSteps });

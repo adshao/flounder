@@ -94,24 +94,25 @@ One command; the model decides what to read, test, and report. The flags below s
 - `--build-root <dir>` — when `--source` is narrow inside a larger workspace, the build root the sandbox copies so the project compiles (the model still reads only `--source`). A buildable workspace is what separates `confirmed` from `suspected`.
 - `--corpus <paths...>` — design **intent** the model reads to derive what the code MUST enforce: the project's real specs, whitepapers, design notes, prior audits, or a strictly factual incident brief. Corpus is context, never answers — it must not name the bug, its location, or its mechanism, and you should not author it yourself. Give the spec and let the model find the gap.
 
-### Modes
+### Commands
 
-All modes share the tools, the confirmation gate, and the local-only boundary.
+The sealed verbs (`run` / `map` / `audit`) share the tools, the confirmation gate, and the network-sealed boundary; they differ only in what slice they cover. `confirm` is the open-world follow-up (see [Confirm](#confirm--open-world-reproduction)).
 
-| Mode | When to use |
+| Command | What it does |
 |---|---|
-| breadth (default) | a quick survey of a small target |
-| `--deep` (map → dig) | **the default for a real audit** — MAP enumerates and scores a complete scope inventory; DIG deep-audits the highest-scored scopes obligation-by-obligation and execution-confirms. Resumable, never silently drops a scope. |
-| `--deep-focus <region>` | skip enumeration; deep-audit one region you already care about |
-| `--scope <id,...>` | after a `--deep` map, dig specific inventory items (the human-in-the-loop pick over the complete map) |
-| `--verify <findings.json>` | confirm-or-refute existing suspected findings by execution — the standalone confirmation step on a prior run's `audit_findings.json` |
+| `fsa run` | **the default real audit** — map → audit in one pass: MAP enumerates and scores a complete scope inventory, then the dig deep-audits the highest-scored scopes obligation-by-obligation and execution-confirms. Resumable, never silently drops a scope. (`--quick` runs a single breadth pass instead.) |
+| `fsa map` | enumerate + persist the scope inventory only (`audit_scopes.json`), no dig — inspect or curate scopes before auditing |
+| `fsa audit <region>` | deep-audit one region you already care about (skip the map) |
+| `fsa audit --scope <id,...>` | dig specific inventory items after a `fsa map` (the human-in-the-loop pick over the complete map) |
+| `fsa audit --verify <findings.json>` | confirm-or-refute existing suspected findings by execution — the standalone confirmation step on a prior run's `audit_findings.json` |
+| `fsa confirm <run-dir>` | open-world: reproduce a run's findings on the real target |
 
 ### Most effective setup
 
-For a real audit, run `--deep` on a buildable target:
+For a real audit, run `fsa run` (map → audit) on a buildable target:
 
 ```bash
-fsa run --deep \
+fsa run \
   --target protocol \
   --source ./contracts --build-root . \
   --corpus ./docs/specs \
@@ -130,12 +131,12 @@ fsa run --deep \
 
 ### Examples
 
-**Zcash — Rust ZK circuits (stack-agnostic, execution-confirmed).** Audit a circuit crate for a soundness gap: `--source` the crate, `--build-root` the cargo workspace, `--corpus` the circuit's design spec. `--deep` makes MAP enumerate the circuit's constraints — including operands the spec treats as given, a classic under-constrained-witness bug — and DIG write a `MockProver` malicious-witness test. A real crate-internal soundness bug reached `confirmed-differential` this way (the model wrote the exploit, the framework built and ran it, then applied the model's fix and re-ran to show it blocked). A subtle one needs `--scope` + `--dig-samples` and an uninterrupted dig.
+**Zcash — Rust ZK circuits (stack-agnostic, execution-confirmed).** Audit a circuit crate for a soundness gap: `--source` the crate, `--build-root` the cargo workspace, `--corpus` the circuit's design spec. `fsa run` makes MAP enumerate the circuit's constraints — including operands the spec treats as given, a classic under-constrained-witness bug — and the dig write a `MockProver` malicious-witness test. A real crate-internal soundness bug reached `confirmed-differential` this way (the model wrote the exploit, the framework built and ran it, then applied the model's fix and re-ran to show it blocked). A subtle one needs `fsa audit --scope <id>` + `--dig-samples` and an uninterrupted dig.
 
 **Aztec — Solidity rollup (incident analysis and cold audit).** Two scenarios on the deployed `RollupProcessorV3`:
 
-- *Incident analysis* — give the agent the real deployed contracts (`--source`/`--build-root` on the Foundry project), the official Aztec specs, and a strictly factual on-chain incident brief (`--corpus`); nothing you authored, no hand-picked scope. Let it localize, then `--verify` (or the dig) confirms by execution.
-- *Cold audit* — the same materials **minus** the incident brief. From scratch, `--deep` independently flagged the decode/settlement region and reached `confirmed-differential` on an unbound-input bug (`numRealTransactions` not bound to the verifier's public-input hash), with a faithful proof-of-malleability PoC — with no knowledge that an incident had ever occurred.
+- *Incident analysis* — give the agent the real deployed contracts (`--source`/`--build-root` on the Foundry project), the official Aztec specs, and a strictly factual on-chain incident brief (`--corpus`); nothing you authored, no hand-picked scope. Let it localize, then `fsa audit --verify` (or the dig) confirms by execution.
+- *Cold audit* — the same materials **minus** the incident brief. From scratch, `fsa run` independently flagged the decode/settlement region and reached `confirmed-differential` on an unbound-input bug (`numRealTransactions` not bound to the verifier's public-input hash), with a faithful proof-of-malleability PoC — with no knowledge that an incident had ever occurred.
 
 ### Local checks
 

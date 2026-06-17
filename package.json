@@ -32,7 +32,7 @@
     "verify": "npm run check && npm test && npm run mock-audit && npm run check:public",
     "prepack": "npm run build",
     "start": "node ./dist/cli.js",
-    "mock-audit": "node ./dist/cli.js run --target mock-audit --source ./fixtures --mock-llm --max-steps 10 --out runs"
+    "mock-audit": "node ./dist/cli.js run --quick --target mock-audit --source ./fixtures --mock-llm --max-steps 10 --out runs"
   },
   "keywords": [
     "pi-package",

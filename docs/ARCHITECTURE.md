@@ -49,17 +49,17 @@ The loop has one protocol: the model emits exactly one JSON tool action per turn
 
 ## Audit Modes
 
-The same loop runs three postures, selected by flags. All three share the tools, the confirmation gate, and the white-hat boundary; they differ only in the prompt and (for map → dig) the orchestration around the loop.
+The same loop runs several postures, selected by the CLI verb (`src/cli.ts` `applyAuditPosture`). All share the tools, the confirmation gate, and the white-hat boundary; they differ only in the prompt and (for map → dig) the orchestration around the loop.
 
-- **Breadth** (default): one agentic pass. The model decides what to read, suspect, and test. Good for triage.
-- **Deep, pinned** (`--deep-focus <text>`): skip enumeration and deep-audit one region the operator names, obligation by obligation ("name the enforcing line or the missing edge"; "looks standard"/"matches upstream" never clears).
-- **Map → Dig** (`--deep`, no pin): two phases.
+- **Breadth** (`fsa run --quick`): one agentic pass. The model decides what to read, suspect, and test. Good for triage; not the default.
+- **Deep, pinned** (`fsa audit <region>`): skip enumeration and deep-audit one region the operator names, obligation by obligation ("name the enforcing line or the missing edge"; "looks standard"/"matches upstream" never clears).
+- **Map → Dig** (`fsa run`, the default real audit; or `fsa map` then `fsa audit`): two phases.
   - **MAP** (`map` role): a bounded breadth pass whose only job is to enumerate a *complete* scope inventory to `scopes.json`. The model applies three general lenses — spec conditions, value/asset flow, trusted-but-unbound inputs — and scores each scope by exposure × difficulty. The framework encodes **no** domain analysis: the lenses are prompt text, the model reads the code and writes the inventory, and `readScratchScopes` only parses the JSON the model produced. Scoring is the model's; the framework's sole ranking act is `sort(by model score)` then `slice(maxScopes)`.
   - **DIG** (`dig` role): deep-audits the selected scopes one at a time via the pinned-deep posture, each pinned to a scope's obligation + region. Findings are accumulated and tagged with their `scopeId`.
 
-**Resumable coverage.** The scope inventory persists (with per-scope status) under the project history dir (`scope-store.ts`), next to `memory.jsonl`. A map → dig run audits the highest-scored *not-yet-audited* scopes up to `--max-scopes`; the rest stay `pending` (visible, never silently dropped). Re-running the same command **resumes** — it skips MAP and audits the next batch — so a large inventory reaches full coverage across several budget-limited runs. `--remap` re-enumerates from scratch. `AuditRunResult.scopeCoverage` and a CLI hint report progress.
+**Resumable coverage.** The scope inventory persists (with per-scope status) under the project history dir (`scope-store.ts`), next to `memory.jsonl`. A map → dig run audits the highest-scored *not-yet-audited* scopes up to `--max-scopes`; the rest stay `pending` (visible, never silently dropped). Re-running `fsa run` (or `fsa audit` against the inventory) **resumes** — it skips MAP and audits the next batch — so a large inventory reaches full coverage across several budget-limited runs. `fsa map` enumerates without digging; `--remap` re-enumerates from scratch. `AuditRunResult.scopeCoverage` and a CLI hint report progress.
 
-**Human-in-the-loop seam.** `--scope <id[,id...]>` deep-audits exactly the named inventory scopes (re-auditing an already-audited one is allowed), ignoring score order — the operator picks from the complete map by id, reusing the obligation + region the map already wrote. This is the reliable path when the model's *ranking* under-orders a subtle-but-critical scope: enumeration is complete, so the scope is always pickable even if it ranks low.
+**Human-in-the-loop seam.** `fsa audit --scope <id[,id...]>` deep-audits exactly the named inventory scopes (re-auditing an already-audited one is allowed), ignoring score order — the operator picks from the complete map by id, reusing the obligation + region the map already wrote. This is the reliable path when the model's *ranking* under-orders a subtle-but-critical scope: enumeration is complete, so the scope is always pickable even if it ranks low.
 
 **Per-role models.** `map`/`dig`/`refute`/`default` each resolve a provider/model/thinking via `resolveRole` (role entry → `default` → top-level config); nothing is auto-downgraded. This spends the expensive model where it matters and lets the provider be switched in one line (the driver — continuous pi session vs per-step loop — is auto-selected from the resolved provider). See `examples/models.*.json`.
 
