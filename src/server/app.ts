@@ -164,14 +164,16 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "POST", path: "/api/projects/:name/runs",
-    summary: "Queue a run on the project (start/continue an audit, restart, map, audit a region/scope, or confirm). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's Start/Continue/Restart/Run buttons.",
+    summary: "Queue a run on the project (start/continue an audit, restart, map, audit a region/scope, confirm, or prepare). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's Start/Continue/Restart/Run buttons.",
     params: { name: "project name" },
     body: {
-      verb: "'run' | 'map' | 'audit' | 'confirm' (default 'run'; run = map→dig, resumes)",
+      verb: "'run' | 'map' | 'audit' | 'confirm' | 'prepare' (default 'run'; run = map→dig, resumes)",
       remap: "boolean? — re-enumerate scopes (restart)", fresh: "boolean? — confirm: ignore a prior interrupted confirm",
       quick: "boolean? — run: single breadth pass", mockLlm: "boolean? — offline mock model",
       region: "string? — audit: pinned region e.g. src/Foo.sol:120-180", scope: "string? — audit: scope id(s)",
       inputRunDir: "string? — confirm: the finished run dir to reproduce",
+      clue: "string? — prepare: the tx / address / project / link to acquire from",
+      posture: "string? — prepare: 'blind' | 'informed'", matchDeployed: "boolean? — prepare: prove staged source matches the live deployment (default true)", endpoint: "string? — prepare: read-only access hint (e.g. RPC URL)",
       overrides: "object? — { sourcePaths, buildRoot, corpusPaths, config } one-off overrides of the stored project",
     },
     handler: runLaunch,
@@ -763,6 +765,10 @@ function launchSpec(project: Record<string, unknown>, body: Record<string, unkno
     region: str(body.region),
     scope: str(body.scope),
     inputRunDir: str(body.inputRunDir),
+    clue: str(body.clue),
+    posture: str(body.posture),
+    matchDeployed: typeof body.matchDeployed === "boolean" ? body.matchDeployed : undefined,
+    endpoint: str(body.endpoint),
     out,
   };
 }

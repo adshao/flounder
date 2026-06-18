@@ -7,6 +7,7 @@
 import path from "node:path";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
+import { runPrepare } from "../agent/acquire.js";
 import { MockAuditLlmClient } from "../llm/mock.js";
 import { specToConfig, type LaunchSpec } from "./run-manager.js";
 import { toScopeRow, toFindingRow, configSnapshot, type RunTracker, type ConfirmDecisionInput } from "../db/record.js";
@@ -62,6 +63,18 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       if (spec.verb === "confirm") {
         if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir");
         await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
+      } else if (spec.verb === "prepare") {
+        if (!spec.clue) throw new Error("prepare requires a clue (tx / address / project / link)");
+        await runPrepare(cfg, {
+          clue: spec.clue,
+          posture: spec.posture === "informed" ? "informed" : "blind",
+          matchDeployed: spec.matchDeployed !== false,
+          signal: abort.signal,
+          makeTracker,
+          onActivity: sink.push,
+          ...(spec.endpoint !== undefined ? { endpoint: spec.endpoint } : {}),
+          ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}),
+        });
       } else {
         await runAudit(cfg, { kind: spec.verb, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.mockLlm ? { llm: new MockAuditLlmClient() } : {}) });
       }

@@ -59,6 +59,10 @@ export interface LaunchSpec {
   scope?: string | undefined; // audit: scope id[,id...]
   quick?: boolean | undefined; // run: a single breadth pass instead of map -> audit
   mockLlm?: boolean | undefined; // run with the deterministic offline model (no provider needed)
+  clue?: string | undefined; // prepare: the tx / address / project / repo / link to acquire from
+  posture?: string | undefined; // prepare: blind | informed
+  matchDeployed?: boolean | undefined; // prepare: prove staged source matches the live deployment (default true)
+  endpoint?: string | undefined; // prepare: read-only access hint (e.g. an RPC URL)
   dir?: string | undefined; // project subdir under the daemon workspace; materials resolve under it
   models?: ProviderRoles | undefined; // per-phase provider/model/thinking overrides (from the selected profile)
   out?: string | undefined;
@@ -89,7 +93,9 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   if (spec.digSamples !== undefined) cfg.auditDigSamples = spec.digSamples;
   if (spec.digConcurrency !== undefined) cfg.auditDigConcurrency = spec.digConcurrency;
   if (spec.remap) cfg.auditRemap = true; // re-enumerate scopes from scratch (restart)
-  if (spec.verb === "confirm") return cfg; // confirm derives its own posture from the prior run
+  // prepare + confirm derive their own posture from their options (clue / prior run), not from
+  // the sealed audit's map/dig flags — return the base cfg (provider/model/out/target) as-is.
+  if (spec.verb === "prepare" || spec.verb === "confirm") return cfg;
   if (spec.verb === "map") {
     cfg.auditDeep = true;
     cfg.auditMapOnly = true;
@@ -111,6 +117,22 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
 // Translate a launch spec into `flounder` CLI argv — NOT used to run (the manager runs in-process),
 // but handy for showing the equivalent terminal command. Pure and unit-tested.
 export function buildArgs(spec: LaunchSpec): string[] {
+  // prepare's argv diverges (positional clue, no --source — it stages its own workspace), so
+  // build it on its own path rather than threading the shared audit flags below.
+  if (spec.verb === "prepare") {
+    const out: string[] = ["prepare"];
+    if (spec.clue) out.push(spec.clue);
+    out.push("--target", spec.target);
+    if (spec.posture) out.push("--posture", spec.posture);
+    if (spec.matchDeployed === false) out.push("--no-match-deployed");
+    if (spec.endpoint) out.push("--endpoint", spec.endpoint);
+    if (spec.provider) out.push("--provider", spec.provider);
+    if (spec.model) out.push("--model", spec.model);
+    if (spec.thinking) out.push("--thinking", spec.thinking);
+    if (spec.maxSteps !== undefined) out.push("--max-steps", String(spec.maxSteps));
+    out.push("--out", spec.out ?? DEFAULT_OUT);
+    return out;
+  }
   const args: string[] = [spec.verb];
   if (spec.verb === "confirm") {
     if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir (the finished run directory)");

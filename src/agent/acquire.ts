@@ -51,6 +51,7 @@ export async function runPrepare(
     streamEvents?: boolean;
     signal?: AbortSignal;
     onRun?: (runId: number) => void;
+    onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void;
     makeTracker?: RunTrackerFactory;
   },
 ): Promise<PrepareRunResult> {
@@ -120,6 +121,7 @@ export async function runPrepare(
     fileManifest: "(workspace is empty — stage all fetched source/docs here)",
     prepare: seed,
     ...(options.signal ? { signal: options.signal } : {}),
+    ...(options.onActivity ? { onActivity: options.onActivity } : {}),
   });
 
   const manifest = readPrepareManifest(session);
