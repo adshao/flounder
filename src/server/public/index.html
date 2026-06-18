@@ -173,12 +173,13 @@
   .chip.on { background: var(--accent); color: #fff; border-color: var(--accent); }
   .chip-search { margin-left: auto; max-width: 220px; }
   table { width: 100%; border-collapse: collapse; font-size: 13px; border: 1px solid var(--border); border-radius: 6px; overflow: hidden; }
+  table.fixed { table-layout: fixed; }
   thead th { background: var(--canvas-subtle); color: var(--fg-muted); font-weight: 500; font-size: 12px; text-align: left; padding: 8px 12px; border-bottom: 1px solid var(--border); }
-  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--border-muted); vertical-align: top; }
+  tbody td { padding: 9px 12px; border-bottom: 1px solid var(--border-muted); vertical-align: top; overflow-wrap: anywhere; }
   tbody tr:last-child td { border-bottom: 0; }
   tbody tr:hover { background: var(--canvas-subtle); }
   td:first-child { white-space: nowrap; }
-  .mono { font-family: var(--mono); font-size: 12px; }
+  .mono { font-family: var(--mono); font-size: 12px; overflow-wrap: anywhere; }
   .timeline { color: var(--fg-muted); font-size: 11px; font-family: var(--mono); }
   .empty { color: var(--fg-muted); padding: 56px 16px; text-align: center; }
   .loadmore { margin: 12px 0; text-align: center; }
@@ -541,7 +542,7 @@ function renderDetail() {
   }).join("");
   const scopesSection = (d.scopes && d.scopes.length)
     ? '<div class="section-title">' + icon("bug") + 'Scopes <span class="muted">(Skip to exclude from auto-dig)</span></div>'
-      + '<div id="scopesScroll" style="max-height:340px;overflow-y:auto"><table><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table></div>'
+      + '<div id="scopesScroll" style="max-height:340px;overflow-y:auto"><table class="fixed"><colgroup><col style="width:11%"><col style="width:15%"><col style="width:33%"><col style="width:28%"><col style="width:6%"><col style="width:7%"></colgroup><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table></div>'
     : "";
   // Confirmed bugs = decisions that actually reproduced on the real target (the payoff).
   const confirmed = d.confirmDecisions.filter((c) => c.reproduced === "yes");
@@ -648,7 +649,7 @@ function renderFindings() {
     + '</td><td class="mono muted">' + esc(f.location) + '</td><td class="timeline">' + (f.timeline || []).map((e) => e.to_status).join(" → ") + '</td></tr>').join("");
   const more = state.f.rows.length < state.f.total
     ? '<div class="loadmore"><button class="btn sm" id="moreBtn">Load ' + Math.min(state.f.limit, state.f.total - state.f.rows.length) + ' more (' + state.f.rows.length + '/' + state.f.total + ')</button></div>' : "";
-  el.innerHTML = '<table><thead><tr><th>status</th><th>title</th><th>location</th><th>timeline</th></tr></thead><tbody>' + rows + '</tbody></table>' + more;
+  el.innerHTML = '<table class="fixed"><colgroup><col style="width:13%"><col style="width:36%"><col style="width:39%"><col style="width:12%"></colgroup><thead><tr><th>status</th><th>title</th><th>location</th><th>timeline</th></tr></thead><tbody>' + rows + '</tbody></table>' + more;
   const mb = $("#moreBtn"); if (mb) mb.onclick = () => { state.f.offset += state.f.limit; loadFindings(false); };
 }
 
