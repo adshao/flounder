@@ -297,7 +297,7 @@ activityEl.className = "activity";
 // resets scrollTop to 0 (yanking the view to the top). To avoid that, renderDetail captures the
 // scroll position just BEFORE the re-render and attachActivity restores it AFTER the move — so your
 // scroll position is preserved; we only auto-follow the bottom when you were already at the bottom.
-let activityPrevTop = 0, activityWasBottom = true;
+let activityPrevTop = 0, activityWasBottom = true, savedScopesTop = 0;
 let logES = null, logRunId = null;
 let curBlockEl = null, curBlockKind = null; // the in-progress thinking/output block for token deltas
 
@@ -442,10 +442,12 @@ async function loadFindings(reset) {
 function renderDetail() {
   const el = $("#detail");
   const d = state.detail;
-  // Capture the live-activity scroll BEFORE we wipe + rebuild the detail (which moves the activity
-  // node and resets its scrollTop). attachActivity restores it after the move.
+  // Capture scroll positions BEFORE we wipe + rebuild the detail (which resets them): the live
+  // activity node (moved) and the scopes box (rebuilt). attachActivity + the tail of renderDetail
+  // restore them, so a re-render on a real change doesn't yank either back to the top.
   activityWasBottom = activityEl.scrollHeight - activityEl.scrollTop - activityEl.clientHeight < 60;
   activityPrevTop = activityEl.scrollTop;
+  savedScopesTop = (document.getElementById("scopesScroll") || {}).scrollTop || 0;
   if (!d) { el.innerHTML = '<div class="empty">Select a project, or create one with “New project”.</div>'; return; }
   const cfg = (() => { try { return JSON.parse(d.project.config_json) || {}; } catch { return {}; } })();
   const pr = d.progress;
@@ -479,7 +481,7 @@ function renderDetail() {
   }).join("");
   const scopesSection = (d.scopes && d.scopes.length)
     ? '<div class="section-title">' + icon("bug") + 'Scopes <span class="muted">(Skip to exclude from auto-dig)</span></div>'
-      + '<div style="max-height:340px;overflow-y:auto"><table><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table></div>'
+      + '<div id="scopesScroll" style="max-height:340px;overflow-y:auto"><table><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table></div>'
     : "";
   // Confirmed bugs = decisions that actually reproduced on the real target (the payoff).
   const confirmed = d.confirmDecisions.filter((c) => c.reproduced === "yes");
@@ -562,6 +564,7 @@ function renderDetail() {
   renderChips();
   renderFindings();
   attachActivity(d);
+  const ss = document.getElementById("scopesScroll"); if (ss) ss.scrollTop = savedScopesTop; // restore scopes-box scroll after the rebuild
 }
 
 function renderChips() {
