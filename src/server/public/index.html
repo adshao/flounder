@@ -151,8 +151,10 @@
   .section-title { font-size: 11px; font-weight: 500; margin: 0 0 14px; display: flex; align-items: center; gap: 8px; color: var(--fg-subtle); text-transform: uppercase; letter-spacing: .05em; }
   .section-title .octicon { fill: var(--fg-subtle); }
   .pipeline { display: flex; align-items: stretch; gap: 6px; margin: 18px 0 6px; }
-  .phase { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--canvas-subtle); }
-  .phase.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .phase { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--canvas-subtle); cursor: pointer; transition: border-color .12s, background .12s; }
+  .phase:hover { border-color: var(--fg-subtle); }
+  .phase.sel { border-color: var(--accent); background: var(--sel-bg); }
+  .phase.active { box-shadow: inset 0 0 0 1px var(--accent); }
   .phase .ph-head { display: flex; align-items: center; gap: 7px; font-weight: 500; font-size: 13px; }
   .phase .ph-head .octicon { fill: var(--fg-muted); }
   .phase .ph-stat { font-size: 11px; color: var(--fg-muted); margin-top: 7px; line-height: 1.45; }
@@ -308,7 +310,7 @@
 
 <script>
 const $ = (sel) => document.querySelector(sel);
-let state = { projects: [], active: [], providers: [], filter: "", selected: null, detail: null, f: { status: "", q: "", limit: 50, offset: 0, rows: [], total: 0 } };
+let state = { projects: [], active: [], providers: [], filter: "", selected: null, detail: null, phase: null, f: { status: "", q: "", limit: 20, offset: 0, rows: [], total: 0 } };
 
 // Live activity feed: streams a run's events.jsonl (model thinking/output + tool calls) over
 // SSE. Kept in a PERSISTENT detached node so the detail re-rendering each tick doesn't wipe
@@ -427,7 +429,8 @@ $("#projSearch").oninput = () => { state.filter = $("#projSearch").value; render
 async function selectProject(name) {
   state.selected = name;
   lastDetailSig = null; // force a fresh render when (re)selecting, even if the data signature matches
-  state.f = { status: "", q: "", limit: 50, offset: 0, rows: [], total: 0 };
+  state.phase = null; // recompute the default phase tab for the newly-selected project
+  state.f = { status: "", q: "", limit: 20, offset: 0, rows: [], total: 0 };
   renderList();
   await loadDetail();
   await loadFindings(true);
@@ -487,7 +490,7 @@ function phaseState(d, pr) {
 }
 function renderPipeline(d, pr) {
   const ph = phaseState(d, pr);
-  const node = (key, label, icn, info) => '<div class="phase' + (info.status === "running" ? " active" : "") + '">'
+  const node = (key, label, icn, info) => '<div class="phase' + (info.status === "running" ? " active" : "") + (state.phase === key ? " sel" : "") + '" data-phase="' + key + '" title="show ' + label + '">'
     + '<div class="ph-head">' + icon(icn) + '<span>' + label + '</span><span class="sdot ' + info.status + '" style="margin-left:auto" title="' + info.status + '"></span></div>'
     + '<div class="ph-stat">' + info.stat + '</div></div>';
   const arrow = '<div class="parrow">' + icon("arrowright", 15) + '</div>';
@@ -529,9 +532,12 @@ function renderDetail() {
     if (r.scopes_total != null) return (r.scopes_audited ?? 0) + "/" + r.scopes_total + " scopes audited";
     return r.findings_total != null ? r.findings_total + " findings" : "—";
   };
-  const runsRows = d.runs.map((r) => '<tr><td><span style="display:inline-flex;gap:7px;align-items:center">' + stateBadge(r.status) + ' ' + r.kind + '</span></td><td class="mono muted">' + runProgress(r)
+  const runRowHtml = (r) => '<tr><td><span style="display:inline-flex;gap:7px;align-items:center">' + stateBadge(r.status) + ' ' + r.kind + '</span></td><td class="mono muted">' + runProgress(r)
     + '</td><td class="mono muted">' + esc((r.run_dir || "").split("/").pop()) + '</td><td class="mono muted">' + esc(r.started_at)
-    + '</td><td>' + (r.status === "running" ? "" : '<button class="rowbtn danger" data-delrun="' + r.id + '">delete</button>') + '</td></tr>').join("");
+    + '</td><td>' + (r.status === "running" ? "" : '<button class="rowbtn danger" data-delrun="' + r.id + '">delete</button>') + '</td></tr>';
+  const runsTableHtml = (rs) => rs.length
+    ? '<table><thead><tr><th>kind</th><th>progress</th><th>dir</th><th>started</th><th></th></tr></thead><tbody>' + rs.map(runRowHtml).join("") + '</tbody></table>'
+    : '<div class="muted">no runs in this phase yet</div>';
   const scopeRows = (d.scopes || []).map((sc) => {
     const act = sc.status === "audited" ? ""
       : sc.status === "deferred" ? '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="pending">Resume</button>'
@@ -540,10 +546,9 @@ function renderDetail() {
     return '<tr class="scope-row" data-sdetail="' + esc(sc.scope_id) + '" style="cursor:pointer"><td><span class="sdot ' + dot + '"></span> <span class="label s-' + sc.status + '">' + sc.status + '</span></td><td class="mono">' + esc(sc.scope_id) + '</td><td>' + esc(sc.title)
       + '</td><td class="mono muted">' + esc(sc.location) + '</td><td class="mono muted">' + (sc.score != null ? Number(sc.score).toFixed(1) : "") + '</td><td>' + act + '</td></tr>';
   }).join("");
-  const scopesSection = (d.scopes && d.scopes.length)
-    ? '<div class="section-title">' + icon("bug") + 'Scopes <span class="muted">(Skip to exclude from auto-dig)</span></div>'
-      + '<div id="scopesScroll" style="max-height:340px;overflow-y:auto"><table class="fixed"><colgroup><col style="width:11%"><col style="width:15%"><col style="width:33%"><col style="width:28%"><col style="width:6%"><col style="width:7%"></colgroup><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table></div>'
-    : "";
+  const scopesInner = (d.scopes && d.scopes.length)
+    ? '<div id="scopesScroll" style="max-height:460px;overflow-y:auto"><table class="fixed"><colgroup><col style="width:11%"><col style="width:15%"><col style="width:33%"><col style="width:28%"><col style="width:6%"><col style="width:7%"></colgroup><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table></div>'
+    : '<div class="muted">No scopes mapped yet — run the map phase.</div>';
   // Confirmed bugs = decisions that actually reproduced on the real target (the payoff).
   const confirmed = d.confirmDecisions.filter((c) => c.reproduced === "yes");
   const recBadge = (rec) => { const m = { "submit-candidate": "done", "needs-human": "running", "drop": "killed" }; return '<span class="state ' + (m[rec] || "none") + '">' + esc(rec || "—") + '</span>'; };
@@ -553,12 +558,37 @@ function renderDetail() {
           ? '<div class="confirmed-box">' + confirmed.map((c) => '<div class="cbug"><span class="cbug-name">✓ ' + esc(c.bug) + '</span>' + recBadge(c.recommendation) + '</div>').join("") + '</div>'
           : '<div class="muted">No bugs reproduced on the real target yet.</div>')
     : "";
+  const decisionsInner = d.confirmDecisions.length
+    ? '<table class="fixed"><colgroup><col style="width:56%"><col style="width:20%"><col style="width:24%"></colgroup><thead><tr><th>bug</th><th>reproduced</th><th>recommendation</th></tr></thead><tbody>'
+      + d.confirmDecisions.map((c) => '<tr><td>' + esc(c.bug) + '</td><td>' + (c.reproduced === "yes" ? statusBadge("confirmed-differential").replace("confirmed-differential", "reproduced") : '<span class="mono muted">' + esc(c.reproduced) + '</span>') + '</td><td class="mono">' + esc(c.recommendation) + '</td></tr>').join("") + '</tbody></table>'
+    : '<div class="muted">No confirm decisions yet — run the confirm phase on a finished run.</div>';
+  // The DAG is a phase selector (like a GitHub Actions job graph): the selected phase's content
+  // shows below. Default to the most-advanced phase that has content.
+  if (!["prepare", "map", "dig", "confirm"].includes(state.phase)) {
+    state.phase = d.confirmDecisions.length ? "confirm" : (pr.audited > 0 || d.findingsTotal > 0) ? "dig" : pr.total > 0 ? "map" : d.runs.some((r) => r.kind === "prepare") ? "prepare" : "dig";
+  }
+  const card = (titleHtml, body) => '<div class="card"><div class="section-title">' + titleHtml + '</div>' + body + '</div>';
+  let phaseContent = "";
+  if (state.phase === "prepare") {
+    const rs = d.runs.filter((r) => r.kind === "prepare");
+    phaseContent = card(icon("package") + 'prepare · acquisition', runsTableHtml(rs)
+      + rs.map((r) => '<div class="mono muted" style="margin-top:8px">staged source: ' + esc(r.run_dir || "") + '/prepare/workspace</div>').join(""));
+  } else if (state.phase === "map") {
+    phaseContent = card(icon("search") + 'map · scope inventory <span class="muted">' + pr.audited + '/' + pr.total + ' audited · ' + pr.pending + ' pending</span>', scopesInner);
+  } else if (state.phase === "confirm") {
+    const rs = d.runs.filter((r) => r.kind === "confirm");
+    phaseContent = card(icon("shieldcheck") + 'confirm · decisions', decisionsInner) + (rs.length ? card(icon("play") + 'confirm runs', runsTableHtml(rs)) : "");
+  } else {
+    const rs = d.runs.filter((r) => r.kind === "run" || r.kind === "audit");
+    phaseContent = card(icon("bug") + 'dig · findings <span class="muted">' + d.findingsTotal + '</span>', '<div class="chips" id="chips"></div><div id="findings"></div>') + card(icon("play") + 'dig runs', runsTableHtml(rs));
+  }
   el.innerHTML =
     '<div class="card">'
       + '<div class="d-head"><h2>' + esc(d.project.name) + '</h2>' + stateBadge(st) + '</div>'
       + '<div class="muted mono" style="margin-top:6px">' + esc(providerName(d.project.provider_id) || "(no provider)") + " · dir " + esc(d.project.dir || d.project.name)
         + " · max-scopes " + (cfg.maxScopes ?? "-") + " · map/dig steps " + (cfg.mapSteps ?? "∞") + "/" + (cfg.digSteps ?? "∞") + '</div>'
       + renderPipeline(d, pr)
+      + '<div class="muted" style="font-size:11px;margin-top:5px">click a phase to view its content below</div>'
       + '<div class="stats">'
         + '<div class="stat"><div class="n">' + pr.total + '</div><div class="k">scopes mapped</div></div>'
         + '<div class="stat"><div class="n" style="color:var(--success-fg)">' + pr.audited + '</div><div class="k">audited</div></div>'
@@ -579,12 +609,7 @@ function renderDetail() {
     + '</div>'
     + (confirmedSection ? '<div class="card">' + confirmedSection + '</div>' : "")
     + (d.runs.length ? '<div class="card"><div class="section-title">' + icon("play") + 'Live activity <span class="muted">' + (liveRun ? liveRun.kind + " #" + liveRun.id : "") + '</span></div><div id="activitySlot"></div></div>' : "")
-    + '<div class="card"><div class="section-title">' + icon("play") + 'Runs <span class="muted">' + d.runsTotal + (d.runsTotal > d.runs.length ? ", showing " + d.runs.length : "") + '</span></div>'
-      + (d.runs.length ? '<table><thead><tr><th>kind</th><th>progress</th><th>dir</th><th>started</th><th></th></tr></thead><tbody>' + runsRows + '</tbody></table>' : '<div class="muted">none</div>') + '</div>'
-    + (scopesSection ? '<div class="card">' + scopesSection + '</div>' : "")
-    + '<div class="card"><div class="section-title">' + icon("bug") + 'Findings</div><div class="chips" id="chips"></div><div id="findings"></div></div>'
-    + (d.confirmDecisions.length ? '<div class="card"><div class="section-title">Confirm decisions</div><table><thead><tr><th>bug</th><th>reproduced</th><th>recommendation</th></tr></thead><tbody>'
-        + d.confirmDecisions.map((c) => '<tr><td>' + esc(c.bug) + '</td><td>' + (c.reproduced === "yes" ? statusBadge("confirmed-differential").replace("confirmed-differential", "reproduced") : '<span class="mono muted">' + esc(c.reproduced) + '</span>') + '</td><td class="mono">' + esc(c.recommendation) + '</td></tr>').join("") + '</tbody></table></div>' : "");
+    + phaseContent;
   $("#continueBtn").onclick = () => command("continue");
   const rb = $("#restartBtn"); if (rb) rb.onclick = () => command("restart");
   $("#runBtn").onclick = openRun;
@@ -623,6 +648,7 @@ function renderDetail() {
     else body += '<div class="muted" style="margin-top:8px">' + (sc.status === "audited" ? "Result: audited — no finding recorded for this obligation (the dig surfaced no violation; full reasoning is in the run dir's audit_report.md)." : sc.status === "deferred" ? "skipped — excluded from auto-dig." : "pending — not yet audited.") + '</div>';
     row.insertAdjacentHTML("afterend", '<tr class="scope-detail"><td></td><td colspan="5" style="padding:10px 14px;background:rgba(127,127,127,.06)">' + body + '</td></tr>');
   });
+  el.querySelectorAll("[data-phase]").forEach((n) => n.onclick = () => { state.phase = n.dataset.phase; renderDetail(); });
   renderChips();
   renderFindings();
   attachActivity(d);
