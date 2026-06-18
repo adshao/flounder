@@ -474,7 +474,7 @@ function renderDetail() {
     const act = sc.status === "audited" ? ""
       : sc.status === "deferred" ? '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="pending">Resume</button>'
       : '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="deferred">Skip</button>';
-    return '<tr><td><span class="label s-' + sc.status + '">' + sc.status + '</span></td><td class="mono">' + esc(sc.scope_id) + '</td><td>' + esc(sc.title)
+    return '<tr class="scope-row" data-sdetail="' + esc(sc.scope_id) + '" style="cursor:pointer"><td><span class="label s-' + sc.status + '">' + sc.status + '</span></td><td class="mono">' + esc(sc.scope_id) + '</td><td>' + esc(sc.title)
       + '</td><td class="mono muted">' + esc(sc.location) + '</td><td class="mono muted">' + (sc.score != null ? Number(sc.score).toFixed(1) : "") + '</td><td>' + act + '</td></tr>';
   }).join("");
   const scopesSection = (d.scopes && d.scopes.length)
@@ -541,6 +541,23 @@ function renderDetail() {
   el.querySelectorAll("[data-scope]").forEach((b) => b.onclick = async () => {
     await fetch("/api/projects/" + encodeURIComponent(state.selected) + "/scopes/" + encodeURIComponent(b.dataset.scope), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: b.dataset.sstatus }) });
     loadDetail();
+  });
+  // Click a scope row to expand its detail: the full obligation + location + score/status + its
+  // RESULT (the findings tied to this scope_id, or "audited — no finding"). A second click closes it.
+  el.querySelectorAll("tr.scope-row").forEach((row) => row.onclick = (e) => {
+    if (e.target.closest("button")) return; // let the Skip/Resume button handle its own click
+    const next = row.nextElementSibling;
+    if (next && next.classList.contains("scope-detail")) { next.remove(); return; } // toggle closed
+    const sc = (state.detail.scopes || []).find((s) => s.scope_id === row.dataset.sdetail);
+    if (!sc) return;
+    const finds = (state.f.rows || []).filter((f) => f.scope_id === sc.scope_id);
+    let body = '<div><b>Obligation:</b> ' + esc(sc.title || "") + '</div>'
+      + '<div class="mono muted" style="margin-top:5px">' + esc(sc.location || "") + '</div>'
+      + '<div class="muted" style="margin-top:5px">score ' + (sc.score != null ? Number(sc.score).toFixed(1) : "-") + ' · ' + esc(sc.status) + '</div>';
+    if (finds.length) body += '<div style="margin-top:8px"><b>Result — findings for this obligation:</b></div>'
+      + finds.map((f) => '<div style="margin-top:4px">' + statusBadge(f.status) + ' <b>' + esc(f.title || "") + '</b> <span class="mono muted">' + esc(f.location || "") + '</span></div>').join("");
+    else body += '<div class="muted" style="margin-top:8px">' + (sc.status === "audited" ? "Result: audited — no finding recorded for this obligation (the dig surfaced no violation; full reasoning is in the run dir's audit_report.md)." : sc.status === "deferred" ? "skipped — excluded from auto-dig." : "pending — not yet audited.") + '</div>';
+    row.insertAdjacentHTML("afterend", '<tr class="scope-detail"><td></td><td colspan="5" style="padding:10px 14px;background:rgba(127,127,127,.06)">' + body + '</td></tr>');
   });
   renderChips();
   renderFindings();
