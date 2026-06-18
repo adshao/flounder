@@ -142,10 +142,26 @@
   .act-err { font-family: var(--mono); font-size: 12px; color: var(--danger-fg); }
 
   .d-head { display: flex; align-items: center; gap: 12px; flex-wrap: wrap; }
-  .d-head h2 { font-size: 20px; font-weight: 600; margin: 0; }
+  .d-head h2 { font-size: 20px; font-weight: 500; margin: 0; }
   .stats { display: flex; gap: 22px; margin: 16px 0; flex-wrap: wrap; }
   .stat .n { font-size: 22px; font-weight: 600; } .stat .k { color: var(--fg-muted); font-size: 12px; }
-  .section-title { font-size: 14px; font-weight: 600; margin: 26px 0 10px; display: flex; align-items: center; gap: 8px; }
+  .section-title { font-size: 13px; font-weight: 500; margin: 26px 0 10px; display: flex; align-items: center; gap: 8px; color: var(--fg-muted); }
+  .pipeline { display: flex; align-items: stretch; gap: 6px; margin: 18px 0 6px; }
+  .phase { flex: 1; min-width: 0; border: 1px solid var(--border); border-radius: 8px; padding: 10px 12px; background: var(--canvas-subtle); }
+  .phase.active { border-color: var(--accent); box-shadow: inset 0 0 0 1px var(--accent); }
+  .phase .ph-head { display: flex; align-items: center; gap: 7px; font-weight: 500; font-size: 13px; }
+  .phase .ph-head .octicon { fill: var(--fg-muted); }
+  .phase .ph-stat { font-size: 11px; color: var(--fg-muted); margin-top: 7px; line-height: 1.45; }
+  .parrow { display: flex; align-items: center; flex-shrink: 0; }
+  .parrow .octicon { fill: var(--fg-subtle); }
+  .sdot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; background: var(--neutral-emphasis); vertical-align: middle; }
+  .sdot.done { background: var(--success-emphasis); }
+  .sdot.running { background: var(--attention-fg); animation: pulse 1.4s ease-in-out infinite; }
+  .sdot.error, .sdot.killed { background: var(--danger-fg); }
+  .sdot.pending { background: var(--neutral-emphasis); opacity: .45; }
+  .sdot.deferred { background: var(--attention-fg); opacity: .5; }
+  .sdot.none { background: var(--neutral-emphasis); opacity: .35; }
+  @keyframes pulse { 0%,100%{opacity:1} 50%{opacity:.3} }
   .actions { display: flex; gap: 8px; margin: 16px 0 4px; flex-wrap: wrap; }
   .chips { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
   .chip { cursor: pointer; font-size: 12px; font-weight: 500; padding: 3px 10px; border-radius: 2em; border: 1px solid var(--border); color: var(--fg-muted); background: var(--canvas); }
@@ -360,6 +376,10 @@ const OCT = {
   sun: '<path d="M8 12a4 4 0 1 1 0-8 4 4 0 0 1 0 8Zm0-1.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5ZM8 0a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0V.75A.75.75 0 0 1 8 0Zm0 13a.75.75 0 0 1 .75.75v1.5a.75.75 0 0 1-1.5 0v-1.5A.75.75 0 0 1 8 13ZM2.343 2.343a.75.75 0 0 1 1.061 0l1.06 1.061a.75.75 0 0 1-1.06 1.06l-1.06-1.06a.75.75 0 0 1 0-1.06Zm9.193 9.193a.75.75 0 0 1 1.06 0l1.061 1.06a.75.75 0 0 1-1.06 1.061l-1.061-1.06a.75.75 0 0 1 0-1.061ZM16 8a.75.75 0 0 1-.75.75h-1.5a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 16 8ZM3 8a.75.75 0 0 1-.75.75H.75a.75.75 0 0 1 0-1.5h1.5A.75.75 0 0 1 3 8Zm10.657-5.657a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 1 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0ZM4.464 11.536a.75.75 0 0 1 0 1.06l-1.06 1.061a.75.75 0 0 1-1.061-1.06l1.06-1.061a.75.75 0 0 1 1.061 0Z"></path>',
   moon: '<path d="M9.598 1.591a.749.749 0 0 1 .785-.175 7.001 7.001 0 1 1-8.967 8.967.75.75 0 0 1 .961-.96 5.5 5.5 0 0 0 7.046-7.046.75.75 0 0 1 .175-.786Zm1.616 1.945a7 7 0 0 1-7.678 7.678 5.499 5.499 0 1 0 7.678-7.678Z"></path>',
   trash: '<path d="M11 1.75V3h2.25a.75.75 0 0 1 0 1.5H2.75a.75.75 0 0 1 0-1.5H5V1.75C5 .784 5.784 0 6.75 0h2.5C10.216 0 11 .784 11 1.75ZM4.496 6.675l.66 6.6a.25.25 0 0 0 .249.225h5.19a.25.25 0 0 0 .249-.225l.66-6.6a.75.75 0 0 1 1.492.149l-.66 6.6A1.748 1.748 0 0 1 10.595 15h-5.19a1.75 1.75 0 0 1-1.741-1.575l-.66-6.6a.75.75 0 1 1 1.492-.15ZM6.5 1.75V3h3V1.75a.25.25 0 0 0-.25-.25h-2.5a.25.25 0 0 0-.25.25Z"></path>',
+  arrowright: '<path d="M8.22 2.97a.75.75 0 0 1 1.06 0l4.25 4.25a.75.75 0 0 1 0 1.06l-4.25 4.25a.751.751 0 0 1-1.042-.018.751.751 0 0 1-.018-1.042l2.97-2.97H3.75a.75.75 0 0 1 0-1.5h7.44L8.22 4.03a.75.75 0 0 1 0-1.06Z"></path>',
+  package: '<path d="m8.878.392 5.25 3.045c.54.314.872.89.872 1.514v6.098a1.75 1.75 0 0 1-.872 1.514l-5.25 3.045a1.75 1.75 0 0 1-1.756 0l-5.25-3.045A1.75 1.75 0 0 1 1 11.049V4.951c0-.624.332-1.2.872-1.514L7.122.392a1.75 1.75 0 0 1 1.756 0ZM7.875 1.69l-4.63 2.685L8 7.133l4.755-2.758-4.63-2.685a.248.248 0 0 0-.25 0ZM2.5 5.677v5.372c0 .09.047.171.125.216l4.625 2.683V8.432Zm6.25 8.271 4.625-2.683a.25.25 0 0 0 .125-.216V5.677L8.75 8.432Z"></path>',
+  search: '<path d="M10.68 11.74a6 6 0 0 1-7.922-8.982 6 6 0 0 1 8.982 7.922l3.04 3.04a.749.749 0 0 1-.326 1.275.749.749 0 0 1-.734-.215ZM11.5 7a4.499 4.499 0 1 0-8.997 0A4.499 4.499 0 0 0 11.5 7Z"></path>',
+  shieldcheck: '<path d="m8.533.133 5.25 1.68A1.75 1.75 0 0 1 15 3.48V7c0 1.566-.32 3.182-1.303 4.682-.983 1.498-2.585 2.813-5.032 3.855a1.697 1.697 0 0 1-1.33 0c-2.447-1.042-4.049-2.357-5.032-3.855C1.32 10.182 1 8.566 1 7V3.48a1.75 1.75 0 0 1 1.217-1.667l5.25-1.68a1.748 1.748 0 0 1 1.066 0Zm-.61 1.43-5.25 1.68a.251.251 0 0 0-.174.237V7c0 1.36.275 2.666 1.057 3.859.784 1.194 2.121 2.342 4.366 3.298a.196.196 0 0 0 .154 0c2.245-.956 3.582-2.104 4.366-3.298C13.225 9.666 13.5 8.359 13.5 7V3.48a.25.25 0 0 0-.174-.237l-5.25-1.68a.25.25 0 0 0-.152 0ZM11.28 6.28l-3.5 3.5a.75.75 0 0 1-1.06 0l-1.5-1.5a.749.749 0 0 1 .326-1.275.749.749 0 0 1 .734.215l.97.97 2.97-2.97a.751.751 0 0 1 1.042.018.751.751 0 0 1 .018 1.042Z"></path>',
 };
 const icon = (n, s) => '<svg class="octicon" width="' + (s||16) + '" height="' + (s||16) + '" viewBox="0 0 16 16" aria-hidden="true">' + OCT[n] + '</svg>';
 
@@ -440,6 +460,36 @@ async function loadFindings(reset) {
   renderFindings();
 }
 
+// The phase pipeline (prepare -> map -> dig -> confirm) as a dependency graph, GitHub-Actions
+// style. Each phase's status is DERIVED from the project's aggregate state (not 1 run = 1 phase),
+// because `flounder run` spans map+dig — so the DAG reflects real progress through the pipeline.
+function phaseState(d, pr) {
+  const runs = d.runs || [];
+  const latest = (kind) => runs.find((r) => r.kind === kind);
+  const runningIn = (...k) => runs.some((r) => r.status === "running" && k.includes(r.kind));
+  const prep = latest("prepare");
+  const repro = (d.confirmDecisions || []).filter((c) => c.reproduced === "yes").length;
+  const conf = latest("confirm");
+  return {
+    prepare: { status: prep ? prep.status : "none", stat: prep ? (prep.status === "done" ? "source staged" : prep.status) : "not run" },
+    map: { status: pr.total > 0 ? "done" : (runningIn("run", "map") ? "running" : "none"), stat: pr.total > 0 ? pr.total + " obligations" : "—" },
+    dig: { status: runningIn("run", "audit") ? "running" : (pr.audited > 0 ? "done" : (pr.total > 0 ? "pending" : "none")),
+           stat: pr.total > 0 ? (pr.audited + "/" + pr.total + " audited · " + pr.pending + " pending" + (d.findingsTotal ? " · " + d.findingsTotal + " findings" : "")) : "—" },
+    confirm: { status: conf ? conf.status : (d.confirmDecisions.length ? "done" : "none"), stat: d.confirmDecisions.length ? (repro + "/" + d.confirmDecisions.length + " reproduced") : "not run" },
+  };
+}
+function renderPipeline(d, pr) {
+  const ph = phaseState(d, pr);
+  const node = (key, label, icn, info) => '<div class="phase' + (info.status === "running" ? " active" : "") + '">'
+    + '<div class="ph-head">' + icon(icn) + '<span>' + label + '</span><span class="sdot ' + info.status + '" style="margin-left:auto" title="' + info.status + '"></span></div>'
+    + '<div class="ph-stat">' + info.stat + '</div></div>';
+  const arrow = '<div class="parrow">' + icon("arrowright", 15) + '</div>';
+  return '<div class="pipeline">' + node("prepare", "prepare", "package", ph.prepare) + arrow
+    + node("map", "map", "search", ph.map) + arrow
+    + node("dig", "dig", "bug", ph.dig) + arrow
+    + node("confirm", "confirm", "shieldcheck", ph.confirm) + '</div>';
+}
+
 function renderDetail() {
   const el = $("#detail");
   const d = state.detail;
@@ -477,7 +527,8 @@ function renderDetail() {
     const act = sc.status === "audited" ? ""
       : sc.status === "deferred" ? '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="pending">Resume</button>'
       : '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="deferred">Skip</button>';
-    return '<tr class="scope-row" data-sdetail="' + esc(sc.scope_id) + '" style="cursor:pointer"><td><span class="label s-' + sc.status + '">' + sc.status + '</span></td><td class="mono">' + esc(sc.scope_id) + '</td><td>' + esc(sc.title)
+    const dot = sc.status === "audited" ? "done" : sc.status;
+    return '<tr class="scope-row" data-sdetail="' + esc(sc.scope_id) + '" style="cursor:pointer"><td><span class="sdot ' + dot + '"></span> <span class="label s-' + sc.status + '">' + sc.status + '</span></td><td class="mono">' + esc(sc.scope_id) + '</td><td>' + esc(sc.title)
       + '</td><td class="mono muted">' + esc(sc.location) + '</td><td class="mono muted">' + (sc.score != null ? Number(sc.score).toFixed(1) : "") + '</td><td>' + act + '</td></tr>';
   }).join("");
   const scopesSection = (d.scopes && d.scopes.length)
@@ -497,7 +548,7 @@ function renderDetail() {
     '<div class="d-head"><h2>' + esc(d.project.name) + '</h2>' + stateBadge(st) + '</div>'
     + '<div class="muted mono" style="margin-top:6px">' + esc(providerName(d.project.provider_id) || "(no provider)") + " · dir " + esc(d.project.dir || d.project.name)
       + " · max-scopes " + (cfg.maxScopes ?? "-") + " · map/dig steps " + (cfg.mapSteps ?? "∞") + "/" + (cfg.digSteps ?? "∞") + '</div>'
-    + '<div class="progress" style="margin-top:16px;height:10px"><span class="audited" style="width:' + pct(pr.audited, pr.total) + '%"></span><span class="pending" style="width:' + pct(pr.pending, pr.total) + '%"></span><span class="deferred" style="width:' + pct(pr.deferred || 0, pr.total) + '%"></span></div>'
+    + renderPipeline(d, pr)
     + '<div class="stats">'
       + '<div class="stat"><div class="n">' + pr.total + '</div><div class="k">scopes mapped</div></div>'
       + '<div class="stat"><div class="n" style="color:var(--success-fg)">' + pr.audited + '</div><div class="k">audited</div></div>'
