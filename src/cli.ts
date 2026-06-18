@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { defaultConfig, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
+import { CLI_CONFIG_KEYS, configFilePath, getCliConfigValue, isCliConfigKey, loadCliConfig, setCliConfigValue, unsetCliConfigValue, type CliConfigKey } from "./config-file.js";
 import { runAudit } from "./agent/audit.js";
 import { runConfirm } from "./agent/confirm.js";
 import { runPrepare } from "./agent/acquire.js";
@@ -29,6 +31,11 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
+  if (cmd === "config") {
+    runConfigCommand(rest);
+    return;
+  }
+
   if (cmd === "ui") {
     // Control-plane web app: track/drive audits across projects. Keeps running (the server
     // holds the event loop open) until interrupted. Runs execute on a DAEMON, not here — so
@@ -36,7 +43,7 @@ async function main(argv: string[]): Promise<void> {
     // --no-daemon to run the control plane alone and connect your own daemon(s) elsewhere.
     const port = readIntFlag(rest, "--port") ?? 4500;
     const host = readFlag(rest, "--host") ?? "127.0.0.1";
-    const out = readFlag(rest, "--out") ?? "runs";
+    const out = resolveOut(rest);
     const workspace = readFlag(rest, "--workspace") ?? "./workspace"; // where the co-located daemon finds project dirs
     const server = startUiServer({ out, port, host });
     if (rest.includes("--no-daemon")) {
@@ -56,7 +63,7 @@ async function main(argv: string[]): Promise<void> {
     const server = readFlag(rest, "--server");
     const token = readFlag(rest, "--token");
     if (!server || !token) throw new Error("flounder daemon needs --server <url> and --token <token> (mint one with `flounder ui`, or via the store)");
-    const out = readFlag(rest, "--out") ?? "runs";
+    const out = resolveOut(rest);
     const name = readFlag(rest, "--name");
     const workspace = readFlag(rest, "--workspace");
     const concurrency = readIntFlag(rest, "--concurrency");
@@ -100,7 +107,7 @@ async function main(argv: string[]): Promise<void> {
     const { cfg } = await parseConfig(rest);
     const clue = (rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined) ?? readFlag(rest, "--clue");
     if (!clue) throw new Error("flounder prepare needs a clue: flounder prepare <tx|address|project|url> [--posture blind|informed]");
-    const posture: "blind" | "informed" = readFlag(rest, "--posture") === "informed" ? "informed" : "blind";
+    const posture: "blind" | "informed" = (readFlag(rest, "--posture") ?? loadCliConfig().values.posture) === "informed" ? "informed" : "blind";
     const matchDeployed = !rest.includes("--no-match-deployed");
     const endpoint = readFlag(rest, "--endpoint") ?? readFlag(rest, "--rpc");
     const maxSteps = readIntFlag(rest, "--max-steps");
@@ -141,6 +148,14 @@ async function main(argv: string[]): Promise<void> {
 
 async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   const cfg = defaultConfig();
+  // Persisted CLI config (user-global < project-local < env) is the base layer, applied BELOW
+  // an explicit --config file and the flags — so `flounder config set provider …` sticks but a
+  // one-off --provider still wins. Only the fields that map to a CLI concept are layered here.
+  const fileCfg = loadCliConfig().values;
+  if (fileCfg.provider) cfg.provider = fileCfg.provider;
+  if (fileCfg.model) cfg.auditModel = fileCfg.model;
+  if (fileCfg.thinking) cfg.thinkingLevel = fileCfg.thinking;
+  if (fileCfg.out) cfg.outputDir = fileCfg.out;
   const configPath = readFlag(args, "--config");
   if (configPath) {
     applyConfigOverrides(cfg, JSON.parse(await readFile(configPath, "utf8")) as Record<string, unknown>);
@@ -308,6 +323,12 @@ function hasFlag(args: string[], name: string): boolean {
   return args.includes(name);
 }
 
+/** Resolve --out: flag > persisted config `out` > "runs". Keeps the tracking-store location
+ * consistent across the CLI, the control plane, and the daemon when set once via config. */
+function resolveOut(args: string[]): string {
+  return readFlag(args, "--out") ?? loadCliConfig().values.out ?? "runs";
+}
+
 function readFlag(args: string[], name: string): string | undefined {
   const idx = args.indexOf(name);
   if (idx === -1) return undefined;
@@ -360,7 +381,7 @@ async function runHistoryCommand(args: string[]): Promise<void> {
 // today). `flounder db projects` | `runs [<target>]` | `findings <target>`.
 function runDbCommand(args: string[]): void {
   const [subcommand = "projects", ...rest] = args;
-  const out = readFlag(args, "--out") ?? "runs";
+  const out = resolveOut(args);
   const positional = rest.find((token) => !token.startsWith("--"));
   const target = readFlag(args, "--target") ?? positional;
   const db = MetadataStore.openForOutput(out);
@@ -452,6 +473,59 @@ function projectHistoryLocation(cfg: AuditorConfig): { outputDir: string; target
   };
 }
 
+// `flounder config` — read/write the persisted CLI config (the layered files loadCliConfig
+// merges). Scope defaults to --global (your usual settings); --local writes the nearest
+// .flounder/config.json for project-specific overrides.
+function runConfigCommand(args: string[]): void {
+  const [sub = "list", ...rest] = args;
+  const scope: "global" | "local" = rest.includes("--local") ? "local" : "global";
+  const cwd = process.cwd();
+  const keyList = (Object.keys(CLI_CONFIG_KEYS) as CliConfigKey[]).join(", ");
+  const positional = (i = 0): string | undefined => rest.filter((t) => !t.startsWith("--"))[i];
+
+  if (sub === "list") {
+    const loaded = loadCliConfig(cwd);
+    console.log(`user:    ${loaded.userFile}${existsSync(loaded.userFile) ? "" : "  (none yet)"}`);
+    console.log(`project: ${loaded.projectFile ?? "(none found by walking up from cwd)"}`);
+    console.log("");
+    for (const key of Object.keys(CLI_CONFIG_KEYS) as CliConfigKey[]) {
+      const value = loaded.values[key];
+      const spec = CLI_CONFIG_KEYS[key];
+      if (value === undefined) console.log(`  ${key.padEnd(9)} (unset)  — ${spec.summary}`);
+      else console.log(`  ${key.padEnd(9)} ${String(value)}  [${loaded.sources[key]}]`);
+    }
+    return;
+  }
+  if (sub === "path") {
+    console.log(configFilePath(scope, cwd));
+    return;
+  }
+  if (sub === "get") {
+    const key = positional();
+    if (!key || !isCliConfigKey(key)) throw new Error(`flounder config get <key>  — keys: ${keyList}`);
+    const { value, source } = getCliConfigValue(key, cwd);
+    console.log(value === undefined ? `(${key} is unset)` : `${value}  [${source}]`);
+    return;
+  }
+  if (sub === "set") {
+    const key = positional(0);
+    const value = rest.filter((t) => !t.startsWith("--")).slice(1).join(" ");
+    if (!key || !isCliConfigKey(key)) throw new Error(`flounder config set <key> <value> [--global|--local]  — keys: ${keyList}`);
+    if (!value) throw new Error(`flounder config set ${key} <value>  — a value is required`);
+    const { file, value: stored } = setCliConfigValue(key, value, scope, cwd);
+    console.log(`set ${key} = ${stored}  (${scope}: ${file})`);
+    return;
+  }
+  if (sub === "unset") {
+    const key = positional();
+    if (!key || !isCliConfigKey(key)) throw new Error(`flounder config unset <key> [--global|--local]  — keys: ${keyList}`);
+    const { file, existed } = unsetCliConfigValue(key, scope, cwd);
+    console.log(existed ? `unset ${key}  (${scope}: ${file})` : `${key} was not set in ${scope}  (${file})`);
+    return;
+  }
+  throw new Error(`Unknown config command "${sub}". Use: flounder config [list | get <key> | set <key> <value> | unset <key> | path] [--global|--local]`);
+}
+
 function printHelp(): void {
   console.log(`flounder — white-hat agentic security audit.
 
@@ -463,6 +537,7 @@ Usage:
   flounder confirm <run-dir> --source <paths...>                                  open-world: reproduce a run's findings on the real target
   flounder history import-run --target <name> --run <dir>
   flounder db      [projects | runs [<target>] | findings <target> | daemons | mint-token [name]]   read the tracking store; mint/list daemon tokens
+  flounder config  [list | get <key> | set <key> <value> | unset <key> | path] [--global|--local]   persisted CLI defaults (server, provider, model, thinking, out, posture)
   flounder ui      [--port <n>] [--host <h>] [--out <dir>] [--no-daemon]           control-plane web dashboard + a co-located executor daemon (localhost)
   flounder daemon  --server <url> --token <token> [--out <dir>] [--concurrency <n>]   execution plane: claim + run queued jobs (may be a different machine)
 
