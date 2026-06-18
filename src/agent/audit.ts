@@ -1,5 +1,7 @@
 import path from "node:path";
+import { readFileSync } from "node:fs";
 import { withRole, type AuditorConfig } from "../config.js";
+import { deriveScopeNote } from "../scope-note.js";
 import { loadCorpus, loadSource } from "../ingest/source.js";
 import { createLlmClient } from "../llm/client.js";
 import { renderDisclosure, reportArtifactName } from "../reports/disclosure.js";
@@ -89,7 +91,18 @@ export async function runAudit(
     corpusManifest.push(...(await copyCorpusIntoWorkspace(workspace, corpus)));
   }
 
-  const scopeNote = resolveScopeNote(cfg);
+  let scopeNote = resolveScopeNote(cfg);
+  // No explicit scope note (the `run <clue>` pipeline supplies one; a UI-launched map on a prepare
+  // workspace does not) — fall back to deriving the focus from a prepare_manifest.json staged in the
+  // source. So map/dig concentrate on the in-scope target however the run was started, not only via
+  // the pipeline. Silent when no manifest is present (map then treats all source as in scope).
+  if (!scopeNote.trim()) {
+    const derived = deriveScopeNoteFromSource(cfg.sourcePaths);
+    if (derived) {
+      scopeNote = derived;
+      await logger.event("audit_scope_focus", { source: "prepare_manifest", components: derived.split("\n").filter((l) => l.startsWith("- ")).length });
+    }
+  }
   // Surface prior-run lessons at kickoff: the most relevant notes for this scope,
   // falling back to the most recent ones so memory is always visible.
   let memoryNotes = await memory.recall([cfg.targetName, scopeNote].filter(Boolean).join(" "), 8);
@@ -795,6 +808,22 @@ function resolveScopeNote(cfg: AuditorConfig): string {
   if (pc.scenarioGuidance?.length) parts.push(`Scenario guidance: ${pc.scenarioGuidance.join("; ")}`);
   if (pc.outOfScope?.length) parts.push(`Out of scope: ${pc.outOfScope.join("; ")}`);
   return parts.join("\n");
+}
+
+// Fallback focus: when no explicit scope note is set, look for a prepare_manifest.json at a source
+// root (prepare writes it at the staged workspace root) and derive the in-scope-target focus from
+// it — the same note the `run <clue>` pipeline builds, so any map on a prepare workspace focuses.
+function deriveScopeNoteFromSource(sourcePaths: string[]): string | undefined {
+  for (const sp of sourcePaths) {
+    const candidate = sp.endsWith("prepare_manifest.json") ? sp : path.join(sp, "prepare_manifest.json");
+    try {
+      const note = deriveScopeNote(JSON.parse(readFileSync(candidate, "utf8")));
+      if (note) return note;
+    } catch {
+      /* no manifest at this source root — try the next */
+    }
+  }
+  return undefined;
 }
 
 function renderMemoryHint(notes: { kind: string; note: string; sourceRef?: string }[]): string {
