@@ -293,12 +293,18 @@ let state = { projects: [], active: [], providers: [], filter: "", selected: nul
 // the streamed log — renderDetail just re-attaches this same element into its slot.
 const activityEl = document.createElement("div");
 activityEl.className = "activity";
+// The detail view re-renders every ~1.2s and MOVES this persistent node into the fresh slot, which
+// resets scrollTop to 0 (yanking the view to the top). To avoid that, renderDetail captures the
+// scroll position just BEFORE the re-render and attachActivity restores it AFTER the move — so your
+// scroll position is preserved; we only auto-follow the bottom when you were already at the bottom.
+let activityPrevTop = 0, activityWasBottom = true;
 let logES = null, logRunId = null;
 let curBlockEl = null, curBlockKind = null; // the in-progress thinking/output block for token deltas
 
 function attachActivity(d) {
   const slot = document.getElementById("activitySlot");
   if (slot) slot.appendChild(activityEl); // move the persistent node (with its log) into the fresh detail
+  activityEl.scrollTop = activityWasBottom ? activityEl.scrollHeight : activityPrevTop; // restore the pre-re-render position (the move reset it to 0)
   const rid = d.runs[0] ? d.runs[0].id : null;
   if (rid === logRunId) return; // already streaming this run — keep the feed + connection
   if (logES) { logES.close(); logES = null; }
@@ -311,7 +317,7 @@ function attachActivity(d) {
 }
 
 function appendActivity(rec) {
-  const atBottom = activityEl.scrollTop + activityEl.clientHeight >= activityEl.scrollHeight - 60;
+  const atBottom = activityEl.scrollHeight - activityEl.scrollTop - activityEl.clientHeight < 60;
   const k = rec.kind;
   // token-level deltas (live session runs): append to the current thinking/output block
   if (k === "thinking_delta" || k === "text_delta") {
@@ -427,6 +433,10 @@ async function loadFindings(reset) {
 function renderDetail() {
   const el = $("#detail");
   const d = state.detail;
+  // Capture the live-activity scroll BEFORE we wipe + rebuild the detail (which moves the activity
+  // node and resets its scrollTop). attachActivity restores it after the move.
+  activityWasBottom = activityEl.scrollHeight - activityEl.scrollTop - activityEl.clientHeight < 60;
+  activityPrevTop = activityEl.scrollTop;
   if (!d) { el.innerHTML = '<div class="empty">Select a project, or create one with “New project”.</div>'; return; }
   const cfg = (() => { try { return JSON.parse(d.project.config_json) || {}; } catch { return {}; } })();
   const pr = d.progress;
@@ -493,7 +503,7 @@ function renderDetail() {
       + runningRuns.map((r) => '<button class="btn danger" data-runid="' + r.id + '">' + icon("x") + 'Stop ' + r.kind + ' · run ' + r.id + '</button>').join("")
     + '</div>'
     + confirmedSection
-    + (d.runs.length ? '<div class="section-title">' + icon("play") + 'Live activity <span class="muted">(' + (d.runs[0] ? d.runs[0].kind + " run #" + d.runs[0].id : "") + ' — model thinking, output &amp; tool calls)</span></div><div id="activitySlot"></div>' : "")
+    + (d.runs.length ? '<div class="section-title">' + icon("play") + 'Live activity <span class="muted">(' + (d.runs[0] ? d.runs[0].kind + " #" + d.runs[0].id : "") + ' — model thinking, output &amp; tool calls)</span></div><div id="activitySlot"></div>' : "")
     + '<div class="section-title">' + icon("play") + 'Runs <span class="muted">(' + d.runsTotal + (d.runsTotal > d.runs.length ? ", showing " + d.runs.length : "") + ')</span></div>'
     + (d.runs.length ? '<table><thead><tr><th>kind</th><th>progress</th><th>dir</th><th>started</th><th></th></tr></thead><tbody>' + runsRows + '</tbody></table>' : '<div class="muted">none</div>')
     + scopesSection
