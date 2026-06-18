@@ -66,9 +66,9 @@ async function api(server: string, method: string, route: string, body?: unknown
 
 const delay = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
-/** Enqueue the spec on the control plane and follow the run to completion. Returns true iff the
- * run finished `done` (the caller maps that to the process exit code). */
-export async function launchViaApi(server: string, spec: LaunchSpec): Promise<boolean> {
+/** Enqueue the spec on the control plane and follow the run to completion. Returns the final run
+ * row (so a pipeline can chain phases by its run_dir/findings), or undefined if no run started. */
+export async function launchViaApi(server: string, spec: LaunchSpec): Promise<Record<string, unknown> | undefined> {
   console.log(`[control plane] ${server}`);
   const launched = await api(server, "POST", "/api/launch", absolutizeSpec(spec));
   const jobId = launched.jobId;
@@ -81,11 +81,15 @@ export async function launchViaApi(server: string, spec: LaunchSpec): Promise<bo
   }
 
   const runId = await waitForRun(server, jobId);
-  if (runId === undefined) return false; // job ended before a run started (error/canceled) — already reported
+  if (runId === undefined) return undefined; // job ended before a run started (error/canceled) — already reported
 
   console.log(`[running] run #${runId} — live log below (Ctrl-C stops the run):\n`);
-  const status = await streamAndAwait(server, runId);
-  return status === "done";
+  return await streamAndAwait(server, runId);
+}
+
+/** True iff a launchViaApi result finished `done`. */
+export function ran(run: Record<string, unknown> | undefined): boolean {
+  return run !== undefined && run.status === "done";
 }
 
 // Poll the job until a daemon starts its run (run_id appears), or the job fails before that.
@@ -112,7 +116,7 @@ async function waitForRun(server: string, jobId: number): Promise<number | undef
 // Stream the live activity log while polling for the run's terminal status. Ctrl-C asks the
 // control plane to stop the run (matching the old local Ctrl-C-ends-it semantics) rather than
 // silently detaching; a second Ctrl-C force-exits the CLI and leaves the run to the daemon.
-async function streamAndAwait(server: string, runId: number): Promise<string> {
+async function streamAndAwait(server: string, runId: number): Promise<Record<string, unknown> | undefined> {
   const ac = new AbortController();
   let stopping = false;
   const onSigint = (): void => {
@@ -135,7 +139,7 @@ async function streamAndAwait(server: string, runId: number): Promise<string> {
         ac.abort();
         await streaming.catch(() => {});
         printRunSummary(run);
-        return status;
+        return run;
       }
       await delay(900);
     }

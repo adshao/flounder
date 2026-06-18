@@ -5,7 +5,7 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { defaultConfig, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
 import { CLI_CONFIG_KEYS, configFilePath, getCliConfigValue, isCliConfigKey, loadCliConfig, setCliConfigValue, unsetCliConfigValue, type CliConfigKey } from "./config-file.js";
-import { launchViaApi, resolveServer } from "./cli-client.js";
+import { launchViaApi, ran, resolveServer } from "./cli-client.js";
 import type { LaunchSpec } from "./server/run-manager.js";
 import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/history.js";
 import { MetadataStore } from "./db/store.js";
@@ -74,7 +74,13 @@ async function main(argv: string[]): Promise<void> {
   // the dig stage (a region, inventory scopes, or claims to verify).
   if (cmd === "run" || cmd === "map" || cmd === "audit") {
     const { cfg } = await parseConfig(rest);
-    if (cfg.sourcePaths.length === 0) throw new Error("--source <paths...> is required");
+    // `flounder run <clue>` with no --source = the one-command pipeline: prepare → map → dig →
+    // confirm, end to end (each a separate tracked phase; the sealed dig stays network-sealed).
+    if (cmd === "run" && cfg.sourcePaths.length === 0) {
+      const clue = (rest[0] && !rest[0].startsWith("--")) ? rest[0] : readFlag(rest, "--clue");
+      if (clue) { await runPipeline(rest, cfg, clue); return; }
+    }
+    if (cfg.sourcePaths.length === 0) throw new Error("--source <paths...> is required (or give a clue: flounder run <tx|address|link>)");
     if (cfg.dryRun) throw new Error("agentic mode has no --dry-run; use --mock-llm for an offline check (or `npm run mock-audit`)");
     // The CLI is a pure thin client: build the launch spec and enqueue it on the control plane,
     // which dispatches it to a daemon that executes and streams it back — so every CLI run is
@@ -87,8 +93,8 @@ async function main(argv: string[]): Promise<void> {
       const verifyFile = readFlag(rest, "--verify");
       if (verifyFile !== undefined) spec.verifyFindings = JSON.parse(await readFile(verifyFile, "utf8"));
     }
-    const ok = await launchViaApi(resolveServer(readFlag(rest, "--server")), spec);
-    if (!ok) process.exitCode = 1;
+    const run = await launchViaApi(resolveServer(readFlag(rest, "--server")), spec);
+    if (!ran(run)) process.exitCode = 1;
     return;
   }
 
@@ -109,8 +115,8 @@ async function main(argv: string[]): Promise<void> {
     const spec: LaunchSpec = { verb: "prepare", target: cfg.targetName, sourcePaths: [], provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, clue, posture, matchDeployed, out: cfg.outputDir };
     if (endpoint !== undefined) spec.endpoint = endpoint;
     if (maxSteps !== undefined) spec.maxSteps = maxSteps;
-    const ok = await launchViaApi(resolveServer(readFlag(rest, "--server")), spec);
-    if (!ok) process.exitCode = 1;
+    const run = await launchViaApi(resolveServer(readFlag(rest, "--server")), spec);
+    if (!ran(run)) process.exitCode = 1;
     return;
   }
 
@@ -131,8 +137,8 @@ async function main(argv: string[]): Promise<void> {
     if (cfg.buildRoot) spec.buildRoot = cfg.buildRoot;
     if (fresh) spec.fresh = true;
     if (maxSteps !== undefined) spec.maxSteps = maxSteps;
-    const ok = await launchViaApi(resolveServer(readFlag(rest, "--server")), spec);
-    if (!ok) process.exitCode = 1;
+    const run = await launchViaApi(resolveServer(readFlag(rest, "--server")), spec);
+    if (!ran(run)) process.exitCode = 1;
     return;
   }
 
@@ -323,6 +329,48 @@ function buildAuditSpec(cmd: "run" | "map" | "audit", rest: string[], cfg: Audit
 function slugifyClue(clue: string): string {
   const slug = clue.trim().toLowerCase().replace(/^https?:\/\//, "").replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 32).replace(/-+$/g, "");
   return slug || "target";
+}
+
+// `flounder run <clue>` — the one-command pipeline. Orchestrates the distinct phases as SEPARATE
+// tracked runs (so each stays resumable + UI-visible and the dig stays network-sealed), feeding
+// each phase's output to the next: prepare (acquire, open-world) → run (map→dig, sealed) on the
+// staged source → confirm (reproduce, open-world) if the dig found anything. The user runs one
+// command and reads the final trail. --no-confirm stops after the dig; --posture/--no-match-deployed/
+// --endpoint tune prepare; --max-scopes/--dig-* tune the dig (via buildAuditSpec).
+async function runPipeline(rest: string[], cfg: AuditorConfig, clue: string): Promise<void> {
+  const server = resolveServer(readFlag(rest, "--server"));
+  const target = cfg.targetName === "target" ? `aud-${slugifyClue(clue)}` : cfg.targetName;
+  cfg.targetName = target;
+  const posture: "blind" | "informed" = (readFlag(rest, "--posture") ?? loadCliConfig().values.posture) === "informed" ? "informed" : "blind";
+  const matchDeployed = !rest.includes("--no-match-deployed");
+  const endpoint = readFlag(rest, "--endpoint") ?? readFlag(rest, "--rpc");
+  const noConfirm = rest.includes("--no-confirm");
+  console.log(`=== flounder run pipeline · target "${target}" · prepare → map → dig${noConfirm ? "" : " → confirm"} ===`);
+
+  // Phase 1 — prepare (open-world acquisition + deployment match) stages the source.
+  console.log("\n── phase 1 · prepare (acquire the target) ──");
+  const prepSpec: LaunchSpec = { verb: "prepare", target, sourcePaths: [], provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, clue, posture, matchDeployed, out: cfg.outputDir };
+  if (endpoint !== undefined) prepSpec.endpoint = endpoint;
+  const prep = await launchViaApi(server, prepSpec);
+  if (!ran(prep)) { console.error("[pipeline] prepare did not finish — stopping."); process.exitCode = 1; return; }
+  const staged = `${String(prep!.run_dir)}/prepare/workspace`;
+
+  // Phase 2 — run = map → dig, NETWORK-SEALED, on the staged source.
+  console.log("\n── phase 2 · run (map → dig, network-sealed) ──");
+  cfg.sourcePaths = [staged];
+  const audit = await launchViaApi(server, buildAuditSpec("run", rest, cfg));
+  if (!ran(audit)) { console.error("[pipeline] audit did not finish — stopping."); process.exitCode = 1; return; }
+
+  // Phase 3 — confirm (open-world reproduction) the dig's findings on the real target.
+  const findings = Number(audit!.findings_total ?? 0);
+  if (noConfirm) console.log("\n[pipeline] --no-confirm — skipping reproduction.");
+  else if (findings <= 0) console.log("\n[pipeline] the dig surfaced no findings — nothing to reproduce.");
+  else {
+    console.log("\n── phase 3 · confirm (reproduce on the real target) ──");
+    const confSpec: LaunchSpec = { verb: "confirm", target, sourcePaths: [staged], inputRunDir: String(audit!.run_dir), provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, out: cfg.outputDir };
+    if (!ran(await launchViaApi(server, confSpec))) process.exitCode = 1;
+  }
+  console.log(`\n=== pipeline done · UI project "${target}" has the full prepare → dig${noConfirm ? "" : " → confirm"} trail ===`);
 }
 
 function readFlag(args: string[], name: string): string | undefined {
@@ -519,7 +567,8 @@ function printHelp(): void {
 
 Usage:
   flounder prepare <clue> [--posture blind|informed] [--no-match-deployed] [--endpoint <url>]   open-world: clue (tx/address/project/repo/link) -> complete, deployment-matched scope; runs BEFORE map
-  flounder run     --target <name> --source <paths...> [--corpus <paths...>]      sealed audit: map -> audit (--quick = one breadth pass)
+  flounder run     <clue>                                                         ONE-COMMAND PIPELINE from a tx/address/link: prepare -> map -> dig -> confirm (--no-confirm to stop after the dig)
+  flounder run     --source <paths...> --target <name> [--corpus <paths...>]      sealed audit only: map -> dig on given source (--quick = one breadth pass)
   flounder map     --target <name> --source <paths...> [--corpus <paths...>]      enumerate the scope inventory only (writes audit_scopes.json)
   flounder audit   [<region> | --scope <id,...> | --verify <file>] --source ...   deep-audit a region, inventory scopes, or given claims
   flounder confirm <run-dir> --source <paths...>                                  open-world: reproduce a run's findings on the real target
