@@ -182,6 +182,7 @@
   .phase .ph-head { display: flex; align-items: center; gap: 7px; font-weight: 500; font-size: 13px; }
   .phase .ph-head .octicon { fill: var(--fg-muted); }
   .phase .ph-stat { font-size: 11px; color: var(--fg-muted); margin-top: 7px; line-height: 1.45; }
+  .phase .ph-dur { font-size: 11px; color: var(--fg-muted); font-family: var(--mono); white-space: nowrap; }
   .parrow { display: flex; align-items: center; flex-shrink: 0; }
   .parrow .octicon { fill: var(--fg-subtle); }
   .sdot { width: 9px; height: 9px; border-radius: 50%; display: inline-block; flex-shrink: 0; background: var(--neutral-emphasis); vertical-align: middle; }
@@ -365,7 +366,7 @@
 
 <script>
 const $ = (sel) => document.querySelector(sel);
-let state = { projects: [], active: [], providers: [], filter: "", selected: null, detail: null, phase: null, scopePage: 0, view: "projects", bugs: { status: "", tracking: "" }, f: { status: "", q: "", limit: 20, offset: 0, rows: [], total: 0 } };
+let state = { projects: [], active: [], providers: [], filter: "", selected: null, detail: null, phase: null, phasePinned: false, scopePage: 0, view: "projects", bugs: { status: "", tracking: "" }, f: { status: "", q: "", limit: 20, offset: 0, rows: [], total: 0 } };
 
 // Live activity feed: streams a run's events.jsonl (model thinking/output + tool calls) over
 // SSE. Kept in a PERSISTENT detached node so the detail re-rendering each tick doesn't wipe
@@ -577,6 +578,7 @@ async function selectProject(name) {
   state.selected = name;
   lastDetailSig = null; // force a fresh render when (re)selecting, even if the data signature matches
   state.phase = null; // recompute the default phase tab for the newly-selected project
+  state.phasePinned = false; // resume auto-follow of the running phase for this project
   state.scopePage = 0;
   state.f = { status: "", q: "", limit: 20, offset: 0, rows: [], total: 0 };
   renderList();
@@ -619,27 +621,52 @@ async function loadFindings(reset) {
 // The phase pipeline (prepare -> map -> dig -> confirm) as a dependency graph, GitHub-Actions
 // style. Each phase's status is DERIVED from the project's aggregate state (not 1 run = 1 phase),
 // because `flounder run` spans map+dig — so the DAG reflects real progress through the pipeline.
+function fmtDur(ms) {
+  if (!(ms > 0)) return "";
+  const s = Math.floor(ms / 1000);
+  if (s < 60) return s + "s";
+  const m = Math.floor(s / 60), rs = s % 60;
+  if (m < 60) return m + "m" + (rs ? " " + rs + "s" : "");
+  const h = Math.floor(m / 60); return h + "h " + (m % 60) + "m";
+}
+// Elapsed time of a run: started_at -> (now if live, else ended_at). "" if not computable.
+function runDur(r, live) {
+  if (!r || !r.started_at) return "";
+  const start = new Date(r.started_at).getTime();
+  const end = live ? Date.now() : (r.ended_at ? new Date(r.ended_at).getTime() : 0);
+  return end ? fmtDur(end - start) : "";
+}
 function phaseState(d, pr) {
   const runs = d.runs || [];
-  const latest = (kind) => runs.find((r) => r.kind === kind);
-  const runningIn = (...k) => runs.some((r) => r.status === "running" && k.includes(r.kind));
+  const latest = (...kinds) => runs.find((r) => kinds.includes(r.kind));
   const prep = latest("prepare");
   const repro = (d.confirmDecisions || []).filter((c) => c.reproduced === "yes").length;
   const conf = latest("confirm");
-  const runningDig = runs.find((r) => r.status === "running" && (r.kind === "run" || r.kind === "audit"));
-  const thisRun = runningDig && runningDig.run_scopes_target != null ? " · this run " + (runningDig.run_scopes_done ?? 0) + "/" + runningDig.run_scopes_target : "";
+  // map and dig are ONE run (verb run/audit). That run is in the MAP sub-phase until its dig loop
+  // begins (run_scopes_target gets set), then in DIG — so the two are never "running" at the same
+  // time. `audit` kind = pure dig (no map). This is what stops both dots lighting up at once.
+  const audit = runs.find((r) => r.status === "running" && (r.kind === "run" || r.kind === "audit" || r.kind === "map"));
+  const auditLatest = latest("run", "audit", "map");
+  const digStarted = !!audit && audit.run_scopes_target != null;
+  const mapRunning = !!audit && audit.kind !== "audit" && !digStarted;
+  const digRunning = !!audit && (audit.kind === "audit" || digStarted);
+  const thisRun = audit && audit.run_scopes_target != null ? " · this run " + (audit.run_scopes_done ?? 0) + "/" + audit.run_scopes_target : "";
   return {
-    prepare: { status: prep ? prep.status : "none", stat: prep ? (prep.status === "done" ? "source staged" : prep.status) : "not run" },
-    map: { status: pr.total > 0 ? "done" : (runningIn("run", "map") ? "running" : "none"), stat: pr.total > 0 ? pr.total + " obligations" : "—" },
-    dig: { status: runningIn("run", "audit") ? "running" : (pr.audited > 0 ? "done" : (pr.total > 0 ? "pending" : "none")),
-           stat: pr.total > 0 ? (pr.audited + "/" + pr.total + " audited · " + pr.pending + " pending" + (d.findingsTotal ? " · " + d.findingsTotal + " findings" : "") + thisRun) : "—" },
-    confirm: { status: conf ? conf.status : (d.confirmDecisions.length ? "done" : "none"), stat: d.confirmDecisions.length ? (repro + "/" + d.confirmDecisions.length + " reproduced") : "not run" },
+    prepare: { status: prep ? prep.status : "none", stat: prep ? (prep.status === "done" ? "source staged" : prep.status) : "not run", dur: runDur(prep, prep && prep.status === "running") },
+    map: { status: mapRunning ? "running" : (pr.total > 0 ? "done" : "none"), stat: pr.total > 0 ? pr.total + " obligations" : "—",
+           dur: mapRunning ? runDur(audit, true) : "" },
+    dig: { status: digRunning ? "running" : (pr.audited > 0 ? "done" : (pr.total > 0 ? "pending" : "none")),
+           stat: pr.total > 0 ? (pr.audited + "/" + pr.total + " audited · " + pr.pending + " pending" + (d.findingsTotal ? " · " + d.findingsTotal + " findings" : "") + thisRun) : "—",
+           dur: digRunning ? runDur(audit, true) : (pr.audited > 0 ? runDur(auditLatest, false) : "") },
+    confirm: { status: conf ? conf.status : (d.confirmDecisions.length ? "done" : "none"), stat: d.confirmDecisions.length ? (repro + "/" + d.confirmDecisions.length + " reproduced") : "not run", dur: runDur(conf, conf && conf.status === "running") },
   };
 }
 function renderPipeline(d, pr) {
   const ph = phaseState(d, pr);
   const node = (key, label, icn, info) => '<div class="phase' + (info.status === "running" ? " active" : "") + (state.phase === key ? " sel" : "") + '" data-phase="' + key + '" title="show ' + label + '">'
-    + '<div class="ph-head">' + icon(icn) + '<span>' + label + '</span><span class="sdot ' + info.status + '" style="margin-left:auto" title="' + info.status + '"></span></div>'
+    + '<div class="ph-head">' + icon(icn) + '<span>' + label + '</span><span style="margin-left:auto;display:inline-flex;align-items:center;gap:8px">'
+      + (info.dur ? '<span class="ph-dur" title="elapsed">' + info.dur + '</span>' : '')
+      + '<span class="sdot ' + info.status + '" title="' + info.status + '"></span></span></div>'
     + '<div class="ph-stat">' + info.stat + '</div></div>';
   const arrow = '<div class="parrow">' + icon("arrowright", 15) + '</div>';
   return '<div class="pipeline">' + node("prepare", "prepare", "package", ph.prepare) + arrow
@@ -717,8 +744,14 @@ function renderDetail() {
       + d.confirmDecisions.map((c) => '<tr><td>' + esc(c.bug) + '</td><td>' + (c.reproduced === "yes" ? statusBadge("confirmed-differential").replace("confirmed-differential", "reproduced") : '<span class="mono muted">' + esc(c.reproduced) + '</span>') + '</td><td class="mono">' + esc(c.recommendation) + '</td></tr>').join("") + '</tbody></table>'
     : '<div class="muted">No confirm decisions yet — run the confirm phase on a finished run.</div>';
   // The DAG is a phase selector (like a GitHub Actions job graph): the selected phase's content
-  // shows below. Default to the most-advanced phase that has content.
-  if (!["prepare", "map", "dig", "confirm"].includes(state.phase)) {
+  // shows below. While a run is live and the user hasn't pinned a tab, AUTO-FOLLOW the running
+  // phase (so prepare -> map -> dig advances the view on its own); otherwise default to the
+  // most-advanced phase that has content. Clicking a tab pins it (state.phasePinned).
+  const phSel = phaseState(d, pr);
+  const runningPhase = ["confirm", "dig", "map", "prepare"].find((k) => phSel[k].status === "running");
+  if (runningPhase && !state.phasePinned) {
+    state.phase = runningPhase;
+  } else if (!["prepare", "map", "dig", "confirm"].includes(state.phase)) {
     state.phase = d.confirmDecisions.length ? "confirm" : (pr.audited > 0 || d.findingsTotal > 0) ? "dig" : pr.total > 0 ? "map" : d.runs.some((r) => r.kind === "prepare") ? "prepare" : "dig";
   }
   const card = (titleHtml, body) => '<div class="card"><div class="section-title">' + titleHtml + '</div>' + body + '</div>';
@@ -804,7 +837,7 @@ function renderDetail() {
     row.insertAdjacentHTML("afterend", '<tr class="scope-detail"><td></td><td colspan="5" style="padding:10px 14px;background:rgba(127,127,127,.06)">' + body + '</td></tr>');
   });
   el.querySelectorAll("[data-report]").forEach((b) => b.onclick = (e) => { e.stopPropagation(); openReport(b.dataset.report, b.dataset.rname, b.dataset.rtitle); });
-  el.querySelectorAll("[data-phase]").forEach((n) => n.onclick = () => { state.phase = n.dataset.phase; renderDetail(); });
+  el.querySelectorAll("[data-phase]").forEach((n) => n.onclick = () => { state.phase = n.dataset.phase; state.phasePinned = true; renderDetail(); });
   const sp = $("#prevS"); if (sp) sp.onclick = () => { state.scopePage = Math.max(0, state.scopePage - 1); renderDetail(); };
   const sn = $("#nextS"); if (sn) sn.onclick = () => { state.scopePage += 1; renderDetail(); };
   renderChips();
