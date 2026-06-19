@@ -736,22 +736,30 @@ function renderDetail() {
     ? '<table><thead><tr><th>kind</th><th>progress</th><th>dir</th><th>started</th><th></th></tr></thead><tbody>' + rs.map(runRowHtml).join("") + '</tbody></table>'
     : '<div class="muted">no runs in this phase yet</div>';
   const SCOPE_PAGE = 12;
-  const allScopes = d.scopes || [];
+  // Show the table in DIG ORDER: un-audited scopes (the dig queue) first, highest score first —
+  // so a scope you "↑ Top" jumps to the very top here AND gets dug next. Audited/deferred follow.
+  const allScopes = (d.scopes || []).slice().sort((a, b) => {
+    const ga = a.status === "audited" || a.status === "deferred" ? 1 : 0;
+    const gb = b.status === "audited" || b.status === "deferred" ? 1 : 0;
+    return ga !== gb ? ga - gb : ((b.priority || 0) - (a.priority || 0)) || ((b.score || 0) - (a.score || 0));
+  });
   if (state.scopePage * SCOPE_PAGE >= allScopes.length) state.scopePage = 0; // clamp after the inventory changes
   const scopeSlice = allScopes.slice(state.scopePage * SCOPE_PAGE, state.scopePage * SCOPE_PAGE + SCOPE_PAGE);
   const scopeRows = scopeSlice.map((sc) => {
+    const prio = (sc.status === "pending" || sc.status === "deferred") ? '<button class="rowbtn" data-prio="' + esc(sc.scope_id) + '" title="dig this scope next">↑ Top</button> ' : "";
     const act = sc.status === "audited" || sc.status === "auditing" ? ""
-      : sc.status === "deferred" ? '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="pending">Resume</button>'
-      : '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="deferred">Skip</button>';
+      : sc.status === "deferred" ? prio + '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="pending">Resume</button>'
+      : prio + '<button class="rowbtn" data-scope="' + esc(sc.scope_id) + '" data-sstatus="deferred">Skip</button>';
     const dot = sc.status === "audited" ? "done" : sc.status === "auditing" ? "running" : sc.status;
     // sub-line: each audited scope shows ITS OWN dig duration; the in-progress one shows "auditing…".
     const sub = sc.status === "auditing" ? '<div class="muted" style="font-size:10px;margin-top:3px">auditing…</div>'
       : (sc.status === "audited" && sc.dig_seconds ? '<div class="muted" style="font-size:10px;margin-top:3px">' + fmtDur(sc.dig_seconds * 1000) + '</div>' : '');
-    return '<tr class="scope-row" data-sdetail="' + esc(sc.scope_id) + '" style="cursor:pointer"><td><span class="sdot ' + dot + '"></span> <span class="label s-' + sc.status + '">' + sc.status + '</span>' + sub + '</td><td class="mono">' + esc(sc.scope_id) + '</td><td>' + esc(sc.title)
-      + '</td><td class="mono muted">' + esc(sc.location) + '</td><td class="mono muted">' + (sc.score != null ? Number(sc.score).toFixed(1) : "") + '</td><td>' + act + '</td></tr>';
+    const pin = (sc.priority > 0 && sc.status !== "audited") ? ' <span class="muted" title="manually prioritized (priority ' + sc.priority + ')" style="font-size:10px">↑ pinned</span>' : "";
+    return '<tr class="scope-row" data-sdetail="' + esc(sc.scope_id) + '" style="cursor:pointer"><td><span class="sdot ' + dot + '"></span> <span class="label s-' + sc.status + '">' + sc.status + '</span>' + pin + sub + '</td><td class="mono">' + esc(sc.scope_id) + '</td><td>' + esc(sc.title)
+      + '</td><td class="mono muted">' + esc(sc.location) + '</td><td class="mono muted">' + (sc.score != null ? Number(sc.score).toFixed(1) : "") + '</td><td style="white-space:nowrap">' + act + '</td></tr>';
   }).join("");
   const scopesInner = allScopes.length
-    ? '<table class="fixed"><colgroup><col style="width:11%"><col style="width:15%"><col style="width:33%"><col style="width:28%"><col style="width:6%"><col style="width:7%"></colgroup><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table>' + pager("S", state.scopePage * SCOPE_PAGE, SCOPE_PAGE, allScopes.length, scopeSlice.length)
+    ? '<table class="fixed"><colgroup><col style="width:11%"><col style="width:14%"><col style="width:28%"><col style="width:25%"><col style="width:6%"><col style="width:16%"></colgroup><thead><tr><th>status</th><th>id</th><th>obligation</th><th>location</th><th>score</th><th></th></tr></thead><tbody>' + scopeRows + '</tbody></table>' + pager("S", state.scopePage * SCOPE_PAGE, SCOPE_PAGE, allScopes.length, scopeSlice.length)
     : '<div class="muted">No scopes mapped yet — run the map phase.</div>';
   // Confirmed bugs = decisions that actually reproduced on the real target (the payoff).
   const confirmed = d.confirmDecisions.filter((c) => c.reproduced === "yes");
@@ -851,6 +859,12 @@ function renderDetail() {
   });
   el.querySelectorAll("[data-scope]").forEach((b) => b.onclick = async () => {
     await fetch("/api/projects/" + encodeURIComponent(state.selected) + "/scopes/" + encodeURIComponent(b.dataset.scope), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ status: b.dataset.sstatus }) });
+    loadDetail();
+  });
+  el.querySelectorAll("[data-prio]").forEach((b) => b.onclick = async (e) => {
+    e.stopPropagation(); // don't also toggle the row's detail
+    await fetch("/api/projects/" + encodeURIComponent(state.selected) + "/scopes/" + encodeURIComponent(b.dataset.prio), { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ prioritize: true }) });
+    state.scopePage = 0; // the bumped scope is now at the top
     loadDetail();
   });
   // Click a scope row to expand its detail: the full obligation + location + score/status + its

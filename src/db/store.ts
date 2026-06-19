@@ -51,6 +51,7 @@ export interface ScopeRow {
   title?: string | undefined;
   location?: string | undefined;
   score?: number | undefined;
+  priority?: number | undefined; // manual dig-queue ordering (separate from score)
   status: ScopeStatus;
   digSeconds?: number | undefined; // per-scope deep-audit duration (set when it finishes)
 }
@@ -166,6 +167,7 @@ CREATE TABLE IF NOT EXISTS scope(
   title TEXT,
   location TEXT,
   score REAL,
+  priority INTEGER DEFAULT 0,     -- manual dig-queue ordering (operator "↑ Top"); orders ABOVE score, never overwrites it
   status TEXT NOT NULL,
   dig_seconds INTEGER,            -- per-scope deep-audit duration, set when the scope finishes
   updated_at TEXT NOT NULL,
@@ -280,6 +282,7 @@ export class MetadataStore {
       "ALTER TABLE run ADD COLUMN run_scopes_done INTEGER",
       "ALTER TABLE run ADD COLUMN dig_started_at TEXT", // map->dig boundary for splitting a combined run's elapsed
       "ALTER TABLE scope ADD COLUMN dig_seconds INTEGER", // per-scope deep-audit duration
+      "ALTER TABLE scope ADD COLUMN priority INTEGER DEFAULT 0", // manual dig-queue ordering, separate from score
       "ALTER TABLE finding ADD COLUMN tracking_status TEXT", // submission tracking: open|triaging|submitted|accepted|fixed|duplicate|rejected
       "ALTER TABLE finding ADD COLUMN confirm_status TEXT", // per-finding real-target confirm state
     ]) {
@@ -485,24 +488,26 @@ export class MetadataStore {
    * later inventory-wide upsert that omits it doesn't wipe a scope's recorded duration. */
   upsertScopes(projectId: number, scopes: ScopeRow[]): void {
     const stmt = this.db.prepare(
-      `INSERT INTO scope(project_id, scope_id, title, location, score, status, dig_seconds, updated_at)
-       VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+      `INSERT INTO scope(project_id, scope_id, title, location, score, priority, status, dig_seconds, updated_at)
+       VALUES (?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?, ?)
        ON CONFLICT(project_id, scope_id) DO UPDATE SET
          title = excluded.title, location = excluded.location, score = excluded.score,
          status = excluded.status,
+         priority = COALESCE(excluded.priority, scope.priority),
          dig_seconds = COALESCE(excluded.dig_seconds, scope.dig_seconds),
          updated_at = CASE WHEN scope.status != excluded.status THEN excluded.updated_at ELSE scope.updated_at END`,
     );
     const ts = now();
     this.transaction(() => {
       for (const s of scopes) {
-        stmt.run(projectId, s.scopeId, s.title ?? null, s.location ?? null, s.score ?? null, s.status, s.digSeconds ?? null, ts);
+        stmt.run(projectId, s.scopeId, s.title ?? null, s.location ?? null, s.score ?? null, s.priority ?? null, s.status, s.digSeconds ?? null, ts);
       }
     });
   }
 
   listScopes(projectId: number): Array<Record<string, unknown>> {
-    return this.db.prepare("SELECT * FROM scope WHERE project_id = ? ORDER BY status, score DESC").all(projectId) as Array<Record<string, unknown>>;
+    // dig order: manual priority first, then score (status groups the display).
+    return this.db.prepare("SELECT * FROM scope WHERE project_id = ? ORDER BY status, priority DESC, score DESC").all(projectId) as Array<Record<string, unknown>>;
   }
 
   scopeProgress(projectId: number): Coverage {
@@ -526,6 +531,16 @@ export class MetadataStore {
       .prepare("UPDATE scope SET status = ?, updated_at = ? WHERE project_id = ? AND scope_id = ?")
       .run(status, now(), projectId, scopeId);
     return Number(info.changes);
+  }
+
+  /** Hand-order the dig queue: bump a scope's PRIORITY one above the project's current max so the
+   * dig (which orders by priority then score) audits it next. Leaves the map's score untouched —
+   * priority is a separate manual-ordering axis. Returns true if the scope exists. */
+  prioritizeScope(projectId: number, scopeId: string): boolean {
+    const top = (this.db.prepare("SELECT COALESCE(MAX(priority), 0) AS m FROM scope WHERE project_id = ?").get(projectId) as { m: number }).m;
+    return this.db
+      .prepare("UPDATE scope SET priority = ?, updated_at = ? WHERE project_id = ? AND scope_id = ?")
+      .run(top + 1, now(), projectId, scopeId).changes > 0;
   }
 
   // --- findings + status transitions ---------------------------------------

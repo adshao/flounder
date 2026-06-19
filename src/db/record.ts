@@ -195,6 +195,7 @@ export function toScopeRow(scope: AuditScope): ScopeRow {
     score: scope.score,
     status,
     digSeconds: scope.digSeconds,
+    priority: scope.priority,
   };
 }
 

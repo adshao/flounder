@@ -489,19 +489,29 @@ function projectDelete(c: Ctx): void {
 async function scopeSetStatus(c: Ctx): Promise<void> {
   const project = c.store.getProject(c.params.name ?? "");
   if (!project) return sendJson(c.res, 404, { error: `no project named ${c.params.name}` });
-  const body = (await readBody(c.req)) as { status?: string };
-  const status = body.status;
-  if (status !== "pending" && status !== "audited" && status !== "deferred") {
-    return sendJson(c.res, 400, { error: "status must be one of pending | audited | deferred" });
-  }
+  const body = (await readBody(c.req)) as { status?: string; prioritize?: boolean };
   const scopeId = c.params.scopeId ?? "";
-  // Update the persisted inventory the AUDIT reads (history-dir scopes.json), so the next
-  // dig honors the skip — then mirror it into the UI's SQLite projection. (If the daemon
-  // executes from its own checkout, it re-reads the inventory there via resume/--remap; this
-  // server-side copy is the one a co-located daemon shares.)
+  // Both branches must write the persisted inventory the AUDIT reads (history-dir scopes.json) AND
+  // the UI's SQLite projection — the dig (resume/--remap) re-reads the inventory file, so a DB-only
+  // change wouldn't reach it.
   const inventoryDir = projectHistoryDir({ outputDir: c.out, targetName: String(project.name) });
   const inventory = await loadScopeInventory(inventoryDir);
   const scope = inventory.find((s) => s.id === scopeId);
+
+  // Prioritize: bump this scope's score above all others so the dig — which audits the highest-
+  // scored un-audited scopes first — picks it next. Lets the operator hand-order the dig queue
+  // (e.g. push the escape-hatch scope to the front) without touching its status.
+  if (body.prioritize) {
+    const top = inventory.reduce((m, s) => Math.max(m, Number(s.priority) || 0), 0);
+    if (scope) { scope.priority = top + 1; await saveScopeInventory(inventoryDir, inventory); } // bump priority, leave score
+    const ok = c.store.prioritizeScope(Number(project.id), scopeId);
+    return sendJson(c.res, ok || scope ? 200 : 404, ok || scope ? { ok: true, scopeId, prioritized: true, priority: top + 1 } : { error: "no such scope" });
+  }
+
+  const status = body.status;
+  if (status !== "pending" && status !== "audited" && status !== "deferred") {
+    return sendJson(c.res, 400, { error: "status must be one of pending | audited | deferred, or pass prioritize:true" });
+  }
   if (scope) {
     scope.status = status;
     await saveScopeInventory(inventoryDir, inventory);

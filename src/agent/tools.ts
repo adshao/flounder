@@ -474,6 +474,7 @@ export interface AuditScope {
   why: string;
   status?: "pending" | "audited" | "deferred" | "auditing";
   digSeconds?: number; // how long this scope's deep-audit took (set when it completes)
+  priority?: number; // manual dig-queue ordering (operator "↑ Top"); ordered above score, doesn't change score
 }
 
 /** Non-mutating check: did the session write a non-empty findings.json to scratch?

@@ -267,7 +267,7 @@ export async function runAudit(
       // operator chose to skip, so auto-selection excludes it (an explicit --scope still digs it).
       toDig = scopeInventory
         .filter((scope) => scope.status !== "audited" && scope.status !== "deferred")
-        .sort((a, b) => b.score - a.score)
+        .sort((a, b) => ((b.priority ?? 0) - (a.priority ?? 0)) || (b.score - a.score)) // manual "↑ Top" priority first, then score
         .slice(0, Math.max(1, cfg.auditMaxScopes));
     }
     // This run's dig batch: toDig is the set of scopes THIS run audits (capped by --max-scopes),
