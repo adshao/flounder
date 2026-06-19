@@ -11,6 +11,7 @@ import type { Doc } from "../types.js";
 import { publicPath } from "../util/paths.js";
 import { consolidateByFixEquivalence, type FixEquivEdge, type FixEquivItem } from "./consolidate.js";
 import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
+import { findingContentKey } from "../util/finding-key.js";
 import { ProjectMemory } from "./memory.js";
 import { isPiSessionProvider, runAuditSession } from "./pi-session.js";
 import { buildTools, newSession, type AgentSession, type FixPatch, type ToolContext } from "./tools.js";
@@ -37,7 +38,7 @@ interface ConfirmProvenance {
 
 export async function runConfirm(
   cfg: AuditorConfig,
-  options: { inputRunDir: string; maxSteps?: number; fresh?: boolean; streamEvents?: boolean; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory },
+  options: { inputRunDir: string; inputRunDirs?: string[]; confirmKeys?: string[]; maxSteps?: number; fresh?: boolean; streamEvents?: boolean; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory },
 ): Promise<ConfirmRunResult> {
   // Confirm needs a real agent that can fork a live network and run real nodes; the
   // mock/CLI fallbacks cannot, so this mode requires a pi-session provider.
@@ -47,7 +48,12 @@ export async function runConfirm(
     );
   }
   if (cfg.sourcePaths.length === 0) throw new Error("flounder confirm needs --source (the target code to reproduce against)");
-  const inputRunDir = path.resolve(options.inputRunDir);
+  // AGGREGATE confirm: when several run dirs are supplied (the project's distinct confirmed-finding
+  // sources, located by the control plane from the findings' run_ids), union + dedup their findings
+  // and freeze each. A single inputRunDir is the back-compatible case. The first dir is "primary":
+  // it anchors resume + the public inputRunDir reference.
+  const runDirs = (options.inputRunDirs && options.inputRunDirs.length > 0 ? options.inputRunDirs : [options.inputRunDir]).map((p) => path.resolve(p));
+  const inputRunDir = runDirs[0]!;
 
   // Confirm runs UNBOUNDED by default: reproduction on a real target is heavy, and the
   // step count should never silently truncate productive work. A turn cap applies only
@@ -62,14 +68,33 @@ export async function runConfirm(
   // 1. Freeze + fingerprint the input run BEFORE any network access. This anchors the
   // claim that the findings were produced blind (no network), independent of anything
   // the open-world pass later reads online.
-  const provenance = await freezeInputRun(inputRunDir);
-  await logger.artifact("confirm_provenance.json", provenance);
-  await logger.event("audit_confirm_freeze", { inputRunDir: publicPath(inputRunDir), files: provenance.frozenFiles.length });
+  const provenances = [];
+  for (const dir of runDirs) provenances.push(await freezeInputRun(dir));
+  const provenance = { ...provenances[0]!, frozenFiles: provenances.flatMap((p) => p.frozenFiles) };
+  await logger.artifact("confirm_provenance.json", { ...provenance, runDirs: runDirs.map((d) => publicPath(d)) });
+  await logger.event("audit_confirm_freeze", { runDirs: runDirs.map((d) => publicPath(d)), files: provenance.frozenFiles.length });
 
-  // 2. Load the prior run's confirmed findings as the work list.
-  const priorFindings = await loadConfirmedFindings(inputRunDir);
+  // 2. Load every source run's confirmed findings and union them as the work list, deduped by the
+  // SAME content key the DB uses (util/finding-key) so the same bug across batches counts once. When
+  // confirmKeys is given (the control plane's pending/target set), keep ONLY those — that is how a
+  // project-level confirm skips already-decided findings and a finding-level confirm does just one.
+  // The work-list id IS the content key, so each confirm_decision's members map straight back to the
+  // DB finding whose confirm_status to update.
+  const wantKeys = options.confirmKeys && options.confirmKeys.length > 0 ? new Set(options.confirmKeys) : undefined;
+  const seenKeys = new Set<string>();
+  const priorFindings: Array<Record<string, unknown>> = [];
+  for (const dir of runDirs) {
+    for (const finding of await loadConfirmedFindings(dir)) {
+      const key = findingContentKey(finding.scopeId, finding.location, finding.title);
+      if (wantKeys && !wantKeys.has(key)) continue;
+      if (seenKeys.has(key)) continue;
+      seenKeys.add(key);
+      finding.id = key;
+      priorFindings.push(finding);
+    }
+  }
   if (priorFindings.length === 0) {
-    throw new Error(`flounder confirm: no confirmed findings in ${path.join(inputRunDir, "audit_findings.json")} (point it at a completed run dir).`);
+    throw new Error(`flounder confirm: no matching confirmed findings across ${runDirs.length} run dir(s) (nothing pending to confirm).`);
   }
   // SQLite tracking: record a `confirm` run under the same project (failure-isolated).
   const recorder = (options.makeTracker ?? RunRecorder.start)(confirmCfg, logger.runDir, "confirm", logger);
@@ -90,7 +115,7 @@ export async function runConfirm(
   if (source.length === 0) throw new Error("flounder confirm requires at least one readable source file (use --source)");
   const workspaceRoots = confirmCfg.buildRoot ? [confirmCfg.buildRoot] : confirmCfg.sourcePaths;
   const workspace = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, "confirm/workspace");
-  const frozenDocs = await loadFrozenReportDocs(inputRunDir);
+  const frozenDocs = (await Promise.all(runDirs.map((dir) => loadFrozenReportDocs(dir)))).flat();
   const corpusManifest = await copyDocsIntoWorkspace(workspace, frozenDocs);
 
   const session: AgentSession = newSession();

@@ -64,7 +64,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       const cfg = specToConfig(spec, out, workspace);
       if (spec.verb === "confirm") {
         if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir");
-        await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
+        await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.inputRunDirs ? { inputRunDirs: spec.inputRunDirs } : {}), ...(spec.confirmKeys ? { confirmKeys: spec.confirmKeys } : {}), ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
       } else if (spec.verb === "prepare") {
         if (!spec.clue) throw new Error("prepare requires a clue (tx / address / project / link)");
         await runPrepare(cfg, {

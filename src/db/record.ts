@@ -6,6 +6,7 @@
 
 import path from "node:path";
 import { reportArtifactName } from "../reports/disclosure.js";
+import { findingContentKey } from "../util/finding-key.js";
 import type { AuditorConfig } from "../config.js";
 import type { AgentFinding, AuditScope } from "../agent/tools.js";
 import { MetadataStore, type Coverage, type FindingRow, type FindingStatus, type RunKind, type RunStatus, type ScopeRow } from "./store.js";
@@ -163,17 +164,13 @@ function isConfirmedLike(status: string): boolean {
   return status === "confirmed-source" || status === "confirmed-executable" || status === "confirmed-differential";
 }
 
-// A CONTENT-stable dedup key: the display id (f1..fN) is renumbered at finalize, so keying the DB
-// row on it would orphan rows when findings are persisted incrementally (per scope, then re-persisted
-// with updated statuses through differential / refutation / appeal). Hashing scope+location+title
-// keeps the SAME row across those updates, so the UI shows a finding appear once and then change
-// status in place. Falls back to the id when content is somehow empty.
+// A CONTENT-stable dedup key (shared with the confirm phase via util/finding-key): the display id
+// (f1..fN) is renumbered at finalize, so keying the DB row on it would orphan rows when findings are
+// persisted incrementally (per scope, then re-persisted with updated statuses through differential /
+// refutation / appeal). Hashing scope+location+title keeps the SAME row across those updates.
 function stableFindingKey(finding: AgentFinding): string {
-  const basis = `${finding.scopeId ?? ""}|${finding.location ?? ""}|${finding.title ?? ""}`;
-  if (!basis.replace(/\|/g, "")) return finding.id;
-  let h = 5381;
-  for (let i = 0; i < basis.length; i += 1) h = (((h << 5) + h) ^ basis.charCodeAt(i)) | 0;
-  return "k" + (h >>> 0).toString(36);
+  const key = findingContentKey(finding.scopeId, finding.location, finding.title);
+  return key === "k0" ? finding.id : key;
 }
 
 export function toFindingRow(finding: AgentFinding, runDir: string): FindingRow {

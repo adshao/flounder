@@ -813,7 +813,7 @@ function renderDetail() {
         + '<button class="btn primary" id="continueBtn"' + dis + '>' + icon("play") + (d.runsTotal > 0 ? "Continue audit" : "Start audit") + '</button>'
         + (d.runsTotal > 0 ? '<button class="btn" id="restartBtn"' + dis + '>' + icon("sync") + 'Restart (re-map)</button>' : "")
         + '<button class="btn" id="runBtn"' + dis + '>' + icon("play") + 'Run…</button>'
-        + (d.runs.some((r) => (r.kind === "run" || r.kind === "audit") && r.status === "done" && r.run_dir) ? '<button class="btn" id="confirmBtn"' + dis + '>' + icon("shieldcheck") + 'Confirm on real target</button>' : "")
+        + ((d.statusCounts && (d.statusCounts["confirmed-differential"] || d.statusCounts["confirmed-executable"] || d.statusCounts["confirmed-source"])) ? '<button class="btn" id="confirmBtn"' + dis + '>' + icon("shieldcheck") + 'Confirm pending on real target</button>' : "")
         + '<button class="btn" id="editBtn">' + icon("gear") + 'Edit config</button>'
         + '<button class="btn danger" id="deleteBtn"' + dis + '>' + icon("trash") + 'Delete</button>'
         + runningRuns.map((r) => '<button class="btn danger" data-runid="' + r.id + '">' + icon("x") + 'Stop ' + r.kind + ' · run ' + r.id + '</button>').join("")
@@ -831,8 +831,9 @@ function renderDetail() {
   // Run… dialog or the CLI's --endpoint set that.)
   const cfb = $("#confirmBtn");
   if (cfb) cfb.onclick = () => {
-    const r = d.runs.find((x) => (x.kind === "run" || x.kind === "audit") && x.status === "done" && x.run_dir);
-    if (r && confirm('Confirm on the real target — reproduce run ' + r.id + "'s findings on a mainnet fork (reads/forks live state, never broadcasts)?")) launchRun({ verb: "confirm", inputRunDir: r.run_dir });
+    // No inputRunDir => the control plane confirms ALL pending-confirmable findings (skips ones
+    // already decided), locating each finding's source run dir from its run_id.
+    if (confirm("Confirm on the real target — reproduce every pending confirmed finding on a mainnet fork (reads/forks live state, never broadcasts). Already-decided findings are skipped.")) launchRun({ verb: "confirm" });
   };
   $("#editBtn").onclick = openEdit;
   $("#deleteBtn").onclick = async () => {
@@ -895,9 +896,20 @@ function renderChips() {
 function renderFindings() {
   const el = $("#findings"); if (!el) return;
   if (state.f.rows.length === 0) { el.innerHTML = '<div class="muted">no findings match</div>'; return; }
+  // The confirm column: a finding the audit confirmed (source-level) but the real-target confirm
+  // hasn't decided yet gets a per-finding "Confirm" button; once decided it shows reproduced /
+  // not-reproduced. Non-confirmable (suspected/refuted) show nothing.
+  const confirmable = (st) => st === "confirmed-differential" || st === "confirmed-executable" || st === "confirmed-source";
+  const confCell = (f) => f.confirm_status === "reproduced" ? '<span class="label s-confirmed-differential">✓ reproduced</span>'
+    : f.confirm_status === "not-reproduced" ? '<span class="label s-refuted">✗ not reproduced</span>'
+    : confirmable(f.status) ? '<button class="rowbtn" data-confirm="' + f.id + '" title="reproduce this one finding on a mainnet fork">Confirm</button>'
+    : '<span class="muted">—</span>';
   const rows = state.f.rows.map((f) => '<tr><td>' + statusBadge(f.status) + '</td><td>' + esc(f.title)
-    + '</td><td class="mono muted">' + esc(f.location) + '</td><td class="muted" style="font-size:11px">' + fmtTime(f.updated_at || f.created_at) + '</td></tr>').join("");
-  el.innerHTML = '<table class="fixed"><colgroup><col style="width:170px"><col style="width:34%"><col style="width:42%"><col style="width:120px"></colgroup><thead><tr><th>status</th><th>title</th><th>location</th><th>found</th></tr></thead><tbody>' + rows + '</tbody></table>' + pager("F", state.f.offset, state.f.limit, state.f.total, state.f.rows.length);
+    + '</td><td class="mono muted">' + esc(f.location) + '</td><td class="muted" style="font-size:11px">' + fmtTime(f.updated_at || f.created_at) + '</td><td style="white-space:nowrap">' + confCell(f) + '</td></tr>').join("");
+  el.innerHTML = '<table class="fixed"><colgroup><col style="width:158px"><col style="width:32%"><col style="width:35%"><col style="width:88px"><col style="width:112px"></colgroup><thead><tr><th>status</th><th>title</th><th>location</th><th>found</th><th>confirm</th></tr></thead><tbody>' + rows + '</tbody></table>' + pager("F", state.f.offset, state.f.limit, state.f.total, state.f.rows.length);
+  el.querySelectorAll("[data-confirm]").forEach((b) => b.onclick = () => {
+    if (confirm("Confirm this one finding on the real target (mainnet fork; never broadcasts)?")) launchRun({ verb: "confirm", findingId: Number(b.dataset.confirm) });
+  });
   const pv = $("#prevF"); if (pv) pv.onclick = () => { state.f.offset = Math.max(0, state.f.offset - state.f.limit); loadFindings(false); };
   const nx = $("#nextF"); if (nx) nx.onclick = () => { state.f.offset += state.f.limit; loadFindings(false); };
 }

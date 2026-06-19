@@ -182,6 +182,7 @@ CREATE TABLE IF NOT EXISTS finding(
   location TEXT,
   severity TEXT,
   status TEXT NOT NULL,
+  confirm_status TEXT,            -- per-finding real-target confirm state: NULL=not confirmed yet | confirming | reproduced | not-reproduced
   report_path TEXT,
   scope_id TEXT,
   created_at TEXT NOT NULL,
@@ -280,6 +281,7 @@ export class MetadataStore {
       "ALTER TABLE run ADD COLUMN dig_started_at TEXT", // map->dig boundary for splitting a combined run's elapsed
       "ALTER TABLE scope ADD COLUMN dig_seconds INTEGER", // per-scope deep-audit duration
       "ALTER TABLE finding ADD COLUMN tracking_status TEXT", // submission tracking: open|triaging|submitted|accepted|fixed|duplicate|rejected
+      "ALTER TABLE finding ADD COLUMN confirm_status TEXT", // per-finding real-target confirm state
     ]) {
       try {
         this.db.exec(alter);
@@ -604,6 +606,38 @@ export class MetadataStore {
     return this.db.prepare("UPDATE finding SET tracking_status = ? WHERE id = ?").run(status || null, id).changes > 0;
   }
 
+  // --- per-finding confirm (real-target reproduction) -----------------------
+
+  /** The project's findings that are confirmed by the audit (source-level) but NOT yet decided on
+   * the real target — the work list for a project-level confirm. Joins the source run dir so the
+   * confirm can load each finding's full PoC/fix data. confirm_status NULL = pending. */
+  pendingConfirmable(projectId: number): Array<{ finding_key: string; title: string; run_dir: string | null }> {
+    return this.db
+      .prepare(
+        `SELECT f.finding_key, f.title, r.run_dir
+           FROM finding f LEFT JOIN run r ON r.id = f.run_id
+          WHERE f.project_id = ? AND f.confirm_status IS NULL
+            AND f.status IN ('confirmed-differential','confirmed-executable','confirmed-source')
+          ORDER BY f.status, f.id`,
+      )
+      .all(projectId) as Array<{ finding_key: string; title: string; run_dir: string | null }>;
+  }
+
+  /** One confirmable finding by id (for a finding-level confirm) — its key + source run dir. */
+  getConfirmable(findingId: number): { finding_key: string; title: string; run_dir: string | null } | undefined {
+    return this.db
+      .prepare("SELECT f.finding_key, f.title, r.run_dir FROM finding f LEFT JOIN run r ON r.id = f.run_id WHERE f.id = ?")
+      .get(findingId) as { finding_key: string; title: string; run_dir: string | null } | undefined;
+  }
+
+  /** Set a finding's real-target confirm state, addressed by its content key within a project
+   * (the same key the confirm work list carries). Does not touch updated_at. */
+  setFindingConfirmStatus(projectId: number, findingKey: string, confirmStatus: string | null): boolean {
+    return this.db
+      .prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND finding_key = ?")
+      .run(confirmStatus, projectId, findingKey).changes > 0;
+  }
+
   /** Finding counts per status — one GROUP BY, for the dashboard + filter chips. */
   findingStatusCounts(projectId: number): Record<string, number> {
     const rows = this.db.prepare("SELECT status, COUNT(*) AS n FROM finding WHERE project_id = ? GROUP BY status").all(projectId) as Array<{ status: string; n: number }>;
@@ -643,8 +677,15 @@ export class MetadataStore {
          VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const ts = now();
+      // The confirm work-list ids ARE finding content keys, so a decision's members map straight
+      // back to findings: reflect each decision's real-target outcome into its findings'
+      // confirm_status (reproduced -> reproduced, settled-but-not -> not-reproduced). This is what
+      // makes confirm finding-grained + resumable (a later confirm skips non-NULL confirm_status).
+      const setConfirm = this.db.prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND finding_key = ?");
       for (const r of rows) {
         stmt.run(projectId, runId, r.bug, r.reproduced ?? null, r.recommendation ?? null, jsonOrNull(r.members), r.decisionPath ?? decisionPath ?? null, ts);
+        const outcome = r.reproduced === "yes" ? "reproduced" : r.reproduced === "no" ? "not-reproduced" : null;
+        if (outcome) for (const key of r.members ?? []) setConfirm.run(outcome, projectId, key);
       }
     });
   }

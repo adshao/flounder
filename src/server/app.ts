@@ -518,6 +518,24 @@ async function runLaunch(c: Ctx): Promise<void> {
   const body = (await readBody(c.req)) as Record<string, unknown>;
   const profile = project.provider_id != null ? c.store.getProvider(Number(project.provider_id)) : undefined;
   const spec = launchSpec(project, body, c.out, profile);
+  // Confirm is FINDING-grained + resumable: when no explicit run dir is given, resolve the work set
+  // from finding STATUS — a specific finding (body.findingId) or all pending-confirmable findings
+  // (confirmed by the audit, not yet decided on the real target). The confirm then updates each
+  // finding's confirm_status, so a re-run only picks up what's still pending.
+  if (spec.verb === "confirm" && !spec.inputRunDir && !(spec.inputRunDirs && spec.inputRunDirs.length > 0)) {
+    if (body.findingId != null) {
+      const f = c.store.getConfirmable(Number(body.findingId));
+      if (!f || !f.run_dir) return sendJson(c.res, 400, { error: "that finding has no source run dir to confirm from" });
+      spec.inputRunDir = String(f.run_dir);
+      spec.confirmKeys = [f.finding_key];
+    } else {
+      const pending = c.store.pendingConfirmable(Number(project.id)).filter((p) => p.run_dir);
+      if (pending.length === 0) return sendJson(c.res, 400, { error: "nothing to confirm — every audit-confirmed finding already has a real-target decision (use --fresh to redo)" });
+      spec.inputRunDirs = [...new Set(pending.map((p) => String(p.run_dir)))];
+      spec.inputRunDir = spec.inputRunDirs[0];
+      spec.confirmKeys = pending.map((p) => p.finding_key);
+    }
+  }
   const jobId = c.store.enqueueJob(spec.target, spec);
   c.plane.nudge();
   sendJson(c.res, 200, { jobId, verb: spec.verb, queued: true, daemons: c.plane.daemonCount() });

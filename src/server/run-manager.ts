@@ -55,6 +55,8 @@ export interface LaunchSpec {
   remap?: boolean | undefined; // run/map/audit: re-enumerate the scope inventory (restart)
   fresh?: boolean | undefined; // confirm: ignore a prior interrupted confirm
   inputRunDir?: string | undefined; // confirm: the finished run dir to reproduce
+  inputRunDirs?: string[] | undefined; // confirm (aggregate): several run dirs whose confirmed findings are unioned + reproduced together
+  confirmKeys?: string[] | undefined; // confirm: restrict the work list to these finding content keys (the pending/target set the control plane resolved from finding status)
   region?: string | undefined; // audit: a pinned region
   scope?: string | undefined; // audit: scope id[,id...]
   verifyFindings?: unknown; // audit: inline suspected finding(s) to confirm-or-refute (the --verify file's contents, carried inline so a remote daemon needs no local file)
