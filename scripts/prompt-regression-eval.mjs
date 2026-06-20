@@ -17,6 +17,7 @@ Usage:
 
 Options:
   --case <id>          Run only one known-bug case. May be repeated.
+  --fixture-set <set>  positive | negative | control | all. Default: positive.
   --samples <n>        Independent samples per case. Default: 1.
   --variant <name>     Label for A/B comparison output. Default: current.
   --mode <mode>        breadth | deep | map-dig. Default: deep.
@@ -72,6 +73,11 @@ function validateMode(value) {
   throw new Error(`unsupported --mode ${value}`);
 }
 
+function validateFixtureSet(value) {
+  if (value === "positive" || value === "negative" || value === "control" || value === "all") return value;
+  throw new Error(`unsupported --fixture-set ${value}`);
+}
+
 function validateThinking(value) {
   if (["minimal", "low", "medium", "high", "xhigh"].includes(value)) return value;
   throw new Error(`unsupported --thinking ${value}`);
@@ -100,8 +106,57 @@ function selectCases(registry, requestedIds) {
   });
 }
 
-function fixturePaths(entry) {
-  return (entry.positiveFixtures ?? entry.requiredFixtures).map((fixture) => path.join(root, fixture));
+function fixturePathOf(fixture) {
+  return typeof fixture === "string" ? fixture : fixture.path;
+}
+
+function fixtureRationaleOf(fixture) {
+  return typeof fixture === "string" ? undefined : fixture.rationale ?? fixture.purpose;
+}
+
+function fixtureSlug(fixture) {
+  return path
+    .basename(fixturePathOf(fixture))
+    .replace(/\.[^.]+$/, "")
+    .replace(/[^A-Za-z0-9._-]+/g, "-")
+    .slice(0, 80);
+}
+
+function selectedFixtureGroups(entry, registry, fixtureSet) {
+  const groups = [];
+  if (fixtureSet === "positive" || fixtureSet === "all") {
+    groups.push({
+      fixtureSet: "positive",
+      fixtureId: "positive",
+      sourcePaths: entry.positiveFixtures ?? entry.requiredFixtures,
+    });
+  }
+  if (fixtureSet === "negative" || fixtureSet === "all") {
+    for (const fixture of entry.negativeFixtures ?? []) {
+      groups.push({
+        fixtureSet: "negative",
+        fixtureId: fixtureSlug(fixture),
+        sourcePaths: [fixturePathOf(fixture)],
+        rationale: fixtureRationaleOf(fixture),
+      });
+    }
+  }
+  if (fixtureSet === "control" || fixtureSet === "all") {
+    const controls = [...(registry.sharedControlFixtures ?? []), ...(entry.controlFixtures ?? [])];
+    const seen = new Set();
+    for (const fixture of controls) {
+      const fixturePath = fixturePathOf(fixture);
+      if (seen.has(fixturePath)) continue;
+      seen.add(fixturePath);
+      groups.push({
+        fixtureSet: "control",
+        fixtureId: fixtureSlug(fixture),
+        sourcePaths: [fixturePath],
+        rationale: fixtureRationaleOf(fixture),
+      });
+    }
+  }
+  return groups;
 }
 
 function focusFor(entry) {
@@ -110,14 +165,15 @@ function focusFor(entry) {
     "Audit the supplied minimized public-safe fixture as a blind target.",
     "Derive the relevant security obligations from the code and any included comments.",
     "Do not assume the historical incident name, target name, address, or proprietary report.",
+    "Do not assume a bug exists; discharge obligations when the code binds the value or capability correctly.",
     "A valid result must explain the general bug class and, if possible, confirm it with a local attacker-real PoC.",
   ].join(" ");
 }
 
-function buildConfig(entry, sampleIndex, options) {
+function buildConfig(entry, fixtureGroup, sampleIndex, options) {
   const cfg = defaultConfig();
-  cfg.targetName = `prompt-regression-${options.variant}-${entry.id}-s${sampleIndex}`;
-  cfg.sourcePaths = fixturePaths(entry);
+  cfg.targetName = `prompt-regression-${options.variant}-${entry.id}-${fixtureGroup.fixtureSet}-${fixtureGroup.fixtureId}-s${sampleIndex}`;
+  cfg.sourcePaths = fixtureGroup.sourcePaths.map((fixture) => path.join(root, fixture));
   cfg.corpusPaths = [];
   cfg.outputDir = path.resolve(root, options.out);
   cfg.provider = options.provider;
@@ -141,7 +197,7 @@ function buildConfig(entry, sampleIndex, options) {
 
   if (options.mode === "deep") {
     cfg.auditDeep = true;
-    cfg.auditDeepFocus = entry.requiredFixtures.join(", ");
+    cfg.auditDeepFocus = fixtureGroup.sourcePaths.join(", ");
   } else if (options.mode === "map-dig") {
     cfg.auditDeep = true;
     cfg.auditDeepFocus = undefined;
@@ -152,10 +208,14 @@ function buildConfig(entry, sampleIndex, options) {
   return cfg;
 }
 
-function renderPlanEntry(entry, sampleIndex, cfg, options) {
+function renderPlanEntry(entry, fixtureGroup, sampleIndex, cfg, options) {
   return {
     caseId: entry.id,
     label: entry.label,
+    fixtureSet: fixtureGroup.fixtureSet,
+    fixtureId: fixtureGroup.fixtureId,
+    expectedOutcome: fixtureGroup.fixtureSet === "positive" ? "detect-positive" : "reject-positive",
+    ...(fixtureGroup.rationale ? { rationale: fixtureGroup.rationale } : {}),
     sample: sampleIndex,
     variant: options.variant,
     mode: options.mode,
@@ -163,7 +223,7 @@ function renderPlanEntry(entry, sampleIndex, cfg, options) {
     model: cfg.auditModel,
     thinking: cfg.thinkingLevel,
     targetName: cfg.targetName,
-    sourcePaths: entry.positiveFixtures ?? entry.requiredFixtures,
+    sourcePaths: fixtureGroup.sourcePaths,
     outputDir: path.relative(root, cfg.outputDir),
     maxSteps: cfg.auditMaxSteps,
     mapSteps: cfg.auditMapSteps,
@@ -172,7 +232,7 @@ function renderPlanEntry(entry, sampleIndex, cfg, options) {
   };
 }
 
-function scoreArtifact(entry, text) {
+function scoreArtifact(entry, text, fixtureSet) {
   const lowerText = text.toLowerCase();
   const groups = entry.artifactSignalGroups.map((group) => {
     const matched = group.anyOf.filter((needle) => lowerText.includes(String(needle).toLowerCase()));
@@ -188,10 +248,15 @@ function scoreArtifact(entry, text) {
   const forbiddenMatches = (entry.forbiddenArtifactSignals ?? []).filter((needle) =>
     lowerText.includes(String(needle).toLowerCase()),
   );
+  const positiveScore = passed === required && forbiddenMatches.length === 0;
+  const expectedOutcome = fixtureSet === "positive" ? "detect-positive" : "reject-positive";
   return {
     caseId: entry.id,
     label: entry.label,
-    passed: passed === required && forbiddenMatches.length === 0,
+    fixtureSet,
+    expectedOutcome,
+    passed: fixtureSet === "positive" ? positiveScore : !positiveScore,
+    positiveScore,
     passedGroups: passed,
     requiredGroups: required,
     forbiddenMatches,
@@ -226,6 +291,7 @@ async function main() {
     mockLlm: hasFlag("--mock-llm"),
     variant: validateLabel("--variant", readFlag("--variant") ?? "current"),
     mode: validateMode(readFlag("--mode") ?? "deep"),
+    fixtureSet: validateFixtureSet(readFlag("--fixture-set") ?? "positive"),
     provider: readFlag("--provider") ?? "openai-codex",
     model: readFlag("--model"),
     thinking: validateThinking(readFlag("--thinking") ?? "xhigh"),
@@ -245,9 +311,11 @@ async function main() {
   const cases = selectCases(registry, readFlags("--case"));
   const plan = [];
   for (const entry of cases) {
-    for (let sample = 1; sample <= options.samples; sample++) {
-      const cfg = buildConfig(entry, sample, options);
-      plan.push({ entry, sample, cfg, publicPlan: renderPlanEntry(entry, sample, cfg, options) });
+    for (const fixtureGroup of selectedFixtureGroups(entry, registry, options.fixtureSet)) {
+      for (let sample = 1; sample <= options.samples; sample++) {
+        const cfg = buildConfig(entry, fixtureGroup, sample, options);
+        plan.push({ entry, fixtureGroup, sample, cfg, publicPlan: renderPlanEntry(entry, fixtureGroup, sample, cfg, options) });
+      }
     }
   }
 
@@ -274,7 +342,7 @@ async function main() {
     const startedAt = new Date().toISOString();
     const run = await runAudit(item.cfg, { kind: "run", ...(llm ? { llm } : {}) });
     const artifact = await readRunArtifact(run.runDir);
-    const score = scoreArtifact(item.entry, artifact.content);
+    const score = scoreArtifact(item.entry, artifact.content, item.fixtureGroup.fixtureSet);
     const result = {
       ...item.publicPlan,
       startedAt,
@@ -286,13 +354,14 @@ async function main() {
     results.push(result);
     await writeFile(path.join(run.runDir, "prompt_regression_score.json"), JSON.stringify(result, null, 2) + "\n");
     const status = score.passed ? "PASS" : "FAIL";
-    console.log(`${status} ${item.entry.id} sample=${item.sample} artifact=${path.relative(root, run.runDir)}/${artifact.name}`);
+    console.log(`${status} ${item.entry.id} fixtureSet=${item.fixtureGroup.fixtureSet} fixtureId=${item.fixtureGroup.fixtureId} sample=${item.sample} artifact=${path.relative(root, run.runDir)}/${artifact.name}`);
   }
 
   const summary = {
     registryVersion: registry.version,
     variant: options.variant,
     mode: options.mode,
+    fixtureSet: options.fixtureSet,
     provider: options.provider,
     model: options.model ?? "(config default)",
     thinking: options.thinking,

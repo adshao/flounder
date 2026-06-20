@@ -1,6 +1,7 @@
 import assert from "node:assert/strict";
 import { execFile } from "node:child_process";
-import { access, readFile } from "node:fs/promises";
+import { access, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { promisify } from "node:util";
@@ -177,4 +178,83 @@ test("prompt regression eval runner expands dry-run plans without model calls", 
   );
   assert.ok(plan.runs.every((run) => run.mode === "deep"));
   assert.ok(plan.runs.every((run) => run.sourcePaths.length === 1));
+});
+
+test("prompt regression eval runner can plan positive, negative, and control fixtures", async () => {
+  const { stdout } = await execFileAsync(
+    "node",
+    [
+      "scripts/prompt-regression-eval.mjs",
+      "--dry-run",
+      "--case",
+      "aztec-2026-06-14-unbound-settlement-count",
+      "--fixture-set",
+      "all",
+      "--variant",
+      "candidate",
+    ],
+    { cwd: root },
+  );
+  const plan = JSON.parse(stdout);
+  assert.deepEqual(
+    plan.runs.map((run) => run.fixtureSet).sort(),
+    ["control", "negative", "positive"],
+  );
+  assert.deepEqual(
+    plan.runs.map((run) => run.expectedOutcome).sort(),
+    ["detect-positive", "reject-positive", "reject-positive"],
+  );
+});
+
+test("prompt regression compare flags candidate pass-rate regressions", async () => {
+  const dir = await mkdtemp(path.join(tmpdir(), "prompt-regression-"));
+  try {
+    const baselinePath = path.join(dir, "baseline.json");
+    const candidatePath = path.join(dir, "candidate.json");
+    const baseResult = {
+      caseId: "case-a",
+      label: "Case A",
+      fixtureSet: "negative",
+      fixtureId: "safe-control",
+      expectedOutcome: "reject-positive",
+      score: {
+        passed: true,
+        positiveScore: false,
+        forbiddenMatches: [],
+        groups: [{ name: "binding", passed: false }],
+      },
+    };
+    const candidateResult = {
+      ...baseResult,
+      score: {
+        passed: false,
+        positiveScore: true,
+        forbiddenMatches: [],
+        groups: [{ name: "binding", passed: true }],
+      },
+    };
+    await writeFile(
+      baselinePath,
+      JSON.stringify({ variant: "baseline", totalRuns: 1, passedRuns: 1, results: [baseResult] }),
+    );
+    await writeFile(
+      candidatePath,
+      JSON.stringify({ variant: "candidate", totalRuns: 1, passedRuns: 0, results: [candidateResult] }),
+    );
+
+    await assert.rejects(
+      execFileAsync("node", ["scripts/compare-prompt-regression.mjs", baselinePath, candidatePath], { cwd: root }),
+      (error) => {
+        assert.equal(error.code, 1);
+        const comparison = JSON.parse(error.stdout);
+        assert.equal(comparison.pass, false);
+        assert.equal(comparison.regressions.length, 1);
+        assert.equal(comparison.regressions[0].fixtureSet, "negative");
+        assert.equal(comparison.regressions[0].deltaPassRate, -1);
+        return true;
+      },
+    );
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
 });

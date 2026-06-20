@@ -24,6 +24,7 @@ Inspect the replay plan without model calls:
 
 ```sh
 node scripts/prompt-regression-eval.mjs --dry-run --samples 1 --variant current
+node scripts/prompt-regression-eval.mjs --dry-run --fixture-set all --samples 1 --variant current
 ```
 
 Run a low-sample live eval against the current prompt build:
@@ -42,3 +43,15 @@ artifact contains the generic signals the known-bug evidence requires. A passing
 score still needs human review of the transcript and any PoC realism; a failing
 score means the prompt failed to surface at least one required capability signal
 for that case.
+
+Negative/control fixtures invert the scoring target: they pass when the artifact
+does **not** satisfy the positive bug signal set. They are false-positive guards,
+not recall targets.
+
+Compare two summary files:
+
+```sh
+node scripts/compare-prompt-regression.mjs \
+  runs/prompt-regression/prompt_regression_summary_baseline.json \
+  runs/prompt-regression/prompt_regression_summary_current.json
+```
