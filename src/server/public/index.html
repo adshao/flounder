@@ -49,6 +49,7 @@
   header .spacer { flex: 1; }
   .icon-btn { background: transparent; border: 1px solid transparent; color: var(--fg-muted); border-radius: 7px; padding: 6px; cursor: pointer; display: inline-flex; transition: background .12s, color .12s, border-color .12s; }
   .icon-btn:hover { color: var(--fg); border-color: var(--border); background: var(--canvas-subtle); }
+  .icon-btn.sel { color: var(--accent); background: var(--sel-bg); border-color: transparent; }
 
   .btn { font: 500 13px/18px var(--sans); cursor: pointer; background: var(--btn-bg); color: var(--btn-fg); border: 1px solid var(--btn-border); border-radius: 7px; padding: 5px 13px; display: inline-flex; align-items: center; gap: 6px; box-shadow: var(--shadow-sm); transition: background .12s, border-color .12s, box-shadow .12s; }
   .btn:hover { background: var(--btn-hover); }
@@ -101,20 +102,32 @@
   .list-head .counter { color: var(--fg-muted); border-color: var(--border); }
   .list-head .btn { margin-left: auto; }
   /* settings dialog: left nav + content pane, room for more global config sections */
-  dialog.wide { width: min(840px, 94vw); }
-  .settings { display: grid; grid-template-columns: 168px 1fr; min-height: 400px; }
-  .settings-nav { border-right: 1px solid var(--border); padding: 10px; display: flex; flex-direction: column; gap: 2px; background: var(--canvas-subtle); }
-  .settings-nav button { text-align: left; background: transparent; border: 0; color: var(--fg); padding: 8px 10px; border-radius: 6px; cursor: pointer; font: inherit; display: flex; align-items: center; gap: 8px; }
-  .settings-nav button:hover { background: var(--canvas); }
-  .settings-nav button.sel { background: var(--sel-bg); color: var(--accent); font-weight: 600; box-shadow: inset 2px 0 0 var(--accent); }
-  .settings-pane { padding: 16px 18px; overflow-y: auto; max-height: 72vh; }
+  /* ── Settings: a full page (not a modal) with a left category rail, like Linear/Vercel/GitHub. ── */
+  #settingsView { height: calc(100vh - 53px); overflow-y: auto; padding: 32px; background: var(--canvas-subtle); }
+  #settingsView[hidden] { display: none; }
+  .settings-page { max-width: 880px; margin: 0 auto; display: grid; grid-template-columns: 188px 1fr; gap: 32px; }
+  .settings-rail { display: flex; flex-direction: column; gap: 1px; position: sticky; top: 0; align-self: start; }
+  .settings-rail .rail-title { font-size: 19px; font-weight: 600; letter-spacing: -0.02em; margin: 0 0 16px 8px; }
+  .settings-rail button { text-align: left; background: transparent; border: 0; color: var(--fg-muted); padding: 7px 10px; border-radius: 7px; cursor: pointer; font: 500 13px/1.3 var(--sans); display: flex; align-items: center; gap: 9px; transition: background .12s, color .12s; }
+  .settings-rail button:hover { background: var(--canvas-subtle); color: var(--fg); }
+  .settings-rail button.sel { background: var(--sel-bg); color: var(--accent); }
+  .settings-rail button .octicon { fill: currentColor; opacity: .85; }
+  .settings-content { min-width: 0; }
   .settings-pane[hidden] { display: none; }
-  .pane-head { display: flex; align-items: center; gap: 8px; margin-bottom: 12px; }
+  .pane-head { display: flex; align-items: center; gap: 10px; margin-bottom: 4px; }
+  .pane-head .pane-title { font-size: 16px; font-weight: 600; letter-spacing: -0.01em; }
   .pane-head .btn { margin-left: auto; }
-  .prov-row, .daemon-row { display: flex; align-items: center; gap: 10px; padding: 10px 12px; border: 1px solid var(--border); border-radius: 6px; margin-bottom: 8px; }
-  .prov-row .grow, .daemon-row .grow { flex: 1; min-width: 0; }
-  .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--fg-muted); flex: none; }
-  .dot.on { background: #3fb950; }
+  .pane-hint { color: var(--fg-muted); font-size: 12.5px; line-height: 1.5; margin: 4px 0 16px; max-width: 60ch; }
+  /* Resource cards (a provider profile / a daemon): hairline card + avatar/status + actions. */
+  .res-card { display: flex; align-items: center; gap: 13px; padding: 12px 15px; border: 1px solid var(--border); border-radius: 10px; background: var(--canvas); margin-bottom: 8px; box-shadow: var(--shadow-sm); transition: border-color .12s; }
+  .res-card:hover { border-color: var(--fg-subtle); }
+  .res-card .grow { flex: 1; min-width: 0; }
+  .res-ava { width: 32px; height: 32px; border-radius: 9px; background: var(--canvas-inset); display: inline-flex; align-items: center; justify-content: center; flex: none; font: 600 13px/1 var(--mono); color: var(--fg-muted); text-transform: uppercase; }
+  .res-name { font-weight: 500; font-size: 13.5px; letter-spacing: -0.005em; }
+  .res-sub { font-size: 12px; color: var(--fg-muted); margin-top: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .res-status { font-size: 11.5px; display: inline-flex; align-items: center; gap: 6px; color: var(--fg-muted); white-space: nowrap; }
+  .dot { width: 7px; height: 7px; border-radius: 50%; display: inline-block; background: var(--neutral-emphasis); flex: none; }
+  .dot.on { background: var(--success-emphasis); box-shadow: 0 0 0 3px rgba(47,158,99,.16); }
   .roles-grid { display: grid; grid-template-columns: 64px 1fr 1fr; gap: 6px 8px; align-items: center; margin-top: 8px; }
   .roles-grid label { font-size: 12px; color: var(--fg-muted); }
   .phases-editor { display: flex; flex-direction: column; gap: 6px; margin-top: 6px; }
@@ -348,10 +361,9 @@
 <header>
   <span style="display:flex"><img class="brand-logo light" src="data:image/png;base64,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" alt="Flounder" height="24" /><img class="brand-logo dark" src="data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAHsAAABICAQAAAB8IEL3AAAAIGNIUk0AAHomAACAhAAA+gAAAIDoAAB1MAAA6mAAADqYAAAXcJy6UTwAAAACYktHRAD/h4/MvwAAAAd0SU1FB+oGFAEUC5OOw8YAAAAldEVYdGRhdGU6Y3JlYXRlADIwMjYtMDYtMjBUMDE6MTc6NDErMDA6MDDrdL/UAAAAJXRFWHRkYXRlOm1vZGlmeQAyMDI2LTA2LTIwVDAxOjE3OjQxKzAwOjAwmikHaAAAACh0RVh0ZGF0ZTp0aW1lc3RhbXAAMjAyNi0wNi0yMFQwMToyMDoxMSswMDowMP7iVasAAAx5SURBVHja5Zt5dJTVGYefyZ7JQshKCGsIAYSgSHGrckBkETkVBEFQquCxohS00lOXWnu02hZ3W089xQUriLtYWWxTEcQoCrLLKhJIAoRAQkLInsyvf8yXL18mM5MJzCTYvvNHJve7y/t8973vXd478H8pto5W4GxE5wzxI8NuBhyCjbqzAznvsdUyKYg+XMqFZBDOfj5hPVVtRTmPseUu0c4l3MxIQjlMLuICerKSBylqG0pIR8O1Ah3CBVxMBg6OYqMnQ+nHfp5mLQVUAjFcx9M4+CU1Op/70HdsoST9RXk6oM36Rnv1vb7RixqtaNHsc5OO6Sbn9x+9CIXpJeXpDvVQnGKVqjR1aoK1vJxg/V3fKOlHgS0vH+PpSBXqVvfPXeoZqAO687zFbgEQpAhFK0nJSlacIhTW7OlCbXD2rw+1PqdNbenvdnJpzdSJJoXe9KEX3Ugmks7YsFFJKVUUUsAh8jhEGRfxNWU+euhl3Mgo3vZVn4BjW4BD6MlQriKL3iQR6aVIFYUcZRDLfG5mGzlM5yOqzwN/bjHYLpqpt5SrWvkuFRrhm9kKoetVoMt8NfOA9bal+UxmMJGBPrVVg8PQK5RiClo3cbOddeQzma990y5A2KYy/biNqaR7zFhHKSco4AiFFFFGETUA2JlJf063+kobJZoB1DGOJznR+NTbCwsAtqlUErdzhwfkKvLYzWb2cIAiyqhuwTKUNE7j3WhtRJFKBpdzFYOJp5rprKDQuUaXF3S/j3811juKhxjhpv5TfEcOn/MdRU37J2xEEEUssUSQgA0b80njMXIpoYJaJwg27IQQQwyJdCWNXmSQTiIRZj0VHCeXL/gPW6j2DOhnbAM6jvnMJ8HlYQXbWM1n7KLcSAkinjQyGEAGaSTTiWhCiMJGKaHEUk8F5VRRaZi7jc6EYceOnTC3uuewiMFcQm828ZRzpAfcsxteu6/eVYOLVz6sRRqrONOzx+pi3aU3tEVFqnPJu18LNUaft8HnN3r+LzVFCMVojD7WQV3bDis3A2i4NjdTpkG79bD6K8h4nqBr9JjW64Rb1Ru0RBlCYVrnM26DirRez2qsOlumzBgt12qFu8f2m0szqp/Ai/S0JG/jVf5JPgARZDGe8QzC7rGaXH5LHlDPEkLoQRyRbnR0UEsNZZSQxz528B0/mAOnUWqo9bwkcjH8sz2lkjPzrSwk2Uzcz2KWUgBAMqO5kStbjHdXKeUellEPQAzJdKELKcQjokmilkIcnKaYEk5RRClnqHVbTwa/YjL38rYPDIZ5dNdwDVGMu/2Ol3I2zVKJaXj5WqgMo4Z0PaDNPq/PTusNTVJ3hXvbo3n8hChVY/SC9mmbpinEk/42q/IAjOfPpFPNDhaznDOt97pRbhIvG315ho94ji0A9GMG0+jno9E0Si2H2ctW9nOIY5yiijoaPOYOJZJOJNKTTIaSRSo7+IAPnXbW6gQmgDRWcpHZ+CqeYLN3cAN6NK/QAxDreI5saoB0buHn9GkjslUcVFBCMScppZAaCp1zsdm0nRTiSCaZZOKIJRRw+oWHOdpad5m1CN0th8vEM1eR3oxdCGVppyQpVw8qUQilaoH2tXkK8p98qSt9HKJCEVrVooIavaY+nsa5EErRvyWV6zVdKITiNUdbW8zc7S2HNcM5abbe1xfoqNsqtmqyQj0c6ITrJTn0uSYqVChK0/VFiwXIuUmJtupjLddGFbrYoncp07xWwYXQNNV7qKJcL6q3a58LoenaoHuVKBSma7RCVX5FPqQ/6DIlKEyhilOW7tI3HvPWKF/btUvF5ssp1zwFewUXQo95VWG7ZirKii4UqTHqJhSkkXpbZX5FllZrSIspKlVPqtJNzy7VFPVVolI0VHO1zrC48lZ6XChYb7WiRpWWa5TsLopEaYz+oWI/I0sr1NXt3ByqB1TdLOduTWochMans+YbA7ZUN3pxbkIx+sIHZUq1Sr/QEKUqTj01XPfrM532O7K0WwOaLUP66zpNUIaChML1N0vOXF3RDNlm/J2oIknSfg32CC7U1ecpx6GT2qNNOqjyAABLUr3mWkBS9LyOqEZ1+kGPKl4oXbuNnLWaY8nZS/fpdT2jMQoV+o3hqz50rjndY/fTMbPZKq3XVyry6OICLXvVzUSJ1KtG6nbN0lwtUKTQ40baV0owc16ib420ZzRH4UoyHGCtZnnob6FLVWo2u0GJilKWpulprdMRP09JrctSBZvRkQmqkCQ5nJEPLdA1QqOM1D+acZQ4ZUuSDipT6HbdIPSgUd+36mLFDrKQ243FHUAf5nEFJbzPrxnHSGaw3DjTbB/ZZ1mDDzc2qjY6A9CdccAhioEGdpr5hvJTABqoAWoYD2wzjiQvZKy1euteNtiyhE3iEao4wl52sZNdrCGU6whrN2zrdjLK/DafGCKZxXtAOaV0p8FyuppqnKn15gU2cjOFhHKSasKBECbzTtOK3oqdQnizpiPJIIMJNFDGcWLbERqCLd+PWMAeAiAfsBMD2Cw5D1NJNBDM9VwPbKCOKJPwYnqyrzGr1chDPWxYgolnAGntCA29LLqsdu6mTDnKSqALnYFQMs30bayx5DrOEmCAaSsJ9G56GIQvUkshJe2KfSnJ5qZ2O49TZj4p5Qm2AFfQCYDRRBk5y/kd6wyfcJB7+ZwwRpnlwklpqt5q5FU0NPu/jmLy2MVO9rGfi3nNMsoCLf0ZwxLju1hEAbPJArbwCmsQCUwxnl7JWD40vu/kJkbRlQrWshcYYcGWW5csNNKYEiSpTM9qkvorWihIybpSf21T2O7cZUvT1sfY6XVXdzMCfo9lSt2ivm4XsenKsdRXqVFqFXuTkhWp3hqnh7Vce3SmXZGd8p5SPJyYjXPZIGcrq0WegVrTLM8B9XKPPUynLO/mM+Uoz8/byLbK+8psgROumTrUIuc+zVMfRQihMGXoHu1xybHYuQByiq0Jm36sJbXdRq9vsodFZJNPJSKEBIZwCz9z62Mc5LGHg9SSzkX0cJmVyplCdhOuFTuVtT6ecZ4hj2M4SKQbiQEOMolCDlJAPbFk0MvLLQhv8hazqW7CtXruCop9qKCIj3iXXZQhokjjCiZzeQB9vI3Uc7bBfJ6xQltEKEhvtjLWqrVUw5zHNM2OGcbqHb+frPhPqnW3t/02+r3X4vs0u/Hw2NwdZWmGEoTCNF7Z7b5P80UcesEZYcEj9mSPc3Od3tXA5keIRlzxFX2lmYoW6qQ7tL2jKVvIMmd4GS/YmSpwW7RQCxpjYi4lULq2q04rNEI2oR56VEc6mtQiHymtlTCBUKQ+cVM0R1e7Dw8YqaN1TNJJLTSaGKZlATlda6s06GXnzcTWT8rvdIlmnNSflOq5qAF+u7G++1Y3KlwoXOP0L9V0KHSFnlCsDwEh47DuS7NgtVZqROMtBK+lQvW44c4q9LpxThmrmfqyw5zcIc12F8fxjDBMq1Sg7/Wepja+LbVeKlJPmXZySAsM40rQLOW0O3q9VuonPiJbTNauTMtex9dynbTYbLhBObrBCCMk6DbltOPu7bAWNN4791lcF/5tKhWv5y14FVquq42Xl6BpWmk5lw2UnNLLRtS1LdBnL+aJ9uPN4lOntEwjDXS7Rugl5bYpZtk25Dc10ufx7GfwUM1RYTN1SrVMVxtbwiBlaI6y/R4vO6o3zNfbntAWcDS2xVqtVMs11bjngKI0TPfrU530A3Cp1uh+DW4K/Pkmgbl8mckjTLUEGwBq2cYHfMIe4/pVFAMYxmUMpQcxbW6ogWJ2spb1bG28VtQWmEBdtY1iBvfRv8XjY2Szgi3kG/BBJNOHQQyiL+nEE+3hLqlT6imnhAJ2sJEdHDwb4ABhW670ZTKPGcS3yFBHPl+TzUYOU2mmRpBIIql0IZU4uhCEnUSgnuM4qKKQ4xwhj+OUUHGuAAE6GTF/s3c5dzHBrRE3cJydfM0m9nKCcpdhaQNCCAMc1DQbtHZqnZZyLqoH7EDI1DOcq5nJGI/XLqspooDd7CeXExRxmkpqwYALJhwbUUSSSDdSsbGVrVSfq9oBPQcz0cMYwkSupZ/lwntLqaeGcs5QRiVQzBkgkiRCSMBOPbt5n7Xk4zh3tdvhjrkpyVzKKIaTboRxfJUSdvMpn7Kj6RbxeY/tgg6JZHIZQxlAV+JcYqxN0kAFxeTyHTvYRK7/gNsR2w18MJ1JoTu9iaMLdlKMIGQVJyingGMc4wgnrD7bn8p2wE/k3KykbIQYmjiM+TzASnbwLwM9LyY7/CeL/4vyX6AbVUtjoiVGAAAAAElFTkSuQmCC" alt="Flounder" height="24" /></span>
   <h1>Flounder</h1>
-  <span class="sub">audit tracker</span>
-  <nav class="topnav"><button class="topnav-btn sel" id="navProjects">Projects</button><button class="topnav-btn" id="navBugs">Bugs</button></nav>
+  <nav class="topnav"><button class="topnav-btn sel" id="navProjects">Projects</button><button class="topnav-btn" id="navBugs">Findings</button></nav>
   <span class="spacer"></span>
-  <span id="livePill" class="counter">connecting…</span>
+  <span id="livePill" class="counter" hidden></span>
   <button class="icon-btn" id="settingsBtn" title="Settings"></button>
   <button class="icon-btn" id="themeBtn" title="Toggle theme"></button>
 </header>
@@ -370,7 +382,7 @@
 
 <section id="bugsView" hidden>
   <div class="card">
-    <div class="d-head"><h2>Bugs across all projects</h2><span class="muted" id="bugsTotal"></span></div>
+    <div class="d-head"><h2>Findings across all projects</h2><span class="muted" id="bugsTotal"></span></div>
     <div class="muted" style="margin-top:4px;font-size:12px">Every finding from every project, with submission tracking — from discovery through vendor disclosure.</div>
     <div class="stats" id="bugsStats"></div>
     <div style="margin-top:10px"><span class="muted" style="font-size:11px;margin-right:6px">status</span><span class="chips" id="bugsStatusChips"></span></div>
@@ -442,36 +454,35 @@
   <div id="reportBody" class="md-body"></div>
 </div></dialog>
 
-<dialog id="settingsDialog" class="wide"><div>
-  <div class="dlg-head">Settings</div>
-  <div class="settings">
-    <div class="settings-nav">
+<section id="settingsView" hidden>
+  <div class="settings-page">
+    <aside class="settings-rail">
+      <div class="rail-title">Settings</div>
       <button type="button" data-pane="providers" class="sel">Providers</button>
       <button type="button" data-pane="daemons">Daemons</button>
-    </div>
-    <div>
+    </aside>
+    <div class="settings-content">
       <div class="settings-pane" id="pane-providers">
-        <div class="pane-head"><strong>Provider profiles</strong><span id="provCount" class="counter"></span><button type="button" class="btn primary sm" id="provNewBtn">New provider</button></div>
-        <div class="hint" style="margin-bottom:10px">A profile names a <strong>vendor</strong> (and its credentials, which live on the daemon via pi /login — no secrets here). Each project then picks the model &amp; thinking level <strong>per phase</strong> from that vendor's available models.</div>
+        <div class="pane-head"><span class="pane-title">Provider profiles</span><span id="provCount" class="counter"></span><button type="button" class="btn primary sm" id="provNewBtn">New provider</button></div>
+        <div class="pane-hint">A profile names a <strong>vendor</strong> and its credentials — which live on the daemon via <code>pi /login</code>, never stored here. Each project then picks the model &amp; thinking level per phase from that vendor.</div>
         <div id="provList"></div>
-        <form id="provEditor" hidden style="margin-top:12px;border-top:1px solid var(--border);padding-top:12px">
+        <form id="provEditor" hidden style="margin-top:14px;border-top:1px solid var(--border);padding-top:16px">
           <input type="hidden" name="id" />
           <label>Name <span class="muted">(a label for this vendor + credentials)</span></label><input name="name" required placeholder="codex · work account" />
           <label>Vendor</label><select name="provider" id="provProvider"></select>
-          <div class="hint" style="margin-top:8px">A profile is just the vendor — its API keys live on the daemon (pi /login). The model &amp; thinking level are chosen <strong>per phase</strong> in each project's config, from this vendor's available models.</div>
-          <div class="dlg-foot" style="margin-top:14px"><button type="button" class="btn danger" id="provDeleteBtn" style="margin-right:auto">Delete</button><button type="button" class="btn" id="provCancelBtn">Cancel</button><button type="submit" class="btn primary">Save profile</button></div>
+          <div class="pane-hint" style="margin-top:8px">API keys live on the daemon (<code>pi /login</code>). The model &amp; thinking level are chosen per phase in each project's config.</div>
+          <div class="dlg-foot" style="margin-top:14px;border:0;background:transparent;padding:0"><button type="button" class="btn danger" id="provDeleteBtn" style="margin-right:auto">Delete</button><button type="button" class="btn" id="provCancelBtn">Cancel</button><button type="submit" class="btn primary">Save profile</button></div>
         </form>
       </div>
       <div class="settings-pane" id="pane-daemons" hidden>
-        <div class="pane-head"><strong>Daemons</strong><span id="daemonCount" class="counter"></span><button type="button" class="btn primary sm" id="daemonNewBtn">New daemon</button></div>
-        <div class="hint" style="margin-bottom:10px">Execution-plane clients. Each claims jobs and resolves project dirs under its own workspace. <strong>New daemon</strong> mints a bearer token (shown once); then run <code>flounder daemon --server … --token …</code> on the executor.</div>
-        <div id="daemonToken" hidden style="margin-bottom:12px;border:1px solid var(--success-fg);background:rgba(63,185,80,.08);border-radius:8px;padding:12px 14px"></div>
+        <div class="pane-head"><span class="pane-title">Daemons</span><span id="daemonCount" class="counter"></span><button type="button" class="btn primary sm" id="daemonNewBtn">New daemon</button></div>
+        <div class="pane-hint">Execution-plane clients — each claims jobs and resolves project dirs under its own workspace. <strong>New daemon</strong> mints a bearer token (shown once); then run <code>flounder daemon --server … --token …</code> on the executor.</div>
+        <div id="daemonToken" hidden style="margin-bottom:12px;border:1px solid var(--success-fg);background:rgba(47,158,99,.08);border-radius:9px;padding:12px 14px"></div>
         <div id="daemonList"></div>
       </div>
     </div>
   </div>
-  <div class="dlg-foot"><button type="button" class="btn" id="settingsCloseBtn">Close</button></div>
-</div></dialog>
+</section>
 
 <script>
 const $ = (sel) => document.querySelector(sel);
@@ -1260,29 +1271,27 @@ $("#runForm").onsubmit = async (e) => {
 };
 
 // --- settings: providers + daemons (room for more global config sections) ---
-const settingsDialog = $("#settingsDialog");
 $("#settingsBtn").innerHTML = icon("gear");
-$("#settingsBtn").onclick = () => openSettings("providers");
-$("#settingsCloseBtn").onclick = () => settingsDialog.close();
+$("#settingsBtn").onclick = () => setView("settings");
 $("#reportClose").onclick = () => $("#reportDialog").close();
 $("#reportCopy").onclick = async () => {
   if (!reportRaw) return;
   try { await navigator.clipboard.writeText(reportRaw); $("#reportCopy").textContent = "Copied"; setTimeout(() => { $("#reportCopy").textContent = "Copy"; }, 1500); }
   catch { $("#reportCopy").textContent = "Copy failed"; }
 };
-document.querySelectorAll(".settings-nav button").forEach((b) => (b.onclick = () => showPane(b.dataset.pane)));
+document.querySelectorAll(".settings-rail button").forEach((b) => (b.onclick = () => showPane(b.dataset.pane)));
 function showPane(name) {
-  document.querySelectorAll(".settings-nav button").forEach((b) => b.classList.toggle("sel", b.dataset.pane === name));
+  document.querySelectorAll(".settings-rail button").forEach((b) => b.classList.toggle("sel", b.dataset.pane === name));
   $("#pane-providers").hidden = name !== "providers";
   $("#pane-daemons").hidden = name !== "daemons";
 }
-async function openSettings(pane) {
-  showPane(pane || "providers");
+// Settings is a full top-level page now (entered via setView). Load its data on entry; the rail
+// keeps whichever pane was last selected.
+async function renderSettings() {
   hideProvEditor();
   await loadProviders();
   renderProviders();
   await renderDaemons();
-  if (!settingsDialog.open) settingsDialog.showModal();
 }
 
 // providers cache + shared <select> filler (used by the project + config dialogs)
@@ -1300,12 +1309,11 @@ function providerName(id) { const p = state.providers.find((x) => x.id === Numbe
 function renderProviders() {
   $("#provCount").textContent = state.providers.length;
   const rows = state.providers.map((p) => {
-    const legacy = p.model || p.thinking || Object.keys(p.roles || {}).length;
-    const sub = "vendor: " + esc(p.provider) + (legacy ? '  ·  <span style="color:var(--attention-fg)">legacy model/thinking — now set per phase in projects</span>' : "");
-    return '<div class="prov-row"><div class="grow"><div style="font-weight:600">' + esc(p.name) + '</div><div class="muted mono" style="font-size:12px;margin-top:2px">' + sub + "</div></div>"
+    return '<div class="res-card"><span class="res-ava">' + esc((p.provider || "?").slice(0, 2)) + '</span>'
+      + '<div class="grow"><div class="res-name">' + esc(p.name) + '</div><div class="res-sub">vendor · ' + esc(p.provider) + '</div></div>'
       + '<button class="btn sm" data-edit="' + p.id + '">Edit</button></div>';
   }).join("");
-  $("#provList").innerHTML = rows || '<div class="empty">No providers yet.</div>';
+  $("#provList").innerHTML = rows || '<div class="empty">No provider profiles yet.<br>Click <strong>New provider</strong> to add a vendor.</div>';
   $("#provList").querySelectorAll("[data-edit]").forEach((b) => (b.onclick = () => showProvEditor(state.providers.find((p) => p.id === Number(b.dataset.edit)))));
 }
 const provEditor = $("#provEditor");
@@ -1388,9 +1396,9 @@ async function renderDaemons() {
   const rows = daemons.map((d) => {
     const seen = d.last_seen_at ? new Date(d.last_seen_at).getTime() : 0;
     const online = seen && Date.now() - seen < 60000;
-    return '<div class="daemon-row"><span class="dot ' + (online ? "on" : "") + '"></span><div class="grow"><div style="font-weight:600">' + esc(d.name || "daemon") + "</div>"
-      + '<div class="muted mono" style="font-size:12px;margin-top:2px">' + (d.workspace ? "ws " + esc(d.workspace) : "(no workspace reported yet)") + "</div></div>"
-      + '<span class="muted" style="font-size:12px">' + (online ? "online" : d.last_seen_at ? "last seen " + relTime(seen) : "never connected") + "</span>"
+    return '<div class="res-card"><span class="dot ' + (online ? "on" : "") + '" title="' + (online ? "online" : "offline") + '"></span><div class="grow"><div class="res-name">' + esc(d.name || "daemon") + "</div>"
+      + '<div class="res-sub">' + (d.workspace ? "ws · " + esc(d.workspace) : "no workspace reported yet") + "</div></div>"
+      + '<span class="res-status">' + (online ? "online" : d.last_seen_at ? "last seen " + relTime(seen) : "never connected") + "</span>"
       + '<button class="rowbtn" data-drename="' + d.id + '" data-dname="' + esc(d.name || "") + '">rename</button>'
       + '<button class="rowbtn danger" data-ddelete="' + d.id + '" data-dname="' + esc(d.name || "") + '">delete</button></div>';
   }).join("");
@@ -1428,8 +1436,8 @@ $("#daemonNewBtn").onclick = async () => {
 };
 
 // "Manage…" links from the project + config dialogs jump to the Providers settings
-$("#projManageProv").onclick = () => { projDialog.close(); openSettings("providers"); };
-$("#cfgManageProv").onclick = () => { cfgDialog.close(); openSettings("providers"); };
+$("#projManageProv").onclick = () => { projDialog.close(); setView("settings"); showPane("providers"); };
+$("#cfgManageProv").onclick = () => { cfgDialog.close(); setView("settings"); showPane("providers"); };
 
 // --- global Bugs view (cross-project): every finding + submission tracking ---
 const TRACKING = ["open", "triaging", "submitted", "accepted", "fixed", "duplicate", "rejected"];
@@ -1437,9 +1445,12 @@ function setView(v) {
   state.view = v;
   $("#navProjects").classList.toggle("sel", v === "projects");
   $("#navBugs").classList.toggle("sel", v === "bugs");
+  $("#settingsBtn").classList.toggle("sel", v === "settings");
   $("main").hidden = v !== "projects";
   $("#bugsView").hidden = v !== "bugs";
+  $("#settingsView").hidden = v !== "settings";
   if (v === "bugs") renderBugs();
+  if (v === "settings") renderSettings();
   updateHash();
 }
 $("#navProjects").onclick = () => setView("projects");
@@ -1450,14 +1461,15 @@ $("#navBugs").onclick = () => setView("bugs");
 let applyingRoute = false;
 function updateHash() {
   if (applyingRoute) return; // we are applying the URL, not changing it
-  const h = state.view === "bugs" ? "bugs" : state.selected ? "p/" + encodeURIComponent(state.selected) : "";
+  const h = state.view === "settings" ? "settings" : state.view === "bugs" ? "bugs" : state.selected ? "p/" + encodeURIComponent(state.selected) : "";
   if (("#" + h) !== location.hash) history.pushState(null, "", h ? "#" + h : location.pathname + location.search);
 }
 function routeFromHash() {
   applyingRoute = true;
   try {
     const h = decodeURIComponent((location.hash || "").replace(/^#/, ""));
-    if (h === "bugs") setView("bugs");
+    if (h === "settings") setView("settings");
+    else if (h === "bugs") setView("bugs");
     else if (h.startsWith("p/")) { setView("projects"); const name = h.slice(2); if (name && name !== state.selected) selectProject(name); }
     else setView("projects");
   } finally { applyingRoute = false; }
@@ -1507,7 +1519,7 @@ function connect() {
   const es = new EventSource("/api/stream");
   let everConnected = false;
   es.onopen = () => {
-    $("#livePill").className = "counter";
+    $("#livePill").hidden = true; // connected; the next stream tick re-shows "N running" only if a run is live
     // After a reconnect (e.g. the server restarted), re-sync the open detail — a run may have
     // finished while we were disconnected, which the list-level stream alone won't reflect there.
     if (everConnected && state.selected && !document.querySelector("dialog[open]")) { loadDetail(); loadFindings(true); }
@@ -1520,8 +1532,11 @@ function connect() {
     const prevSel = state.selected ? (state.projects || []).find((x) => x.name === state.selected) : null;
     const wasActive = !!(prevSel && prevSel.activeRuns > 0);
     state.projects = data.projects; state.active = data.active;
-    $("#livePill").textContent = data.active.length ? "● " + data.active.length + " running" : "idle";
-    $("#livePill").className = "counter" + (data.active.length ? " live" : "");
+    // Connection/run state is a quiet signal: show "N running" only while a run is live; stay
+    // silent when idle (no "idle" label cluttering the bar).
+    const _pill = $("#livePill"), _n = data.active.length;
+    _pill.hidden = _n === 0;
+    if (_n) { _pill.textContent = _n + " running"; _pill.className = "counter live"; }
     renderList();
     if (state.selected && !document.querySelector("dialog[open]")) {
       const p = state.projects.find((x) => x.name === state.selected);
@@ -1530,7 +1545,7 @@ function connect() {
       if ((p && p.activeRuns > 0) || wasActive) { loadDetail(); loadFindings(true); }
     }
   };
-  es.onerror = () => { $("#livePill").textContent = "reconnecting…"; $("#livePill").className = "counter"; };
+  es.onerror = () => { const _p = $("#livePill"); _p.hidden = false; _p.textContent = "reconnecting…"; _p.className = "counter"; };
 }
 // ── Cmd-K command palette: fuzzy-jump to any project + the global/context actions, with
 // full keyboard control (⌘K toggle, ↑/↓ navigate, Enter run, Esc close). ──
@@ -1539,8 +1554,9 @@ let cmdkItems = [], cmdkSel = 0;
 function cmdkCommands() {
   const cmds = (state.projects || []).map((p) => ({ icon: "bug", label: p.name, sub: "project", run: () => { setView("projects"); selectProject(p.name); } }));
   cmds.push({ icon: "package", label: "New project", sub: "create", run: () => $("#newProjectBtn").click() });
-  cmds.push({ icon: "search", label: "Go to Bugs", sub: "view", run: () => setView("bugs") });
+  cmds.push({ icon: "search", label: "Go to Findings", sub: "view", run: () => setView("bugs") });
   cmds.push({ icon: "shieldcheck", label: "Go to Projects", sub: "view", run: () => setView("projects") });
+  cmds.push({ icon: "gear", label: "Settings", sub: "view", run: () => setView("settings") });
   cmds.push({ icon: (localStorage.getItem("flounder-theme") === "dark") ? "sun" : "moon", label: "Toggle theme", sub: "appearance", run: () => $("#themeBtn").click() });
   if (state.selected && state.detail) cmds.push({ icon: "play", label: (state.detail.runsTotal > 0 ? "Continue audit · " : "Start audit · ") + state.selected, sub: "run", run: () => command("continue") });
   return cmds;
