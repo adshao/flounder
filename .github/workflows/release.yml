@@ -1,6 +1,6 @@
 name: Release
 
-# Release automation only packages/publishes the Node artifact. Do not add
+# Release automation only packages the Node artifact. Do not add
 # provider secrets, pi login, live Flounder audit commands, or extra deploy
 # targets here.
 
@@ -9,16 +9,9 @@ on:
     tags:
       - "v*"
   workflow_dispatch:
-    inputs:
-      publish_npm:
-        description: "Publish the npm package after the release gate passes"
-        required: true
-        default: false
-        type: boolean
 
 permissions:
   contents: read
-  id-token: write
 
 concurrency:
   group: release-${{ github.ref }}
@@ -64,37 +57,3 @@ jobs:
           name: npm-package
           path: "*.tgz"
           if-no-files-found: error
-
-  publish-npm:
-    name: Publish npm
-    needs: release-gate
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    if: startsWith(github.ref, 'refs/tags/v') && (github.event_name == 'push' || inputs.publish_npm)
-    env:
-      npm_config_cache: .npm-cache
-
-    steps:
-      - name: Checkout
-        uses: actions/checkout@v4
-
-      - name: Setup Node
-        uses: actions/setup-node@v4
-        with:
-          node-version: 24
-          cache: npm
-          registry-url: "https://registry.npmjs.org"
-
-      - name: Install dependencies
-        run: npm ci --ignore-scripts
-
-      - name: Configure npm token
-        run: |
-          if [ -n "${NPM_TOKEN}" ]; then
-            npm config set //registry.npmjs.org/:_authToken "${NPM_TOKEN}"
-          fi
-        env:
-          NPM_TOKEN: ${{ secrets.NPM_TOKEN }}
-
-      - name: Publish
-        run: npm publish --provenance --access public

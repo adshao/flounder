@@ -235,7 +235,7 @@ Optional stack-specific notes: [SOLIDITY.md](SOLIDITY.md) covers the Solidity/EV
 Try the package locally from this directory:
 
 ```bash
-pi -e flounder-scanner
+pi -e flounders
 ```
 
 The extension registers workflow tools that mirror the top-level verbs:
@@ -331,7 +331,7 @@ Resources: **project** (CRUD, including selected daemon and provider profile; pr
 ## Library API
 
 ```ts
-import { defaultConfig, runAudit, MockAuditLlmClient } from "flounder-scanner";
+import { defaultConfig, runAudit, MockAuditLlmClient } from "flounders";
 
 const cfg = defaultConfig();
 cfg.targetName = "example";
@@ -341,4 +341,4 @@ const result = await runAudit(cfg, { llm: new MockAuditLlmClient() });
 console.log(result.runDir);
 ```
 
-Use `flounder-scanner/pi/extension` for the pi package extension entrypoint.
+Use `flounders/pi/extension` for the pi package extension entrypoint.

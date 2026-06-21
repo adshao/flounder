@@ -1,5 +1,5 @@
 {
-  "name": "flounder-scanner",
+  "name": "flounders",
   "version": "0.1.0",
   "description": "Autonomous white-hat security auditor for AI-driven code review, exploit construction, and execution-grounded verification.",
   "type": "module",
