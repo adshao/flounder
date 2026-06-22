@@ -274,9 +274,10 @@ export async function fetchJson<T>(path: string, init?: RequestInit): Promise<T>
 export const api = {
   projects: () => fetchJson<{ projects: ProjectSnapshot[] }>("/api/projects"),
   project: (uuid: string) => fetchJson<ProjectDetail>(`/api/projects/${encodeURIComponent(uuid)}`),
-  scopes: (uuid: string) => fetchJson<{ scopes: ScopeRow[]; progress: Coverage }>(`/api/projects/${encodeURIComponent(uuid)}/scopes`),
+  scopes: (uuid: string, params = new URLSearchParams()) =>
+    fetchJson<{ scopes: ScopeRow[]; progress: Coverage; total: number; limit: number; offset: number }>(`/api/projects/${encodeURIComponent(uuid)}/scopes?${params.toString()}`),
   findings: (uuid: string, params: URLSearchParams) =>
-    fetchJson<{ findings: FindingRow[]; total: number }>(`/api/projects/${encodeURIComponent(uuid)}/findings?${params.toString()}`),
+    fetchJson<{ findings: FindingRow[]; total: number; limit: number; offset: number }>(`/api/projects/${encodeURIComponent(uuid)}/findings?${params.toString()}`),
   createProject: (body: ProjectPayload) => postJson<{ ok: true; id: number; uuid: string; name: string }>("/api/projects", body),
   updateProject: (uuid: string, body: ProjectPayload) => patchJson<{ ok: true }>(`/api/projects/${encodeURIComponent(uuid)}`, body),
   deleteProject: (uuid: string) => fetchJson<{ ok: true }>(`/api/projects/${encodeURIComponent(uuid)}`, { method: "DELETE" }),

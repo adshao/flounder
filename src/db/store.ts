@@ -583,6 +583,18 @@ export class MetadataStore {
     return this.db.prepare("SELECT * FROM scope WHERE project_id = ? ORDER BY status, priority DESC, score DESC").all(projectId) as Array<Record<string, unknown>>;
   }
 
+  countScopes(projectId: number): number {
+    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM scope WHERE project_id = ?").get(projectId) as { n: number }).n);
+  }
+
+  queryScopes(projectId: number, opts: { limit?: number; offset?: number } = {}): Array<Record<string, unknown>> {
+    const limit = Math.max(1, Math.floor(opts.limit ?? 50));
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    return this.db
+      .prepare("SELECT * FROM scope WHERE project_id = ? ORDER BY status, priority DESC, score DESC LIMIT ? OFFSET ?")
+      .all(projectId, limit, offset) as Array<Record<string, unknown>>;
+  }
+
   scopeProgress(projectId: number): Coverage {
     const row = this.db
       .prepare(

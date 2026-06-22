@@ -53,6 +53,9 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     const scopePatch = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/projects/:uuid/scopes/:scopeId");
     assert.match(scopePatch.summary, /top of the next auto-dig batch/i);
     assert.match(scopePatch.body.prioritize, /top/i);
+    const projectScopes = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/projects/:uuid/scopes");
+    assert.match(projectScopes.query.limit, /default 50/);
+    assert.match(projectScopes.query.offset, /default 0/);
     const projectFindings = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/projects/:uuid/findings");
     assert.match(projectFindings.query.status, /execution-confirmed/);
     const globalFindings = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/bugs");
@@ -585,6 +588,32 @@ test("api: scope prioritize moves a mapped scope to the top of the queue", async
   });
 });
 
+test("api: project scopes endpoint paginates large inventories", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "scope-pages", sourcePaths: ["./src"] }));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        { scopeId: "scope-a", title: "A", status: "pending", score: 10 },
+        { scopeId: "scope-b", title: "B", status: "pending", score: 9 },
+        { scopeId: "scope-c", title: "C", status: "pending", score: 8 },
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const page = await json(await fetch(base + `/api/projects/${created.uuid}/scopes?limit=2&offset=1`));
+    assert.equal(page.total, 3);
+    assert.equal(page.limit, 2);
+    assert.equal(page.offset, 1);
+    assert.deepEqual(page.scopes.map((scope) => scope.scope_id), ["scope-b", "scope-c"]);
+    assert.equal(page.progress.total, 3);
+  });
+});
+
 test("api: info-only audit ledgers are hidden from actionable findings", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
@@ -619,6 +648,35 @@ test("api: info-only audit ledgers are hidden from actionable findings", async (
     const bugs = await json(await fetch(base + "/api/bugs"));
     assert.equal(bugs.findings.length, 1);
     assert.equal("evidence" in bugs.findings[0], false, "global findings list should use lightweight finding summaries");
+  });
+});
+
+test("api: project findings endpoint paginates detailed rows", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "finding-pages", sourcePaths: ["./src"] }));
+    const runDir = await mkdtemp(path.join(out, "finding-pages-run-"));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "audit", runDir });
+      store.upsertFindings(created.id, runId, [
+        { findingKey: "a", title: "A", location: "src/A.sol:1", severity: "low", status: "suspected", evidence: "detail-a" },
+        { findingKey: "b", title: "B", location: "src/B.sol:1", severity: "medium", status: "suspected", evidence: "detail-b" },
+        { findingKey: "c", title: "C", location: "src/C.sol:1", severity: "high", status: "suspected", evidence: "detail-c" },
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const page = await json(await fetch(base + `/api/projects/${created.uuid}/findings?limit=2&offset=1`));
+    assert.equal(page.total, 3);
+    assert.equal(page.limit, 2);
+    assert.equal(page.offset, 1);
+    assert.equal(page.findings.length, 2);
+    assert.deepEqual(page.findings.map((finding) => finding.title), ["B", "A"]);
+    assert.ok(page.findings.every((finding) => typeof finding.evidence === "string"));
   });
 });
 

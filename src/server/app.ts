@@ -210,8 +210,9 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "GET", path: "/api/projects/:uuid/scopes",
-    summary: "List the project's scope inventory (audited / pending / deferred) — the map output.",
+    summary: "List the project's scope inventory (audited / pending / deferred) — the map output. Paginated with ?limit/&offset for large inventories.",
     params: { uuid: "project UUID" },
+    query: { limit: "number? (default 50)", offset: "number? (default 0)" },
     handler: projectScopesGet,
   }),
   route({
@@ -660,7 +661,7 @@ function projectGet(c: Ctx): void {
   withProject(c, (id, project) => {
     const runs = c.store.listRuns(id, 50);
     const storedProgress = c.store.scopeProgress(id);
-    const storedScopes = c.store.listScopes(id);
+    const storedScopes = c.store.queryScopes(id, { limit: 50, offset: 0 });
     const scopeCheckpoint = latestScopeCheckpoint(runs);
     const scopes = scopeApiRows(storedScopes.length > 0 ? storedScopes : scopeCheckpoint?.scopes ?? storedScopes);
     const progress = storedProgress.total > 0 ? storedProgress : scopeCheckpoint?.progress ?? storedProgress;
@@ -688,11 +689,21 @@ function projectGet(c: Ctx): void {
 
 function projectScopesGet(c: Ctx): void {
   withProject(c, (id) => {
-    const scopes = scopeApiRows(c.store.listScopes(id));
+    const limit = clampInt(c.url.searchParams.get("limit"), 50, 1, 500);
+    const offset = clampInt(c.url.searchParams.get("offset"), 0, 0, 1_000_000);
+    const total = c.store.countScopes(id);
+    const scopes = scopeApiRows(c.store.queryScopes(id, { limit, offset }));
     const progress = c.store.scopeProgress(id);
-    if (scopes.length > 0 || progress.total > 0) return sendJson(c.res, 200, { scopes, progress });
+    if (scopes.length > 0 || progress.total > 0) return sendJson(c.res, 200, { scopes, progress, total, limit, offset });
     const checkpoint = latestScopeCheckpoint(c.store.listRuns(id, 50));
-    sendJson(c.res, 200, { scopes: scopeApiRows(checkpoint?.scopes ?? scopes), progress: checkpoint?.progress ?? progress });
+    const checkpointScopes = scopeApiRows(checkpoint?.scopes ?? scopes);
+    sendJson(c.res, 200, {
+      scopes: checkpointScopes.slice(offset, offset + limit),
+      progress: checkpoint?.progress ?? progress,
+      total: checkpointScopes.length,
+      limit,
+      offset,
+    });
   });
 }
 
@@ -1215,10 +1226,21 @@ function findingsList(c: Ctx): void {
     const offset = clampInt(c.url.searchParams.get("offset"), 0, 0, 1_000_000);
     const rows = reportableFindings(c.store.listFindings(id))
       .filter((finding) => findingStatusMatches(finding, status))
-      .filter((finding) => !search || `${finding.title ?? ""} ${finding.location ?? ""}`.toLowerCase().includes(search.toLowerCase()));
+      .filter((finding) => !search || `${finding.title ?? ""} ${finding.location ?? ""}`.toLowerCase().includes(search.toLowerCase()))
+      .sort((a, b) => findingSeverityScore(b) - findingSeverityScore(a) || String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
     const findings = rows.slice(offset, offset + limit).map((finding) => findingDisplayRow({ ...finding, timeline: c.store.findingTimeline(Number(finding.id)) }));
     sendJson(c.res, 200, { findings, total: rows.length, limit, offset });
   });
+}
+
+function findingSeverityScore(finding: Record<string, unknown>): number {
+  const severity = String(finding.severity ?? "").toLowerCase();
+  if (severity === "critical") return 5;
+  if (severity === "high") return 4;
+  if (severity === "medium") return 3;
+  if (severity === "low") return 2;
+  if (severity === "info") return 1;
+  return 0;
 }
 
 function reportableFindings(rows: Array<Record<string, unknown>>): Array<Record<string, unknown>> {

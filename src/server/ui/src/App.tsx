@@ -13,6 +13,7 @@ import {
   type PiModel,
   type ProviderProfile,
   type RunRow,
+  type ScopeRow,
 } from "./api";
 import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge } from "./components";
 import {
@@ -27,7 +28,6 @@ import {
   rankCandidates,
   runProgress,
   runScopeBatchComplete,
-  sortScopes,
   STATUSES,
   THINKING_LEVELS,
   TRACKING,
@@ -1350,7 +1350,7 @@ function ProjectDetailView(props: {
   onOpenEdit: () => void;
   onOpenReport: (finding: FindingRow) => void;
   onTracking: (finding: FindingRow, status: string) => void;
-  onPatchScope: (scopeId: string, body: unknown) => void;
+  onPatchScope: (scopeId: string, body: unknown) => Promise<void> | void;
   onStopRun: (run: RunRow) => void;
   onUpdateRunTarget: (run: RunRow, target: number) => void;
   onOpenRunLog: (run: RunRow) => void;
@@ -1920,15 +1920,59 @@ function ProjectFindings(props: {
   onOpenReport: (finding: FindingRow) => void;
   onTracking: (finding: FindingRow, status: string) => void;
 }) {
-  const rows = (props.detail.allFindings ?? [])
-    .filter((f) => !props.status || (props.status === "execution-confirmed" ? f.status === "confirmed-executable" || f.status === "confirmed-differential" : f.status === props.status))
-    .filter((f) => !props.query || `${f.title ?? ""} ${f.location ?? ""}`.toLowerCase().includes(props.query.toLowerCase()))
-    .sort((a, b) => severityScore(b) - severityScore(a));
-  const empty = (props.detail.allFindings ?? []).length
+  const uuid = props.detail.project.uuid;
+  const [rows, setRows] = useState<FindingRow[]>([]);
+  const [total, setTotal] = useState(props.detail.findingsTotal ?? 0);
+  const [page, setPage] = useState(1);
+  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
+  const safePage = Math.min(page, pageCount);
+
+  useEffect(() => {
+    setPage(1);
+  }, [uuid, props.status, props.query]);
+
+  useEffect(() => {
+    if (page > pageCount) setPage(pageCount);
+  }, [page, pageCount]);
+
+  useEffect(() => {
+    let alive = true;
+    const params = new URLSearchParams({
+      limit: String(pageSize),
+      offset: String((safePage - 1) * pageSize),
+    });
+    if (props.status) params.set("status", props.status);
+    if (props.query) params.set("q", props.query);
+    setLoading(true);
+    setError("");
+    void api
+      .findings(uuid, params)
+      .then((res) => {
+        if (!alive) return;
+        setRows(res.findings);
+        setTotal(res.total);
+      })
+      .catch((err: unknown) => {
+        if (!alive) return;
+        setError(String(err instanceof Error ? err.message : err));
+        setRows([]);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [uuid, props.status, props.query, safePage, pageSize, props.detail.findingsTotal]);
+
+  const empty = props.detail.findingsTotal
     ? "No findings match the current filters."
     : "No findings yet. Findings appear after dig audits mapped scopes and produces a locally checked claim.";
   return (
-    <Card title={<span>Findings <Counter>{rows.length}</Counter></span>}>
+    <Card title={<span>Findings <Counter>{total}</Counter></span>}>
       <div className="table-tools">
         <input className="searchbar" value={props.query} onChange={(event) => props.setQuery(event.target.value)} placeholder="Search findings..." aria-label="Search findings" />
         <select value={props.status} onChange={(event) => props.setStatus(event.target.value)} aria-label="Filter finding status">
@@ -1937,29 +1981,80 @@ function ProjectFindings(props: {
           {STATUSES.map((status) => <option key={status} value={status}>{status}</option>)}
         </select>
       </div>
-      <FindingTable rows={rows} paginationKey={`${props.status}:${props.query}`} empty={empty} onOpenReport={props.onOpenReport} onTracking={props.onTracking} />
+      {error ? <EmptyInline>{error}</EmptyInline> : loading && rows.length === 0 ? <EmptyInline>Loading findings...</EmptyInline> : (
+        <FindingTable
+          rows={rows}
+          total={total}
+          page={safePage}
+          pageSize={pageSize}
+          paginationKey={`${props.status}:${props.query}`}
+          empty={empty}
+          onPage={setPage}
+          onPageSize={setPageSize}
+          onOpenReport={props.onOpenReport}
+          onTracking={props.onTracking}
+        />
+      )}
     </Card>
   );
 }
 
-function ScopesView({ detail, onPatchScope }: { detail: ProjectDetail; onPatchScope: (scopeId: string, body: unknown) => void }) {
+function ScopesView({ detail, onPatchScope }: { detail: ProjectDetail; onPatchScope: (scopeId: string, body: unknown) => Promise<void> | void }) {
+  const uuid = detail.project.uuid;
   const [page, setPage] = useState(1);
   const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const scopes = sortScopes(detail.scopes ?? []);
-  const pageCount = Math.max(1, Math.ceil(scopes.length / pageSize));
+  const [scopes, setScopes] = useState<ScopeRow[]>([]);
+  const [total, setTotal] = useState(detail.progress.total ?? 0);
+  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState("");
+  const [reloadKey, setReloadKey] = useState(0);
+  const pageCount = Math.max(1, Math.ceil(total / pageSize));
   const safePage = Math.min(page, pageCount);
-  const pageScopes = scopes.slice((safePage - 1) * pageSize, safePage * pageSize);
 
   useEffect(() => {
     if (page > pageCount) setPage(pageCount);
   }, [page, pageCount]);
 
+  useEffect(() => {
+    let alive = true;
+    const params = new URLSearchParams({
+      limit: String(pageSize),
+      offset: String((safePage - 1) * pageSize),
+    });
+    setLoading(true);
+    setError("");
+    void api
+      .scopes(uuid, params)
+      .then((res) => {
+        if (!alive) return;
+        setScopes(res.scopes);
+        setTotal(res.total);
+      })
+      .catch((err: unknown) => {
+        if (!alive) return;
+        setError(String(err instanceof Error ? err.message : err));
+        setScopes([]);
+      })
+      .finally(() => {
+        if (alive) setLoading(false);
+      });
+    return () => {
+      alive = false;
+    };
+  }, [uuid, safePage, pageSize, detail.progress.total, reloadKey]);
+
+  const patchScope = (scopeId: string, body: unknown) => {
+    void Promise.resolve(onPatchScope(scopeId, body)).finally(() => setReloadKey((key) => key + 1));
+  };
+
   return (
-    <Card title={<span>Scopes <Counter>{scopes.length}</Counter></span>}>
-      {scopes.length ? (
+    <Card title={<span>Scopes <Counter>{total}</Counter></span>}>
+      {error ? <EmptyInline>{error}</EmptyInline> : loading && scopes.length === 0 ? (
+        <EmptyInline>Loading scopes...</EmptyInline>
+      ) : scopes.length ? (
         <>
           <div className="scope-list">
-            {pageScopes.map((scope) => (
+            {scopes.map((scope) => (
               <div className="scope-row" key={scope.scope_id}>
                 <span className={`label s-${scope.status}`}>{scope.status}</span>
                 <div>
@@ -1968,15 +2063,15 @@ function ScopesView({ detail, onPatchScope }: { detail: ProjectDetail; onPatchSc
                 </div>
                 <span className="score">{scope.score ?? scope.priority ?? ""}</span>
                 <div className="row-actions">
-                  {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { prioritize: true })}>Top</Button> : null}
-                  {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { status: "deferred" })}>Skip</Button> : null}
-                  {scope.status === "deferred" ? <Button size="sm" onClick={() => onPatchScope(scope.scope_id, { status: "pending" })}>Resume</Button> : null}
+                  {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => patchScope(scope.scope_id, { prioritize: true })}>Top</Button> : null}
+                  {scope.status === "pending" || scope.status === "auditing" ? <Button size="sm" onClick={() => patchScope(scope.scope_id, { status: "deferred" })}>Skip</Button> : null}
+                  {scope.status === "deferred" ? <Button size="sm" onClick={() => patchScope(scope.scope_id, { status: "pending" })}>Resume</Button> : null}
                 </div>
               </div>
             ))}
           </div>
           <PaginationControls
-            total={scopes.length}
+            total={total}
             page={safePage}
             pageSize={pageSize}
             label="scope"
@@ -2105,20 +2200,49 @@ function FindingList({ findings, compact, empty, onOpenReport }: { findings: Fin
   );
 }
 
-function FindingTable({ rows, global, empty, paginationKey, onOpenProject, onOpenReport, onTracking }: { rows: FindingRow[]; global?: boolean; empty?: string; paginationKey?: string; onOpenProject?: (uuid: string) => void; onOpenReport: (finding: FindingRow) => void; onTracking: (finding: FindingRow, status: string) => void }) {
-  const [page, setPage] = useState(1);
-  const [pageSize, setPageSize] = useState(DEFAULT_PAGE_SIZE);
-  const pageCount = Math.max(1, Math.ceil(rows.length / pageSize));
-  const safePage = Math.min(page, pageCount);
-  const pageRows = rows.slice((safePage - 1) * pageSize, safePage * pageSize);
+function FindingTable({
+  rows,
+  global,
+  empty,
+  paginationKey,
+  total,
+  page,
+  pageSize,
+  onPage,
+  onPageSize,
+  onOpenProject,
+  onOpenReport,
+  onTracking,
+}: {
+  rows: FindingRow[];
+  global?: boolean;
+  empty?: string;
+  paginationKey?: string;
+  total?: number;
+  page?: number;
+  pageSize?: number;
+  onPage?: (page: number) => void;
+  onPageSize?: (pageSize: number) => void;
+  onOpenProject?: (uuid: string) => void;
+  onOpenReport: (finding: FindingRow) => void;
+  onTracking: (finding: FindingRow, status: string) => void;
+}) {
+  const controlled = total !== undefined && page !== undefined && pageSize !== undefined && typeof onPage === "function" && typeof onPageSize === "function";
+  const [localPage, setLocalPage] = useState(1);
+  const [localPageSize, setLocalPageSize] = useState(DEFAULT_PAGE_SIZE);
+  const activeTotal = controlled ? total : rows.length;
+  const activePageSize = controlled ? pageSize : localPageSize;
+  const pageCount = Math.max(1, Math.ceil(activeTotal / activePageSize));
+  const safePage = Math.min(controlled ? page : localPage, pageCount);
+  const pageRows = controlled ? rows : rows.slice((safePage - 1) * activePageSize, safePage * activePageSize);
 
   useEffect(() => {
-    setPage(1);
+    if (!controlled) setLocalPage(1);
   }, [paginationKey]);
 
   useEffect(() => {
-    if (page > pageCount) setPage(pageCount);
-  }, [page, pageCount]);
+    if (!controlled && localPage > pageCount) setLocalPage(pageCount);
+  }, [controlled, localPage, pageCount]);
 
   if (!rows.length) return <EmptyInline>{empty ?? "No findings in this view."}</EmptyInline>;
   return (
@@ -2162,12 +2286,12 @@ function FindingTable({ rows, global, empty, paginationKey, onOpenProject, onOpe
         </table>
       </div>
       <PaginationControls
-        total={rows.length}
+        total={activeTotal}
         page={safePage}
-        pageSize={pageSize}
+        pageSize={activePageSize}
         label="finding"
-        onPage={setPage}
-        onPageSize={setPageSize}
+        onPage={controlled ? onPage : setLocalPage}
+        onPageSize={controlled ? onPageSize : setLocalPageSize}
       />
     </>
   );
