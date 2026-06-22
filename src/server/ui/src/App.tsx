@@ -1726,7 +1726,9 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
             <span><strong>{summary.inScope ?? 0}</strong> in scope</span>
             <span><strong>{summary.matched ?? 0}</strong> matched</span>
             <span><strong>{summary.unverified ?? 0}</strong> unverified</span>
-            <span title={workspace.filesTruncated ? `Workspace scan stopped after ${workspace.fileLimit ?? workspace.files ?? 0} files.` : undefined}><strong>{filesLabel}</strong> files</span>
+            <span title={workspace.filesTruncated ? `Workspace scan stopped after ${workspace.fileLimit ?? workspace.files ?? 0} files.` : undefined}>
+              <strong>{filesLabel}</strong> {workspace.filesTruncated ? "scanned" : "files"}{workspace.filesTruncated ? " · scan limit" : ""}
+            </span>
           </div>
         </div>
         {scopeDeclaration ? <p className="prepare-scope">{scopeDeclaration}</p> : null}
