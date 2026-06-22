@@ -224,4 +224,4 @@ Flounder is for authorized audits only: your own code, client-authorized targets
 
 ## Contributing
 
-See [CONTRIBUTING.md](CONTRIBUTING.md). MIT licensed.
+See [CONTRIBUTING.md](CONTRIBUTING.md). AGPL v3 licensed.
