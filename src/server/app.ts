@@ -853,9 +853,7 @@ function scopeCheckpointRow(entry: unknown, index: number): Record<string, unkno
 function readPrepareSummary(run: Record<string, unknown>): Record<string, unknown> {
   const runDir = path.resolve(String(run.run_dir));
   const workspaceDir = path.join(runDir, "prepare", "workspace");
-  const rootManifest = path.join(runDir, "prepare_manifest.json");
-  const workspaceManifest = path.join(workspaceDir, "prepare_manifest.json");
-  const manifestPath = existsSync(rootManifest) ? rootManifest : existsSync(workspaceManifest) ? workspaceManifest : undefined;
+  const manifestPath = resolvePrepareManifestPath(runDir, workspaceDir);
   const workspace = summarizePreparedWorkspace(workspaceDir);
   const issues: string[] = [];
   let manifest: Record<string, unknown> | undefined;
@@ -879,7 +877,10 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
   }
 
   const components = Array.isArray(manifest?.components) ? (manifest.components as Array<Record<string, unknown>>) : [];
-  if (manifestStatus === "present" && components.length === 0) issues.push("manifest lists no components");
+  if (manifestStatus === "present" && components.length === 0) {
+    const workspaceFiles = typeof workspace.files === "number" ? workspace.files : 0;
+    issues.push(workspaceFiles > 0 ? "manifest lists no components" : "prepared workspace is empty");
+  }
   let matched = 0;
   let unverified = 0;
   let sourcePinned = 0;
@@ -992,16 +993,8 @@ function isBlockingPrepareIssue(issue: string): boolean {
   return raw.includes("prepare_manifest.json has not been written")
     || raw.includes("prepare_manifest.json could not be parsed")
     || raw.includes("prepare_manifest.json is not a json object")
-    || raw.includes("manifest lists no components")
-    || raw.includes("unresolved prepare placeholder")
-    || raw.includes("source origin is not pinned")
-    || raw.includes("real-target verification plan is missing")
-    || raw.includes("answer firewall is")
-    || raw.includes("requires confirmation but lists no ground truth")
-    || raw.includes("confirm_guidance is missing")
-    || raw.includes("confirm guidance is missing")
-    || raw.includes("but match is missing")
-    || raw.includes("but match is unknown");
+    || raw.includes("prepared workspace is empty")
+    || raw.includes("answer firewall is");
 }
 
 function summarizePrepareComponent(component: Record<string, unknown>): Record<string, unknown> {
@@ -1622,9 +1615,7 @@ function latestPreparedWorkspace(runs: Array<Record<string, unknown>>): { worksp
   if (!run) return undefined;
   const runDir = path.resolve(String(run.run_dir));
   const workspaceDir = path.join(runDir, "prepare", "workspace");
-  const rootManifest = path.join(runDir, "prepare_manifest.json");
-  const workspaceManifest = path.join(workspaceDir, "prepare_manifest.json");
-  const manifestPath = existsSync(rootManifest) ? rootManifest : existsSync(workspaceManifest) ? workspaceManifest : undefined;
+  const manifestPath = resolvePrepareManifestPath(runDir, workspaceDir);
   if (!manifestPath || !existsSync(workspaceDir)) return undefined;
   let scopeNote: string | undefined;
   try {
@@ -1633,6 +1624,12 @@ function latestPreparedWorkspace(runs: Array<Record<string, unknown>>): { worksp
     scopeNote = undefined;
   }
   return { workspaceDir, manifestPath, ...(scopeNote ? { scopeNote } : {}) };
+}
+
+function resolvePrepareManifestPath(runDir: string, workspaceDir: string): string | undefined {
+  const workspaceManifest = path.join(workspaceDir, "prepare_manifest.json");
+  const rootManifest = path.join(runDir, "prepare_manifest.json");
+  return existsSync(workspaceManifest) ? workspaceManifest : existsSync(rootManifest) ? rootManifest : undefined;
 }
 
 // Queue an ad-hoc run from a full launch spec — the CLI's enqueue entry point. Unlike
@@ -2110,22 +2107,25 @@ function runArtifact(c: Ctx): void {
   const name = c.url.searchParams.get("name") || "audit_report.md";
   if (!ALLOWED_ARTIFACT.test(name)) return sendJson(c.res, 400, { error: "artifact not allowed", name });
   const runDir = path.resolve(String(run.run_dir));
-  let file = path.join(runDir, name);
-  if (path.dirname(file) !== runDir) return sendJson(c.res, 400, { error: "bad path" });
-  let text: string;
-  try {
-    text = readFileSync(file, "utf8"); // read BEFORE committing a status, so a missing file is a clean 404
-  } catch {
-    if (name !== "prepare_manifest.json") return sendJson(c.res, 404, { error: "artifact not found", name });
-    file = path.join(runDir, "prepare", "workspace", "prepare_manifest.json");
+  const files = name === "prepare_manifest.json"
+    ? [
+        path.join(runDir, "prepare", "workspace", "prepare_manifest.json"),
+        path.join(runDir, name),
+      ]
+    : [path.join(runDir, name)];
+  for (const file of files) {
+    const resolved = path.resolve(file);
+    if (resolved !== runDir && !resolved.startsWith(runDir + path.sep)) return sendJson(c.res, 400, { error: "bad path" });
     try {
-      text = readFileSync(file, "utf8");
+      const text = readFileSync(resolved, "utf8");
+      c.res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
+      c.res.end(text);
+      return;
     } catch {
-      return sendJson(c.res, 404, { error: "artifact not found", name });
+      // Try the next artifact candidate.
     }
   }
-  c.res.writeHead(200, { "content-type": "text/plain; charset=utf-8" });
-  c.res.end(text);
+  return sendJson(c.res, 404, { error: "artifact not found", name });
 }
 
 function runStop(c: Ctx): void {

@@ -546,6 +546,23 @@ test("api: project detail summarizes the latest prepare manifest and workspace q
     const projectPath = "/api/projects/" + created.uuid;
     const runDir = path.join(out, "prepared-target-prepare-test");
     const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(
+      path.join(runDir, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "done",
+        clue: "stale root checkpoint",
+        posture: "blind",
+        answer_firewall: "clean",
+        real_target: {
+          requires_confirmation: false,
+          mode: "source-only",
+          reason: "Early checkpoint before workspace finalization.",
+          ground_truth: [],
+        },
+        components: [],
+      }),
+    );
     await mkdir(path.join(workspace, "src"), { recursive: true });
     await mkdir(path.join(workspace, "source", ".git"), { recursive: true });
     await writeFile(path.join(workspace, "src", "Target.sol"), "contract Target {}\n");
@@ -620,7 +637,9 @@ test("api: project detail summarizes the latest prepare manifest and workspace q
 
     const artifact = await fetch(base + `/api/runs/${detail.prepareSummary.runId}/artifact?name=prepare_manifest.json`);
     assert.equal(artifact.status, 200);
-    assert.equal((await artifact.text()).includes("official source only"), true);
+    const artifactJson = JSON.parse(await artifact.text());
+    assert.equal(artifactJson.scope_declaration, "First-party source and official docs only.");
+    assert.equal(artifactJson.components.length, 1);
 
     const launched = await json(await post(projectPath + "/runs", { verb: "run" }));
     assert.equal(launched.queued, true);
@@ -807,7 +826,7 @@ test("api: source-only prepare does not require real-target confirm guidance", a
   });
 });
 
-test("api: unresolved prepare manifest status is surfaced as a review issue", async () => {
+test("api: unresolved prepare manifest status is surfaced as limited materials", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -974,7 +993,7 @@ test("api: prepared workspace file count reports scan truncation", async () => {
   });
 });
 
-test("api: terminal prepare runs display stale in-progress manifests as partial", async () => {
+test("api: terminal prepare runs display stale in-progress manifests as limited partial materials", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -1025,14 +1044,14 @@ test("api: terminal prepare runs display stale in-progress manifests as partial"
     }
 
     const detail = await json(await fetch(base + "/api/projects/" + created.uuid));
-    assert.equal(detail.prepareSummary.quality, "needs-review");
+    assert.equal(detail.prepareSummary.quality, "limited");
     assert.equal(detail.prepareSummary.manifestState, "partial");
     assert.deepEqual(detail.prepareSummary.gaps, ["deployment-artifacts-unresolved: Live deployment artifacts are still being resolved."]);
     assert.match(detail.prepareSummary.issues.join("\n"), /staged materials are usable but partial/);
   });
 });
 
-test("api: terminal prepare manifests with unresolved placeholders display as partial", async () => {
+test("api: terminal prepare manifests with unresolved placeholders display as limited partial materials", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -1084,7 +1103,7 @@ test("api: terminal prepare manifests with unresolved placeholders display as pa
     }
 
     const detail = await json(await fetch(base + "/api/projects/" + created.uuid));
-    assert.equal(detail.prepareSummary.quality, "needs-review");
+    assert.equal(detail.prepareSummary.quality, "limited");
     assert.equal(detail.prepareSummary.manifestState, "partial");
     assert.equal(detail.prepareSummary.sourcePinned, 0);
     assert.match(detail.prepareSummary.issues.join("\n"), /unresolved prepare placeholder/);
