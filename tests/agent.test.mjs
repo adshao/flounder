@@ -252,6 +252,10 @@ test("failed bash command events include an output preview for the UI", async ()
     assert.match(run.observation, /VISIBLE_FAILURE_REASON/);
 
     const events = (await readFile(logger.eventsPath, "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    const commandStart = events.find((event) => event.kind === "audit_command_start");
+    assert.equal(commandStart.runId, "cmd1");
+    assert.equal(commandStart.purpose, "confirm");
+    assert.equal(commandStart.command, "node --test failing_repro.test.mjs");
     const commandEvent = events.find((event) => event.kind === "audit_command_run");
     assert.equal(commandEvent.exitCode, 1);
     assert.match(commandEvent.output, /VISIBLE_FAILURE_REASON/);

@@ -335,6 +335,11 @@ const bashTool: AgentTool = {
     if (isAgentConfirmCommand(normalized.command) || isAgentBuildCommand(normalized.command)) await ensurePrepared(ctx, workspace);
     ctx.session.counters.command += 1;
     const runId = `cmd${ctx.session.counters.command}`;
+    await ctx.logger.event("audit_command_start", {
+      runId,
+      purpose: normalized.purpose,
+      command: normalized.raw,
+    });
     const result = await runSandboxCommand(
       normalized.command,
       workspace.absolute,

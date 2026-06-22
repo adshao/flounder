@@ -527,6 +527,15 @@ function eventSummary(event: ActivityRecord, fallbackBody: string): { label: str
       const exitCode = payloadNumber(payload, "exitCode");
       return { label: "Prepare command", body: [toolchain, command ? shortCommand(command) : undefined, exitCode !== undefined ? `exit ${exitCode}` : undefined].filter(Boolean).join(" · ") || fallbackBody };
     }
+    case "audit_command_start": {
+      const command = payloadString(payload, "command");
+      const runId = payloadString(payload, "runId");
+      const purpose = payloadString(payload, "purpose");
+      return {
+        label: "Running command",
+        body: [runId, purpose, command ? shortCommand(command) : undefined].filter(Boolean).join(" · ") || fallbackBody,
+      };
+    }
     default:
       return undefined;
   }
@@ -678,6 +687,8 @@ function activityEventLabel(kind: string): string {
       return "Output";
     case "audit_action":
       return "Action";
+    case "audit_command_start":
+      return "Running command";
     case "audit_command_run":
       return "Command result";
     case "audit_write":
