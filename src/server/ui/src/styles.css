@@ -778,6 +778,11 @@ small {
   color: var(--success);
 }
 
+.phase.pending .phase-time,
+.phase.partial .phase-time {
+  color: var(--warning);
+}
+
 .phase.error .phase-time,
 .phase.killed .phase-time {
   color: var(--danger);

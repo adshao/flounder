@@ -1690,6 +1690,7 @@ function ProjectDetailView(props: {
           {PHASES.map((phase, index) => {
             const displayStatus = phaseDisplayStatus(phase);
             const label = phaseLabel(phase);
+            const footer = phases[phase].dur || phaseStatusLabel(displayStatus);
             return (
               <button key={phase} type="button" className={`phase ${displayStatus}`} onClick={() => jumpToPhase(phase)} title={`Open ${label} output`}>
                 <span className="phase-head">
@@ -1705,7 +1706,7 @@ function ProjectDetailView(props: {
                 <strong>{phase === "prepare" ? prepareInfo.stat : phases[phase].stat}</strong>
                 <small className="phase-detail">
                   <span>{phase === "prepare" ? prepareInfo.detail : PHASE_DESC[phase]}</span>
-                  {phases[phase].dur ? <span className="phase-time">{phases[phase].dur}</span> : null}
+                  <span className="phase-time">{footer}</span>
                 </small>
               </button>
             );
