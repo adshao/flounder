@@ -156,6 +156,8 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const audit = runs.find((r) => r.status === "running" && ["run", "audit", "map"].includes(r.kind));
   const auditLatest = latest("run", "audit", "map");
   const verifyLatest = runs.find((run) => isVerifyRun(run));
+  const reportLatest = latest("report");
+  const reportRunning = reportLatest?.status === "running";
   const activeScope = (detail.activeScopeCount ?? 0) > 0 || Boolean((detail.scopes ?? []).some((scope) => scope.status === "auditing"));
   const digStarted = Boolean(audit && audit.run_scopes_target != null);
   const mapRunning = Boolean(audit && audit.kind !== "audit" && !digStarted);
@@ -192,8 +194,9 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
     : synthesisStartMs && synthesisEndMs > synthesisStartMs
       ? fmtDur(synthesisEndMs - synthesisStartMs)
       : "";
-  const reportable = detail.confirmDecisions.filter((row) => row.reproduced === "yes");
-  const submitCandidates = reportable.filter((row) => row.recommendation === "submit-candidate").length;
+  const reproducedFindings = (detail.allFindings ?? []).filter((finding) => finding.confirm_status === "reproduced");
+  const formalReports = reproducedFindings.filter((finding) => finding.has_report);
+  const submitCandidates = detail.confirmDecisions.filter((row) => row.reproduced === "yes" && row.recommendation === "submit-candidate").length;
 
   return {
     prepare: { status: prep ? prep.status : "none", stat: prep ? (prep.status === "done" ? "Source staged" : prep.status === "running" ? "Preparing source" : prep.status) : "Not started", dur: runDur(prep, prep?.status === "running") },
@@ -259,13 +262,17 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
       dur: runDur(conf, conf?.status === "running"),
     },
     report: {
-      status: reportable.length > 0 ? "ready" : detail.confirmDecisions.length > 0 ? "pending" : "none",
-      stat: reportable.length > 0
-        ? `${reportable.length} ${reportable.length === 1 ? "report" : "reports"} ready${submitCandidates ? ` · ${submitCandidates} submit` : ""}`
-        : detail.confirmDecisions.length > 0
-          ? "No reproduced bug yet"
-          : "Not started",
-      dur: "",
+      status: reportRunning ? "running" : formalReports.length > 0 ? (formalReports.length === reproducedFindings.length ? "ready" : "partial") : reproducedFindings.length > 0 ? "pending" : detail.confirmDecisions.length > 0 ? "pending" : "none",
+      stat: reportRunning
+        ? "Writing formal reports"
+        : formalReports.length > 0
+          ? `${formalReports.length}/${reproducedFindings.length} ${reproducedFindings.length === 1 ? "report" : "reports"} ready${submitCandidates ? ` · ${submitCandidates} submit` : ""}`
+          : reproducedFindings.length > 0
+            ? `${reproducedFindings.length} waiting for formal report`
+            : detail.confirmDecisions.length > 0
+              ? "No reproduced bug yet"
+              : "Not started",
+      dur: runDur(reportLatest, reportRunning),
     },
   };
 }

@@ -102,6 +102,7 @@ export interface FindingRow {
   confirm_status?: string | null;
   report_path?: string | null;
   report_markdown?: string | null;
+  has_report?: boolean | null;
   scope_id?: string | null;
   description?: string | null;
   evidence?: string | null;
@@ -120,6 +121,13 @@ export interface ConfirmDecision {
   reproduced?: string | null;
   recommendation?: string | null;
   members_json?: string | null;
+  distinct_fix?: string | null;
+  repro_evidence?: string | null;
+  corroboration?: string | null;
+  novelty?: string | null;
+  human_gates?: string | null;
+  merged_from_json?: string | null;
+  repro_command_id?: string | null;
   decision_path?: string | null;
   created_at?: string;
 }

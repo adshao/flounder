@@ -47,11 +47,13 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     assert.equal(projectCreate.body.providerId.startsWith("number"), true);
     assert.match(projectCreate.body.config, /phaseProviders/);
     const projectRun = cat.endpoints.find((e) => e.method === "POST" && e.path === "/api/projects/:uuid/runs");
+    assert.match(projectRun.body.verb, /report/);
     assert.match(projectRun.body.scopeCoverageMode, /one-off coverage mode/);
     assert.match(projectRun.body.maxScopes, /one-off scope cap/);
     assert.match(projectRun.body.mapSteps, /one-off map turn cap/);
     assert.match(projectRun.body.digSteps, /one-off per-scope dig turn cap/);
     assert.match(projectRun.body.verifyFindings, /original row/);
+    assert.match(projectRun.body.findingIds, /formal reports/);
     const scopePatch = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/projects/:uuid/scopes/:scopeId");
     assert.match(scopePatch.summary, /top of the next auto-dig batch/i);
     assert.match(scopePatch.body.prioritize, /top/i);
@@ -162,6 +164,89 @@ test("api: verify launch links project finding rows back to the original finding
     assert.equal(spec.verb, "audit");
     assert.equal(spec.verifyFindings[0].id, finding.id);
     assert.equal(spec.verifyFindings[0].originId, finding.id);
+  });
+});
+
+test("api: report launch queues only reproduced real-target findings that were not dropped", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "report-launch", sourcePaths: ["./src"], corpusPaths: ["./docs"] }));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "report-launch-audit") });
+      store.upsertFindings(created.id, auditRun, [
+        {
+          findingKey: "kready",
+          title: "Ready bug",
+          location: "src/Target.sol:12",
+          severity: "high",
+          status: "confirmed-executable",
+          description: "A reproduced bug.",
+          evidence: "Local proof passed.",
+          confidence: 0.91,
+        },
+        {
+          findingKey: "kdrop",
+          title: "Dropped bug",
+          location: "src/Target.sol:34",
+          severity: "medium",
+          status: "confirmed-executable",
+        },
+        {
+          findingKey: "knotreproduced",
+          title: "Not reproduced bug",
+          location: "src/Target.sol:56",
+          severity: "medium",
+          status: "confirmed-executable",
+        },
+      ]);
+      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "report-launch-confirm") });
+      store.upsertConfirmDecisions(created.id, confirmRun, [
+        {
+          bug: "Ready bug",
+          reproduced: "yes",
+          recommendation: "submit-candidate",
+          members: ["kready"],
+          reproEvidence: "purpose=confirm command cmd1 reproduced the real target effect",
+          reproCommandId: "cmd1",
+        },
+        {
+          bug: "Dropped bug",
+          reproduced: "yes",
+          recommendation: "drop",
+          members: ["kdrop"],
+        },
+        {
+          bug: "Not reproduced bug",
+          reproduced: "no",
+          recommendation: "drop",
+          members: ["knotreproduced"],
+        },
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    const ready = detail.allFindings.find((finding) => finding.finding_key === "kready");
+    const dropped = detail.allFindings.find((finding) => finding.finding_key === "kdrop");
+    assert.ok(ready);
+    assert.ok(dropped);
+
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "report" }));
+    const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
+    const spec = JSON.parse(job.spec_json);
+
+    assert.equal(spec.verb, "report");
+    assert.equal(spec.reportFindings.length, 1);
+    assert.equal(spec.reportFindings[0].findingKey, "kready");
+    assert.equal(spec.reportFindings[0].decisions[0].repro_command_id, "cmd1");
+    assert.match(spec.reportFindings[0].decisions[0].repro_evidence, /real target effect/);
+
+    const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "report", findingIds: [dropped.id] });
+    assert.equal(rejected.status, 400);
+    assert.match((await rejected.json()).error, /not reproduced on the real target|dropped/);
   });
 });
 

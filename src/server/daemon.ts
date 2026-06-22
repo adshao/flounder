@@ -9,10 +9,11 @@ import os from "node:os";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
+import { runReport } from "../agent/report.js";
 import { runPrepare } from "../agent/acquire.js";
 import { MockAuditLlmClient } from "../llm/mock.js";
 import { specToConfig, type LaunchSpec } from "./run-manager.js";
-import { toScopeRow, toFindingRow, configSnapshot, type RunTracker, type ConfirmDecisionInput } from "../db/record.js";
+import { toScopeRow, toFindingRow, configSnapshot, type RunTracker, type ConfirmDecisionInput, type FindingReportInput } from "../db/record.js";
 import { defaultOutputDir, defaultWorkspaceDir, type AuditorConfig } from "../config.js";
 import type { Coverage, RunStatus } from "../db/store.js";
 import type { AgentFinding, AuditScope } from "../agent/tools.js";
@@ -70,7 +71,10 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
         cfg.sandboxAllowHostFallback = true;
       }
       if (!spec.mockLlm) await assertProviderAuthenticated(cfg.provider);
-      if (spec.verb === "confirm") {
+      if (spec.verb === "report") {
+        if (!spec.reportFindings?.length) throw new Error("report requires reproduced finding inputs");
+        await runReport(cfg, { findings: spec.reportFindings, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}) });
+      } else if (spec.verb === "confirm") {
         if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir");
         await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.inputRunDirs ? { inputRunDirs: spec.inputRunDirs } : {}), ...(spec.confirmKeys ? { confirmKeys: spec.confirmKeys } : {}), ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
       } else if (spec.verb === "prepare") {
@@ -234,6 +238,11 @@ class RemoteTracker implements RunTracker {
   confirmDecisions(rows: ConfirmDecisionInput[], decisionPath?: string): void {
     if (rows.length === 0) return;
     this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { confirmDecisions: rows, decisionPath }) : Promise.resolve()));
+  }
+
+  findingReports(reports: FindingReportInput[]): void {
+    if (reports.length === 0) return;
+    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { findingReports: reports }) : Promise.resolve()));
   }
 
   finish(status: RunStatus, coverage?: Coverage, findingsTotal?: number): void {

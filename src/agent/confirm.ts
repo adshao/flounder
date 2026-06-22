@@ -203,7 +203,20 @@ export async function runConfirm(
 
   // SQLite tracking: the decision sheet (one row per distinct bug) + mark the run done.
   recorder.confirmDecisions(
-    rows.map((row) => ({ bug: row.bug, reproduced: row.reproduced, recommendation: row.recommendation, members: row.members })),
+    rows.map((row) => ({
+      bug: row.bug,
+      reproduced: row.reproduced,
+      recommendation: row.recommendation,
+      members: row.members,
+      distinctFix: row.distinctFix,
+      reproEvidence: row.reproEvidence,
+      corroboration: row.corroboration,
+      novelty: row.novelty,
+      humanGates: row.humanGates,
+      mergedFrom: row.mergedFrom,
+      reproCommandId: row.reproCommandId,
+      reportMarkdown: reportMarkdownForDecision(row, session.scratchFiles),
+    })),
     path.join(logger.runDir, "confirm_report.md"),
   );
   recorder.finish(options.signal?.aborted ? "killed" : "done");
@@ -319,16 +332,59 @@ function renderFileManifest(source: Doc[], corpusEntries: string[]): string {
 
 // Map the model's raw, mid-run decision rows to the minimal shape the tracker stores, for
 // LIVE reproduction progress. The end-of-run write replaces these with the consolidated set.
-function toLiveConfirmRows(raw: unknown[]): Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }> {
-  const rows: Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }> = [];
+function toLiveConfirmRows(raw: unknown[]): Array<{
+  bug: string;
+  reproduced?: string;
+  recommendation?: string;
+  members?: string[];
+  distinctFix?: string;
+  reproEvidence?: string;
+  corroboration?: string;
+  novelty?: string;
+  humanGates?: string;
+  reproCommandId?: string;
+}> {
+  const rows: Array<{
+    bug: string;
+    reproduced?: string;
+    recommendation?: string;
+    members?: string[];
+    distinctFix?: string;
+    reproEvidence?: string;
+    corroboration?: string;
+    novelty?: string;
+    humanGates?: string;
+    reproCommandId?: string;
+  }> = [];
   for (const entry of raw) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const obj = entry as Record<string, unknown>;
     if (typeof obj.bug !== "string" || !obj.bug.trim()) continue;
-    const row: { bug: string; reproduced?: string; recommendation?: string; members?: string[] } = { bug: obj.bug };
+    const row: {
+      bug: string;
+      reproduced?: string;
+      recommendation?: string;
+      members?: string[];
+      distinctFix?: string;
+      reproEvidence?: string;
+      corroboration?: string;
+      novelty?: string;
+      humanGates?: string;
+      reproCommandId?: string;
+    } = { bug: obj.bug };
     if (typeof obj.reproduced === "string") row.reproduced = obj.reproduced;
     if (typeof obj.recommendation === "string") row.recommendation = obj.recommendation;
     if (Array.isArray(obj.members)) row.members = obj.members.filter((m): m is string => typeof m === "string");
+    if (typeof obj.distinct_fix === "string") row.distinctFix = obj.distinct_fix;
+    else if (typeof obj.distinctFix === "string") row.distinctFix = obj.distinctFix;
+    if (typeof obj.repro_evidence === "string") row.reproEvidence = obj.repro_evidence;
+    else if (typeof obj.reproEvidence === "string") row.reproEvidence = obj.reproEvidence;
+    if (typeof obj.corroboration === "string") row.corroboration = obj.corroboration;
+    if (typeof obj.novelty === "string") row.novelty = obj.novelty;
+    if (typeof obj.human_gates === "string") row.humanGates = obj.human_gates;
+    else if (typeof obj.humanGates === "string") row.humanGates = obj.humanGates;
+    if (typeof obj.repro_command_id === "string") row.reproCommandId = obj.repro_command_id;
+    else if (typeof obj.reproCommandId === "string") row.reproCommandId = obj.reproCommandId;
     rows.push(row);
   }
   return rows;
@@ -378,6 +434,31 @@ function readConfirmDecision(session: AgentSession): ConfirmDecisionRow[] {
       ? ((raw as Record<string, unknown>).decisions as unknown[])
       : [];
   return items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)).map(normalizeDecisionRow);
+}
+
+function reportMarkdownForDecision(row: ConfirmDecisionRow, scratchFiles: Map<string, string>): string | undefined {
+  const names = new Set<string>();
+  for (const member of [...(row.members ?? []), ...(row.mergedFrom ?? [])]) {
+    const key = safeReportFileId(member);
+    if (key) names.add(`report_${key}.md`);
+  }
+  if (names.size === 0) names.add(`report_${safeReportFileId(row.bug)}.md`);
+  for (const wanted of names) {
+    const direct = scratchFiles.get(wanted);
+    if (direct?.trim()) return direct;
+    for (const [file, content] of scratchFiles) {
+      if (path.posix.basename(file) === wanted && content.trim()) return content;
+    }
+  }
+  return undefined;
+}
+
+function safeReportFileId(input: string): string {
+  return input
+    .toLowerCase()
+    .replace(/[^a-z0-9_.-]+/g, "-")
+    .replace(/^-+|-+$/g, "")
+    .slice(0, 100) || "finding";
 }
 
 function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow {

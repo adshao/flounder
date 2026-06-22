@@ -20,7 +20,7 @@ import { fileURLToPath } from "node:url";
 import { defaultOutputDir } from "../config.js";
 import { MetadataStore, type RunKind, type Coverage, type ProviderInput, type ProviderProfile, type ProjectInput, type ProviderRoles, type RoleOverride } from "../db/store.js";
 import { getProviders, getModels, getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
-import { type LaunchSpec, ActivityBus, type Activity } from "./run-manager.js";
+import { type LaunchSpec, ActivityBus, type Activity, type ReportFindingSpec } from "./run-manager.js";
 import { THINKING_LEVELS } from "../config.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { loadScopeInventory, saveScopeInventory } from "../agent/scope-store.js";
@@ -196,18 +196,18 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "POST", path: "/api/projects/:uuid/runs",
-    summary: "Queue a run on the project (start/continue an audit, restart, map, audit a region/scope, confirm, or prepare). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's Start/Continue/Restart/Run buttons.",
+    summary: "Queue a run on the project (start/continue an audit, restart, map, audit a region/scope, confirm, report, or prepare). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's Start/Continue/Restart/Run buttons.",
     params: { uuid: "project UUID" },
     body: {
-      verb: "'run' | 'map' | 'audit' | 'confirm' | 'prepare' (default 'run'; run = map→dig, resumes)",
+      verb: "'run' | 'map' | 'audit' | 'confirm' | 'report' | 'prepare' (default 'run'; run = map→dig, resumes)",
       remap: "boolean? — re-enumerate scopes (restart)", fresh: "boolean? — confirm: ignore a prior interrupted confirm",
       quick: "boolean? — run: single breadth pass", mockLlm: "boolean? — offline mock model",
       region: "string? — audit: pinned region e.g. src/Foo.sol:120-180", scope: "string? — audit: scope id(s)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution; project finding rows with id are linked back to that original row",
       scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run",
       maxScopes: "number? — one-off scope cap for this dig batch", mapSteps: "number? — one-off map turn cap", digSteps: "number? — one-off per-scope dig turn cap",
       maxSteps: "number? — one-off global turn cap", digSamples: "number? — one-off samples per scope", digConcurrency: "number? — one-off parallel scopes",
-      findingId: "number? — confirm: reproduce one pending audit-confirmed finding",
-      findingIds: "number[]? — confirm: reproduce selected pending audit-confirmed findings",
+      findingId: "number? — confirm/report: reproduce or report one selected finding",
+      findingIds: "number[]? — confirm/report: reproduce selected pending audit-confirmed findings, or generate formal reports for selected reproduced findings",
       inputRunDir: "string? — confirm: the finished run dir to reproduce",
       clue: "string? — prepare: the tx / address / project / link to acquire from",
       posture: "string? — prepare: 'blind' | 'informed'", matchDeployed: "boolean? — prepare: prove staged source matches the live deployment (default true)", endpoint: "string? — prepare: read-only access hint (e.g. RPC URL)",
@@ -1174,6 +1174,12 @@ async function runLaunch(c: Ctx): Promise<void> {
       spec.confirmKeys = pending.map((p) => p.finding_key);
     }
   }
+  if (spec.verb === "report") {
+    const selected = selectedFindingIds(body);
+    const reports = reportWorklist(c.store, Number(project.id), selected);
+    if (reports.error) return sendJson(c.res, 400, { error: reports.error });
+    spec.reportFindings = reports.findings;
+  }
   const daemonId = project.daemon_id != null ? Number(project.daemon_id) : undefined;
   const allowOfflineQueue = body.allowOfflineQueue === true;
   if (daemonId !== undefined && !allowOfflineQueue && !c.plane.hasDaemon(daemonId)) {
@@ -1199,6 +1205,39 @@ function selectedFindingIds(body: Record<string, unknown>): number[] {
     }
   }
   return [...ids];
+}
+
+function reportWorklist(store: MetadataStore, projectId: number, selectedIds: number[] = []): { findings: ReportFindingSpec[]; error?: undefined } | { findings?: undefined; error: string } {
+  const selected = selectedIds.length ? new Set(selectedIds) : undefined;
+  const rows = reportableFindings(store.listFindings(projectId)).filter((row) => {
+    if (selected && !selected.has(Number(row.id))) return false;
+    if (String(row.confirm_status ?? "") !== "reproduced") return false;
+    const decisions = store.listConfirmDecisionsForFinding(projectId, String(row.finding_key ?? ""));
+    return decisions.some((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop");
+  });
+  if (selected && rows.length !== selected.size) {
+    const found = new Set(rows.map((row) => Number(row.id)));
+    const missing = [...selected].filter((id) => !found.has(id));
+    return { error: `finding ${missing.join(", ")} is not reproduced on the real target, was dropped, or has no linked confirm decision` };
+  }
+  if (rows.length === 0) return { error: "no reproduced real-target findings are ready for formal reports" };
+  return {
+    findings: rows.map((row) => ({
+      findingId: Number(row.id),
+      findingKey: String(row.finding_key ?? ""),
+      title: stringValue(row.title),
+      location: stringValue(row.location) || undefined,
+      severity: stringValue(row.severity) || undefined,
+      status: stringValue(row.status) || undefined,
+      confirmStatus: stringValue(row.confirm_status) || undefined,
+      description: stringValue(row.description) || undefined,
+      evidence: stringValue(row.evidence) || undefined,
+      exploitSketch: stringValue(row.exploit_sketch) || undefined,
+      fix: stringValue(row.fix) || undefined,
+      confidence: Number.isFinite(Number(row.confidence)) ? Number(row.confidence) : undefined,
+      decisions: store.listConfirmDecisionsForFinding(projectId, String(row.finding_key ?? "")).filter((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop"),
+    })),
+  };
 }
 
 function applyPreparedWorkspaceIfNeeded(spec: LaunchSpec, runs: Array<Record<string, unknown>>): { ok: true } | { ok: false; error: string } {
@@ -1367,6 +1406,8 @@ function findingSummaryRow(row: Record<string, unknown>): Record<string, unknown
   ]) {
     if (key in row) out[key] = row[key];
   }
+  const reportMarkdown = stringValue(row.report_markdown).trimStart();
+  out.has_report = Boolean(reportMarkdown && !reportMarkdown.startsWith("# Security disclosure:"));
   return findingDisplayRow(out);
 }
 
@@ -1380,21 +1421,26 @@ function findingReport(c: Ctx): void {
   if (!row) return sendJson(c.res, 404, { error: "no such finding" });
   const display = findingDisplayRow(row);
   const stored = stringValue(display.report_markdown);
+  const projectId = Number(display.project_id);
+  const findingKey = stringValue(display.finding_key);
+  const decisions = Number.isFinite(projectId) && findingKey ? c.store.listConfirmDecisionsForFinding(projectId, findingKey) : [];
   sendJson(c.res, 200, {
-    markdown: stored || renderFindingReportMarkdown(display),
+    markdown: stored || renderFindingReportMarkdown(display, decisions),
     source: stored ? "db" : "generated",
   });
 }
 
-function renderFindingReportMarkdown(row: Record<string, unknown>): string {
+function renderFindingReportMarkdown(row: Record<string, unknown>, decisions: Array<Record<string, unknown>> = []): string {
   const title = stringValue(row.title) || "Finding report";
   const confidence = numberValue(row.confidence);
+  const primaryDecision = decisions[0];
   const lines = [
     `# ${title}`,
     "",
     `- Project: ${stringValue(row.project_name) || "unknown"}`,
     `- Status: ${stringValue(row.status) || "unknown"}`,
     stringValue(row.confirm_status) ? `- Real-target status: ${stringValue(row.confirm_status)}` : "",
+    primaryDecision ? `- Submit recommendation: ${stringValue(primaryDecision.recommendation) || "unknown"}` : "",
     stringValue(row.location) ? `- Location: \`${stringValue(row.location)}\`` : "",
     stringValue(row.severity) ? `- Severity: ${stringValue(row.severity)}` : "",
     confidence != null ? `- Confidence: ${Math.round(confidence * 100)}%` : "",
@@ -1408,6 +1454,26 @@ function renderFindingReportMarkdown(row: Record<string, unknown>): string {
   if (evidence) lines.push("## Evidence", "", "```", evidence, "```", "");
   if (exploit) lines.push("## Impact / Exploit", "", exploit, "");
   if (fix) lines.push("## Suggested Fix", "", fix, "");
+  if (primaryDecision) {
+    lines.push("## Real Target Decision", "");
+    lines.push(`- Reproduced: ${stringValue(primaryDecision.reproduced) || "unknown"}`);
+    lines.push(`- Recommendation: ${stringValue(primaryDecision.recommendation) || "unknown"}`);
+    const reproEvidence = stringValue(primaryDecision.repro_evidence);
+    const distinctFix = stringValue(primaryDecision.distinct_fix);
+    const commandId = stringValue(primaryDecision.repro_command_id);
+    const corroboration = stringValue(primaryDecision.corroboration);
+    const novelty = stringValue(primaryDecision.novelty);
+    const humanGates = stringValue(primaryDecision.human_gates);
+    if (commandId) lines.push(`- Command evidence: \`${commandId}\``);
+    if (reproEvidence) lines.push("", "### Reproduction Evidence", "", reproEvidence);
+    if (distinctFix) lines.push("", "### Distinct Fix", "", distinctFix);
+    if (corroboration || novelty || humanGates) {
+      lines.push("", "### Novelty and Disclosure Notes", "");
+      if (corroboration) lines.push(`- Corroboration: ${corroboration}`);
+      if (novelty) lines.push(`- Novelty: ${novelty}`);
+      if (humanGates) lines.push(`- Human gates: ${humanGates}`);
+    }
+  }
   return lines.join("\n").trim();
 }
 
@@ -1938,6 +2004,7 @@ async function daemonRunUpdate(c: Ctx): Promise<void> {
   const body = (await readBody(c.req)) as {
     scopes?: Parameters<MetadataStore["upsertScopes"]>[1];
     findings?: Parameters<MetadataStore["upsertFindings"]>[2];
+    findingReports?: Array<{ findingId?: number; markdown?: string }>;
     reason?: string;
     confirmDecisions?: Parameters<MetadataStore["upsertConfirmDecisions"]>[2];
     decisionPath?: string;
@@ -1952,6 +2019,13 @@ async function daemonRunUpdate(c: Ctx): Promise<void> {
   if (body.runScopes) c.store.updateRunScopes(runId, body.runScopes.done, body.runScopes.target);
   if (body.stage) c.store.recordStage(runId, body.stage.name, body.stage.info);
   if (body.findings) c.store.upsertFindings(projectId, runId, body.findings, body.reason);
+  if (body.findingReports) {
+    for (const report of body.findingReports) {
+      if (typeof report.findingId === "number" && typeof report.markdown === "string" && report.markdown.trim()) {
+        c.store.setFindingReport(projectId, report.findingId, report.markdown);
+      }
+    }
+  }
   if (body.confirmDecisions) c.store.upsertConfirmDecisions(projectId, runId, body.confirmDecisions, body.decisionPath);
   if (body.finish) c.store.finishRun(runId, body.finish.status, body.finish.coverage, body.finish.findingsTotal);
   c.store.touchJobByRun(runId);
@@ -2174,7 +2248,7 @@ function launchSpec(project: Record<string, unknown>, body: Record<string, unkno
   // the daemon against its workspace); dir defaults to the name.
   const verb = (typeof body.verb === "string" ? body.verb : "run") as RunKind;
   const phases = (merged.phases && typeof merged.phases === "object" ? merged.phases : {}) as Record<string, { model?: unknown; thinking?: unknown }>;
-  const primaryPhase = verb === "prepare" ? "prepare" : verb === "map" ? "map" : verb === "confirm" ? "confirm" : "dig";
+  const primaryPhase = verb === "prepare" ? "prepare" : verb === "map" ? "map" : verb === "confirm" || verb === "report" ? "confirm" : "dig";
   const phaseModel = (ph: string): string | undefined => str(phases[ph]?.model);
   const phaseThinking = (ph: string): string | undefined => str(phases[ph]?.thinking);
   const phaseProfile = (ph: "prepare" | "map" | "dig" | "confirm"): ProviderProfile | undefined => phaseProfiles[ph] ?? profile;

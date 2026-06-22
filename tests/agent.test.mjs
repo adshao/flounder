@@ -95,6 +95,11 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   assert.ok(preparePrompt.includes("stop once the sealed audit has enough neutral material"), "prepare needs explicit stop criteria");
   assert.ok(preparePrompt.includes("Do NOT audit yet"), "prepare should not spend the acquisition phase hunting bugs");
   assert.ok(preparePrompt.includes("leave all bug discovery to map/dig"), "prepare should preserve the blind audit boundary");
+
+  const reportPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", report: "[]" });
+  assert.ok(reportPrompt.includes("No-fabrication rule"), "report mode should prohibit unsupported report details");
+  assert.ok(reportPrompt.includes("checking any source/evidence needed for accuracy"), "report mode should verify code/evidence before writing");
+  assert.ok(reportPrompt.includes("If a detail is not established"), "report mode should surface evidence gaps instead of inventing details");
 });
 
 test("prepare manifest normalization turns ended in-progress manifests into terminal states", () => {

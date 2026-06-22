@@ -51,6 +51,8 @@ export async function runAuditSession(input: {
   synthesize?: string;
   /** Confirm mode: the open-world reproduce/consolidate/decide pass over a prior run's findings. */
   confirm?: string;
+  /** Report mode: generate formal submission reports from reproduced confirm decisions. */
+  report?: string;
   /** Prepare mode: the open-world acquire + mainnet-match phase (runs before map). Carries the clue + posture + match-mainnet constraint. */
   prepare?: string;
   /** Called each turn in confirm mode with the decision rows written so far (raw), so a
@@ -210,6 +212,18 @@ export async function runAuditSession(input: {
       await input.logger.event("audit_confirm_finalize_done", { hasDecision: hasScratch("confirm_decision.json") });
       return;
     }
+    if (input.report) {
+      if ([...input.ctx.session.scratchFiles.keys()].some((key) => /^report_[a-z0-9_.-]+\.md$/.test(key) || /\/report_[a-z0-9_.-]+\.md$/.test(key))) return;
+      finalizing = true;
+      await input.logger.event("audit_report_finalize", { reason: "no report markdown before stop" });
+      try {
+        await session.prompt(REPORT_FINALIZE_PROMPT);
+      } catch {
+        // best-effort
+      }
+      await input.logger.event("audit_report_finalize_done", { hasReport: [...input.ctx.session.scratchFiles.keys()].some((key) => /^report_[a-z0-9_.-]+\.md$/.test(key) || /\/report_[a-z0-9_.-]+\.md$/.test(key)) });
+      return;
+    }
     if (input.map) {
       if (readScratchScopes(input.ctx.session).length > 0) return;
       finalizing = true;
@@ -246,6 +260,7 @@ export async function runAuditSession(input: {
         ...(input.verify ? { verify: input.verify } : {}),
         ...(input.synthesize ? { synthesize: input.synthesize } : {}),
         ...(input.confirm ? { confirm: input.confirm } : {}),
+        ...(input.report ? { report: input.report } : {}),
         ...(input.prepare ? { prepare: input.prepare } : {}),
       }));
     } catch (error) {
@@ -328,11 +343,12 @@ export const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
   }),
 };
 
-export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; verify?: string; synthesize?: string; confirm?: string; prepare?: string }): string {
+export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; verify?: string; synthesize?: string; confirm?: string; report?: string; prepare?: string }): string {
   // Confirm is the open-world mode: it has its own white-hat line (fork/read live
   // networks OK, never broadcast), so it does NOT share the local-only scaffold below.
   if (input.prepare) return buildPrepareSessionPrompt({ prepare: input.prepare, fileManifest: input.fileManifest, ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   if (input.confirm) return buildConfirmSessionPrompt({ confirm: input.confirm, fileManifest: input.fileManifest, ...(input.scopeNote ? { scopeNote: input.scopeNote } : {}), ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
+  if (input.report) return buildReportSessionPrompt({ report: input.report, fileManifest: input.fileManifest, ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   const intro = input.synthesize ? synthesizeIntro(input.synthesize) : input.verify ? verifyIntro(input.verify) : input.map ? mapIntro() : input.deep ? deepIntro(input.deepFocus) : breadthIntro();
   const reportingBlock = input.map
     ? ""
@@ -426,6 +442,70 @@ Loaded source files:
 ${input.fileManifest}
 
 Consolidate the findings into distinct bugs, reproduce each distinct bug against real ground truth, check novelty/corroboration online (leads only, never proof), then write confirm_decision.json and emit done.`;
+}
+
+const REPORT_FINALIZE_PROMPT = `Your budget is spent. Do NOT inspect anything else. Based ONLY on the reproduced decision data, existing evidence, and source/code facts you already checked, WRITE the missing report_*.md files now at the workspace root. If a detail is not established, say "Not established by the available evidence" or list it as a human gate. Do NOT invent impact, versions, exploitability, affected deployments, novelty, or fix validation. After writing the reports, emit {"done": true}. Output only write tool calls followed by done.`;
+
+function buildReportSessionPrompt(input: { report: string; fileManifest: string; memoryHint?: string }): string {
+  return `You are the REPORT phase of Flounder, an autonomous white-hat security auditor.
+
+Your job is to produce formal, submission-ready Markdown reports for already reproduced bugs. You are NOT discovering new bugs, NOT upgrading suspected claims, and NOT changing confirm decisions. You may read the copied source, official docs/corpus, existing PoC files, and decision evidence to verify exact details before writing. You may run inspect-only commands when needed to check paths, code snippets, versions, or artifact contents. Do not rerun live exploits, do not broadcast, and do not write to live systems.
+
+No-fabrication rule: every concrete statement in the report must be supported by one of:
+- the reproduced confirm decision supplied below;
+- the finding's stored evidence;
+- source/corpus lines you read in this report run;
+- command output you produced in this report run.
+If a detail is not established, write that it is not established or list it under human gates. Never fill gaps with plausible security-report language.
+
+Write exactly one Markdown file per requested bug at the specified workspace-root filename. These files are persisted to the product DB and shown to users as the official report. Do not emit done until every required file is written.
+
+Use this template for each file:
+# <clear vulnerability title>
+
+## Summary
+One concise paragraph explaining the bug and the violated security property.
+
+## Severity
+Severity, rationale, affected asset or trust boundary, and confidence. Do not invent CVSS; include it only if justified.
+
+## Affected Component
+Repository/package/component, version/commit/deployment if known, and code locations. Use relative paths, contract names, package names, command ids, or public URLs. Do not include local absolute paths.
+
+## Root Cause
+The exact missing check, invalid assumption, state transition, proof constraint, verifier binding, or authorization error that makes the bug possible.
+
+## Attack Scenario
+Step-by-step attacker capabilities and exploit path, written for maintainers. Avoid live-network abuse instructions.
+
+## Impact
+Concrete effect and harmed parties/assets, tied to reproduced observable evidence.
+
+## Reproduction Evidence
+The real-target reproduction result, observed effect, command_id, and artifacts. Say whether reproduction used a fork, published package, real verifier, deployed bytecode, or another real-world ground truth.
+
+## Proof of Concept
+Minimal local-only reproduction steps or code pointers sufficient for the maintainer to reproduce. Never include commands that broadcast to or write to live systems.
+
+## Recommended Fix
+Specific remediation guidance and any tested patch result. If a fix was not tested, say so.
+
+## Validation
+How maintainers should verify the fix and what regression test should be added.
+
+## Novelty and Disclosure Notes
+Corroboration, novelty result, remaining human gates, scope/venue notes, and recommended next action.
+
+Reports to write:
+${input.report}
+
+Durable memory from prior runs of this target:
+${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim() : "(empty)"}
+
+Loaded source files:
+${input.fileManifest}
+
+Begin by checking any source/evidence needed for accuracy, then write every required report_*.md file and emit done.`;
 }
 
 function verifyIntro(claim: string): string {

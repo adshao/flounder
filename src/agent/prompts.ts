@@ -387,6 +387,44 @@ Write confirm_decision.json INCREMENTALLY — add or update each bug's row as so
 If the task lists ALREADY-SETTLED rows (a prior interrupted run), copy each into confirm_decision.json UNCHANGED and do NOT re-reproduce that bug — work only the findings not yet settled. This is how an interrupted confirm resumes.
 Supply repro_command_id + fix_patch + patched_success_patterns whenever a row's PoC is a source-level test with a fix: the framework then runs a fix-equivalence matrix over your rows — it applies one row's fix to the pristine source and re-runs another row's PoC — and MERGES any rows a single fix neutralizes, so "distinct bugs" is decided by execution, not by your grouping alone. Rows without these fields are left exactly as you wrote them (the framework cannot machine-verify their separation).
 
+Formal submission reports — for every row with "reproduced":"yes" and recommendation "submit-candidate" or "needs-human", also write ONE Markdown report at the workspace root named report_<first member id>.md, where <first member id> is the first value in members lowercased and sanitized to [a-z0-9_.-]. This file is the user-facing, submission-ready report for that single distinct bug. Do not emit done until confirm_decision.json and the required report_*.md files are written.
+
+Use this report template exactly, but fill it with target-specific content and concise evidence:
+# <clear vulnerability title>
+
+## Summary
+One short paragraph explaining the bug and affected security property.
+
+## Severity
+Severity, rationale, and affected asset or trust boundary. Do not invent CVSS; include it only if you can justify every vector.
+
+## Affected Component
+Repository/package/component, version/commit/deployment if known, and code locations. Use relative paths, contract names, package names, command ids, or public URLs. Do not include local absolute paths.
+
+## Root Cause
+The exact missing check, invalid assumption, state transition, proof constraint, verifier binding, or authorization error that makes the bug possible.
+
+## Attack Scenario
+Step-by-step attacker capabilities and exploit path. Keep it actionable for maintainers without adding live-network abuse instructions.
+
+## Impact
+Concrete effect and who can be harmed. Tie the impact to the reproduced observable, not speculation.
+
+## Reproduction Evidence
+The real-target reproduction result, observed effect, command_id, and any local fork/test artifacts. State whether reproduction used a fork, published package, real verifier, real deployed bytecode, or another real-world ground truth.
+
+## Proof of Concept
+Minimal local-only reproduction steps or code pointers sufficient for the maintainer to reproduce. Never include commands that broadcast to or write to live systems.
+
+## Recommended Fix
+Specific remediation guidance and any tested patch result. If you used fix_patch, explain why it blocks the PoC.
+
+## Validation
+How to verify the fix and what regression test should be added.
+
+## Novelty and Disclosure Notes
+Corroboration, novelty check result, remaining human gates, scope/venue notes, and recommended next action.
+
 White-hat boundaries (non-negotiable):
 - You MAY read from and fork live networks/data to reproduce LOCALLY. You MUST NOT broadcast/submit/relay/publish any transaction, move funds, or write to any live network or third-party system. Fork and read; replay only against a LOCAL fork; never push to a live system.
 - Do not weaponize beyond a local proof, exfiltrate data, or read secrets you were not given. Reproduce and decide; do not act on the exploit against anyone's live system.`;
@@ -401,7 +439,7 @@ export function buildConfirmKickoff(input: {
   confirm: string;
 }): string {
   return `Target: ${input.target}
-Mode: CONFIRM — take the prior audit's confirmed findings to a real-world standard by EXECUTION, then write the decision sheet. ${actionBudgetText(input.maxSteps)}. The network is available; reproduce on real ground truth, never broadcast.
+Mode: CONFIRM — take the prior audit's confirmed findings to a real-world standard by EXECUTION, then write the decision sheet and one formal report per reproduced submit candidate. ${actionBudgetText(input.maxSteps)}. The network is available; reproduce on real ground truth, never broadcast.
 
 The prior audit's confirmed findings (frozen; reproduce/consolidate these — do NOT discover new ones):
 ${input.confirm}
@@ -420,7 +458,7 @@ ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim
 Loaded source files:
 ${input.fileManifest}
 
-Consolidate the findings into distinct bugs, reproduce each distinct bug against real ground truth, check novelty/corroboration online (leads only), then write confirm_decision.json and emit done. Respond with one JSON tool action or done object.`;
+Consolidate the findings into distinct bugs, reproduce each distinct bug against real ground truth, check novelty/corroboration online (leads only), then write confirm_decision.json plus the required report_*.md files before emitting done. Respond with one JSON tool action or done object.`;
 }
 
 export function buildAuditKickoff(input: {

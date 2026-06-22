@@ -517,7 +517,11 @@ function commandOutputPreview(result: ReproductionCommandResult): string {
 
 /** Report files the framework reads back from the workspace. */
 export function isReportFile(normalizedPath: string): boolean {
-  return normalizedPath === "findings.json" || normalizedPath === "scopes.json" || normalizedPath === "prepare_manifest.json" || normalizedPath === "confirm_decision.json";
+  return normalizedPath === "findings.json"
+    || normalizedPath === "scopes.json"
+    || normalizedPath === "prepare_manifest.json"
+    || normalizedPath === "confirm_decision.json"
+    || /^report_[a-z0-9_.-]+\.md$/.test(normalizedPath);
 }
 
 /** True when the path is part of the pristine target source the model may not modify. */

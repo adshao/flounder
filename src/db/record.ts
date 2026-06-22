@@ -21,6 +21,19 @@ export interface ConfirmDecisionInput {
   reproduced?: string | undefined;
   recommendation?: string | undefined;
   members?: string[] | undefined;
+  distinctFix?: string | undefined;
+  reproEvidence?: string | undefined;
+  corroboration?: string | undefined;
+  novelty?: string | undefined;
+  humanGates?: string | undefined;
+  mergedFrom?: string[] | undefined;
+  reproCommandId?: string | undefined;
+  reportMarkdown?: string | undefined;
+}
+
+export interface FindingReportInput {
+  findingId: number;
+  markdown: string;
 }
 
 // What runAudit/runConfirm need to report a run's progress. The default impl (RunRecorder)
@@ -35,6 +48,7 @@ export interface RunTracker {
   /** Record one post-dig stage's outcome (synthesis / differential / refutation / discharge-challenge). */
   stage(name: string, info: Record<string, unknown>): void;
   confirmDecisions(rows: ConfirmDecisionInput[], decisionPath?: string): void;
+  findingReports(reports: FindingReportInput[]): void;
   finish(status: RunStatus, coverage?: Coverage, findingsTotal?: number): void;
 }
 
@@ -129,12 +143,23 @@ export class RunRecorder implements RunTracker {
     }
   }
 
-  confirmDecisions(rows: Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }>, decisionPath?: string): void {
+  confirmDecisions(rows: ConfirmDecisionInput[], decisionPath?: string): void {
     if (!this.ready() || rows.length === 0) return;
     try {
       this.store!.upsertConfirmDecisions(this.projectId!, this.runId!, rows, decisionPath);
     } catch (error) {
       this.disable("confirm-decisions", error);
+    }
+  }
+
+  findingReports(reports: FindingReportInput[]): void {
+    if (!this.ready() || reports.length === 0) return;
+    try {
+      for (const report of reports) {
+        this.store!.setFindingReport(this.projectId!, report.findingId, report.markdown);
+      }
+    } catch (error) {
+      this.disable("finding-reports", error);
     }
   }
 

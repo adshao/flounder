@@ -44,7 +44,7 @@ export class ActivityBus {
 }
 
 export interface LaunchSpec {
-  verb: RunKind; // run | map | audit | confirm (verify is an audit selector)
+  verb: RunKind; // run | map | audit | confirm | report (verify is an audit selector)
   target: string;
   sourcePaths: string[];
   buildRoot?: string | undefined;
@@ -63,6 +63,7 @@ export interface LaunchSpec {
   inputRunDir?: string | undefined; // confirm: the finished run dir to reproduce
   inputRunDirs?: string[] | undefined; // confirm (aggregate): several run dirs whose confirmed findings are unioned + reproduced together
   confirmKeys?: string[] | undefined; // confirm: restrict the work list to these finding content keys (the pending/target set the control plane resolved from finding status)
+  reportFindings?: ReportFindingSpec[] | undefined; // report: confirmed/reproduced bugs to package as formal Markdown reports
   region?: string | undefined; // audit: a pinned region
   scope?: string | undefined; // audit: scope id[,id...]
   verifyFindings?: unknown; // audit: inline suspected finding(s) to confirm-or-refute (the --verify file's contents, carried inline so a remote daemon needs no local file)
@@ -83,6 +84,22 @@ export interface LaunchSpec {
   sandboxMemoryMb?: number | undefined;
   sandboxCpus?: number | undefined;
   out?: string | undefined;
+}
+
+export interface ReportFindingSpec {
+  findingId: number;
+  findingKey: string;
+  title: string;
+  location?: string | undefined;
+  severity?: string | undefined;
+  status?: string | undefined;
+  confirmStatus?: string | undefined;
+  description?: string | undefined;
+  evidence?: string | undefined;
+  exploitSketch?: string | undefined;
+  fix?: string | undefined;
+  confidence?: number | undefined;
+  decisions?: Array<Record<string, unknown>> | undefined;
 }
 
 // Translate a launch spec into an AuditorConfig — the daemon's equivalent of the CLI's
@@ -119,7 +136,7 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   if (spec.remap) cfg.auditRemap = true; // re-enumerate scopes from scratch (restart)
   // prepare + confirm derive their own posture from their options (clue / prior run), not from
   // the sealed audit's map/dig flags — return the base cfg (provider/model/out/target) as-is.
-  if (spec.verb === "prepare" || spec.verb === "confirm") return cfg;
+  if (spec.verb === "prepare" || spec.verb === "confirm" || spec.verb === "report") return cfg;
   // The scope-focus prior only applies to the map/dig phases (prepare/confirm returned above and
   // don't consume it). From prepare's manifest or --scope-note.
   if (spec.scopeNote && spec.scopeNote.trim()) cfg.auditScopeNote = spec.scopeNote.trim();

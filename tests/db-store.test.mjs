@@ -257,3 +257,42 @@ test("store: confirm decisions are replaced per run, not duplicated", async () =
   assert.equal(db.listConfirmDecisions(projectId).length, 1);
   db.close();
 });
+
+test("store: confirm decisions persist formal reports for linked findings", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const auditRun = db.startRun({ projectId, kind: "run", runDir: "/runs/p-audit-1" });
+  db.upsertFindings(projectId, auditRun, [
+    {
+      findingKey: "kabc123",
+      title: "Missing verifier binding",
+      severity: "high",
+      status: "confirmed-executable",
+      description: "The verifier accepts an unbound value.",
+    },
+  ]);
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/p-confirm-1" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [
+    {
+      bug: "Missing verifier binding",
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      members: ["kabc123"],
+      reproEvidence: "purpose=confirm command cmd_1 reproduced the real target effect",
+      reproCommandId: "cmd_1",
+      novelty: "novel",
+      humanGates: "venue scope still needs human review",
+      reportMarkdown: "# Missing verifier binding\n\n## Summary\nFormal report.",
+    },
+  ]);
+
+  const [finding] = db.listFindings(projectId);
+  assert.equal(finding.confirm_status, "reproduced");
+  assert.match(finding.report_markdown, /^# Missing verifier binding/);
+  const [decision] = db.listConfirmDecisionsForFinding(projectId, "kabc123");
+  assert.equal(decision.repro_evidence, "purpose=confirm command cmd_1 reproduced the real target effect");
+  assert.equal(decision.repro_command_id, "cmd_1");
+  assert.equal(decision.novelty, "novel");
+  assert.equal(decision.human_gates, "venue scope still needs human review");
+  db.close();
+});

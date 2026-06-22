@@ -20,7 +20,7 @@ import path from "node:path";
 // module evaluation (after the static sqlite-quiet import has run) lets the filter catch it.
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 
-export type RunKind = "run" | "map" | "audit" | "verify" | "confirm" | "prepare";
+export type RunKind = "run" | "map" | "audit" | "verify" | "confirm" | "prepare" | "report";
 export type RunStatus = "running" | "done" | "error" | "killed";
 export type ScopeStatus = "pending" | "audited" | "deferred" | "auditing";
 export type FindingStatus = "suspected" | "discharged" | "confirmed-executable" | "confirmed-differential" | "refuted";
@@ -85,6 +85,14 @@ export interface ConfirmRow {
   recommendation?: string | undefined;
   members?: string[] | undefined;
   decisionPath?: string | undefined;
+  distinctFix?: string | undefined;
+  reproEvidence?: string | undefined;
+  corroboration?: string | undefined;
+  novelty?: string | undefined;
+  humanGates?: string | undefined;
+  mergedFrom?: string[] | undefined;
+  reproCommandId?: string | undefined;
+  reportMarkdown?: string | undefined;
 }
 
 export interface Coverage {
@@ -234,6 +242,13 @@ CREATE TABLE IF NOT EXISTS confirm_decision(
   reproduced TEXT,
   recommendation TEXT,
   members_json TEXT,
+  distinct_fix TEXT,
+  repro_evidence TEXT,
+  corroboration TEXT,
+  novelty TEXT,
+  human_gates TEXT,
+  merged_from_json TEXT,
+  repro_command_id TEXT,
   decision_path TEXT,
   created_at TEXT NOT NULL
 );
@@ -333,6 +348,13 @@ export class MetadataStore {
       "ALTER TABLE finding ADD COLUMN fix TEXT",
       "ALTER TABLE finding ADD COLUMN confidence REAL",
       "ALTER TABLE run ADD COLUMN stages_json TEXT", // funnel: post-dig stage outcomes
+      "ALTER TABLE confirm_decision ADD COLUMN distinct_fix TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN repro_evidence TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN corroboration TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN novelty TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN human_gates TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN merged_from_json TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN repro_command_id TEXT",
     ]) {
       try {
         this.db.exec(alter);
@@ -793,6 +815,12 @@ export class MetadataStore {
     return this.db.prepare("UPDATE finding SET tracking_status = ? WHERE id = ?").run(status || null, id).changes > 0;
   }
 
+  /** Persist a user-facing formal report for one finding. The project id guard preserves
+   * server/daemon separation: a daemon can only update findings for the run's project. */
+  setFindingReport(projectId: number, findingId: number, markdown: string): boolean {
+    return this.db.prepare("UPDATE finding SET report_markdown = ?, updated_at = ? WHERE project_id = ? AND id = ?").run(markdown, now(), projectId, findingId).changes > 0;
+  }
+
   // --- per-finding confirm (real-target reproduction) -----------------------
 
   /** The project's findings that are confirmed by the audit (source-level) but NOT yet decided on
@@ -865,8 +893,10 @@ export class MetadataStore {
       // a confirm run's decision sheet is rewritten wholesale, so replace its rows
       this.db.prepare("DELETE FROM confirm_decision WHERE run_id = ?").run(runId);
       const stmt = this.db.prepare(
-        `INSERT INTO confirm_decision(project_id, run_id, bug, reproduced, recommendation, members_json, decision_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO confirm_decision(project_id, run_id, bug, reproduced, recommendation, members_json,
+          distinct_fix, repro_evidence, corroboration, novelty, human_gates, merged_from_json,
+          repro_command_id, decision_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const ts = now();
       // The confirm work-list ids ARE finding content keys, so a decision's members map straight
@@ -874,16 +904,46 @@ export class MetadataStore {
       // confirm_status (reproduced -> reproduced, settled-but-not -> not-reproduced). This is what
       // makes confirm finding-grained + resumable (a later confirm skips non-NULL confirm_status).
       const setConfirm = this.db.prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND finding_key = ?");
+      const setReport = this.db.prepare("UPDATE finding SET report_markdown = COALESCE(NULLIF(?, ''), report_markdown) WHERE project_id = ? AND finding_key = ?");
       for (const r of rows) {
-        stmt.run(projectId, runId, r.bug, r.reproduced ?? null, r.recommendation ?? null, jsonOrNull(r.members), r.decisionPath ?? decisionPath ?? null, ts);
+        stmt.run(
+          projectId,
+          runId,
+          r.bug,
+          r.reproduced ?? null,
+          r.recommendation ?? null,
+          jsonOrNull(r.members),
+          r.distinctFix ?? null,
+          r.reproEvidence ?? null,
+          r.corroboration ?? null,
+          r.novelty ?? null,
+          r.humanGates ?? null,
+          jsonOrNull(r.mergedFrom),
+          r.reproCommandId ?? null,
+          r.decisionPath ?? decisionPath ?? null,
+          ts,
+        );
         const outcome = r.reproduced === "yes" ? "reproduced" : r.reproduced === "no" ? "not-reproduced" : null;
-        if (outcome) for (const member of r.members ?? []) for (const key of confirmMemberKeys(member)) setConfirm.run(outcome, projectId, key);
+        for (const member of r.members ?? []) {
+          for (const key of confirmMemberKeys(member)) {
+            if (outcome) setConfirm.run(outcome, projectId, key);
+            if (r.reportMarkdown) setReport.run(r.reportMarkdown, projectId, key);
+          }
+        }
       }
     });
   }
 
   listConfirmDecisions(projectId: number): Array<Record<string, unknown>> {
     return this.db.prepare("SELECT * FROM confirm_decision WHERE project_id = ? ORDER BY created_at DESC").all(projectId) as Array<Record<string, unknown>>;
+  }
+
+  listConfirmDecisionsForFinding(projectId: number, findingKey: string): Array<Record<string, unknown>> {
+    const key = findingKey.toLowerCase();
+    return this.listConfirmDecisions(projectId).filter((row) => {
+      const members = parseJsonArray(row.members_json);
+      return members.some((member) => confirmMemberKeys(String(member)).some((candidate) => candidate.toLowerCase() === key));
+    });
   }
 
   /** Count bugs that actually reproduced on the real target (confirm's real output). */
@@ -1125,6 +1185,13 @@ function jsonParseOrNull(value: string): unknown {
   } catch {
     return null;
   }
+}
+
+function parseJsonArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  const parsed = jsonParseOrNull(value);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function toProviderProfile(row: Record<string, unknown>): ProviderProfile {
