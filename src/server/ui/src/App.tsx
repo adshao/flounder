@@ -432,6 +432,13 @@ function shortCommand(command: string): string {
   return head.length < normalized.length ? `${head} ...\n${normalized}` : normalized;
 }
 
+function looksLikeSourcePath(value: string): boolean {
+  const trimmed = value.trim();
+  if (!trimmed || /\s/.test(trimmed)) return false;
+  if (/^(source|sources|docs|corpus|verified-sources|deployed-source|provenance)\//.test(trimmed)) return true;
+  return /\/[^/]+\.(sol|nr|ts|tsx|js|jsx|rs|go|py|cpp|hpp|h|c|md|json|toml|yaml|yml)$/i.test(trimmed);
+}
+
 function actionSummary(detail: string): { label: string; body: string } {
   const value = detail.trim();
   const readMatch = value.match(/^(.+?):(\d+)(?:-(\d+))?$/);
@@ -443,6 +450,9 @@ function actionSummary(detail: string): { label: string; body: string } {
       label: "Reading source",
       body: `${displayPath(file)}:${start}${end ? `-${end}` : ""}`,
     };
+  }
+  if (looksLikeSourcePath(value)) {
+    return { label: "Reading source", body: displayPath(value, 4) };
   }
   if (/^(rg|grep|find|ls|cat|sed|awk|head|tail|tree|npm|pnpm|yarn|bun|npx|forge|cargo|go|python\d*|pytest|uv|node|git|jq)\b/.test(value)) {
     return { label: commandLabel(value), body: shortCommand(value) };
