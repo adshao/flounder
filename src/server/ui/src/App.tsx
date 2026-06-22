@@ -601,7 +601,12 @@ function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): Activ
           : event.kind;
     const label = activityEventLabel(event.kind);
     const action = event.kind === "audit_action" ? actionSummary(body) : undefined;
-    const normalizedBody = event.kind === "audit_command_run" ? commandRunSummary(body) : action?.body ?? body;
+    const actionFailed = event.kind === "audit_action" && event.ok === false;
+    const normalizedBody = event.kind === "audit_command_run"
+      ? commandRunSummary(body)
+      : actionFailed
+        ? [action?.body ?? body, typeof event.result === "string" ? event.result : undefined].filter(Boolean).join("\n")
+        : action?.body ?? body;
     if (event.kind === "audit_thinking" && last?.kind === "thinking" && now - last.time <= STREAM_MERGE_WINDOW_MS) {
       next[next.length - 1] = { ...last, body: normalizeActivityBody(normalizedBody), time: now };
       return next.slice(-60);
@@ -613,7 +618,7 @@ function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): Activ
     next.push({
       id: now + next.length,
       kind: event.kind === "audit_thinking" ? "thinking" : "event",
-      label: action?.label ?? label,
+      label: actionFailed ? "Action blocked" : action?.label ?? label,
       body: normalizeActivityBody(normalizedBody),
       time: now,
     });

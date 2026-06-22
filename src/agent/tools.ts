@@ -137,14 +137,15 @@ export function buildTools(): AgentTool[] {
  * instead of "bash step 36". */
 export function describeAction(tool: string, args: Record<string, unknown>, observation?: string): { detail: string; ok: boolean; result: string } {
   const s = (v: unknown): string => (v == null ? "" : String(v));
+  const safePath = (v: unknown): string => normalizeToolPath(v) ?? "[outside workspace]";
   let detail = "";
   if (tool === "bash") detail = s(args.cmd ?? args.command).replace(/\s+/g, " ").trim();
-  else if (tool === "read") detail = s(args.path) + (args.start ? ":" + s(args.start) + (args.end ? "-" + s(args.end) : "") : "");
-  else if (tool === "write" || tool === "edit") detail = s(args.path);
+  else if (tool === "read") detail = safePath(args.path) + (args.start ? ":" + s(args.start) + (args.end ? "-" + s(args.end) : "") : "");
+  else if (tool === "write" || tool === "edit") detail = safePath(args.path);
   else { const k = Object.keys(args)[0]; detail = k ? k + "=" + s(args[k]).replace(/\s+/g, " ").slice(0, 48) : ""; }
   const obs = s(observation).trim();
   const firstLine = obs.split("\n").find((l) => l.trim()) ?? "";
-  return { detail: detail.slice(0, 200), ok: !/^error\b/i.test(obs), result: firstLine.slice(0, 100) };
+  return { detail: detail.slice(0, 200), ok: !/^(error|blocked)\b/i.test(obs), result: firstLine.slice(0, 100) };
 }
 
 /** Render the tool catalogue for the system prompt. */
@@ -236,6 +237,7 @@ const readTool: AgentTool = {
   async run(args, ctx) {
     const target = asString(args.path);
     if (!target) return { observation: 'error: "path" is required' };
+    if (!normalizeToolPath(target)) return { observation: 'error: "path" must be a safe relative path.' };
     const readable = await findReadable(ctx, target);
     if (!readable) return { observation: `error: no loaded or sandbox file matches "${target}". Use bash with ls/find/rg to inspect the copied workspace.` };
     const allLines = readable.content.split(/\r?\n/);
@@ -285,6 +287,7 @@ const editTool: AgentTool = {
   async run(args, ctx) {
     const target = asString(args.path);
     if (!target) return { observation: 'error: "path" is required.' };
+    if (!normalizeToolPath(target)) return { observation: 'error: "path" must be a safe relative path.' };
     const oldText = typeof args.old === "string" ? args.old : undefined;
     const newText = typeof args.new === "string" ? args.new : undefined;
     if (oldText === undefined || newText === undefined || oldText.length === 0) return { observation: 'error: "old" and "new" strings are required, and "old" must be non-empty.' };
@@ -434,12 +437,13 @@ async function ensureWorkspace(ctx: ToolContext): Promise<SandboxWorkspace | und
 
 async function findReadable(ctx: ToolContext, target: string): Promise<{ path: string; content: string; kind: string } | undefined> {
   const normalized = normalizeToolPath(target);
-  if (normalized && ctx.session.scratchFiles.has(normalized)) {
+  if (!normalized) return undefined;
+  if (ctx.session.scratchFiles.has(normalized)) {
     return { path: normalized, content: ctx.session.scratchFiles.get(normalized) as string, kind: "scratch" };
   }
-  const workspaceContent = await readWorkspaceCandidate(ctx, target);
+  const workspaceContent = await readWorkspaceCandidate(ctx, normalized);
   if (workspaceContent) return { ...workspaceContent, kind: "sandbox" };
-  const doc = findDoc(ctx, target);
+  const doc = findDoc(ctx, normalized);
   if (doc) return { path: doc.path, content: doc.content, kind: doc.kind };
   return undefined;
 }
@@ -472,11 +476,13 @@ function workspacePathCandidates(ctx: ToolContext, target: string): string[] {
 }
 
 function findDoc(ctx: ToolContext, target: string): Doc | undefined {
+  const normalized = normalizeToolPath(target);
+  if (!normalized) return undefined;
   const all = [...ctx.source, ...ctx.corpus];
   return (
-    all.find((doc) => doc.path === target) ??
-    all.find((doc) => doc.path.endsWith(`/${target}`) || doc.path.endsWith(target)) ??
-    all.find((doc) => doc.path.includes(target))
+    all.find((doc) => doc.path === normalized) ??
+    all.find((doc) => doc.path.endsWith(`/${normalized}`) || doc.path.endsWith(normalized)) ??
+    all.find((doc) => doc.path.includes(normalized))
   );
 }
 

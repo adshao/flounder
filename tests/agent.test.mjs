@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
-import { buildTools, ingestFindingsFromScratch, newSession, dedupeFindings } from "../dist/agent/tools.js";
+import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings } from "../dist/agent/tools.js";
 import { runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
@@ -231,6 +231,30 @@ test("read, write, edit, and bash operate on loaded material and the copied work
     assert.match(run.observation, /CONFIRMATION-ELIGIBLE PASS/);
     assert.equal(ctx.session.commandRuns.length, 1);
     assert.equal(ctx.session.commandRuns[0].passed, true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("read and activity summaries do not expose or resolve host absolute paths", async () => {
+  const dir = await tempDir();
+  const hostPath = "/opt/private/flounder/SKILL.md";
+  try {
+    const cfg = defaultConfig();
+    cfg.sourcePaths = [fixtures];
+    const logger = await tempLogger(dir);
+    const source = [{ path: hostPath, kind: "source", content: "host-only content\n" }];
+    const ctx = { cfg, source, corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session: newSession() };
+
+    const read = await tool("read").run({ path: hostPath, start: 1, end: 1 }, ctx);
+    assert.match(read.observation, /safe relative path/);
+    assert.doesNotMatch(read.observation, /opt\/private/);
+    assert.doesNotMatch(read.observation, /host-only content/);
+
+    const summary = describeAction("read", { path: hostPath, start: 1, end: 1 }, read.observation);
+    assert.equal(summary.ok, false);
+    assert.equal(summary.detail, "[outside workspace]:1-1");
+    assert.doesNotMatch(summary.result, /opt\/private/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
