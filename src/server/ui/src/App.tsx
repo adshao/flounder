@@ -366,6 +366,13 @@ function verifyButtonTitle(count: number): string {
     : "No suspected or source-confirmed candidates are waiting for execution verification.";
 }
 
+function confirmButtonTitle(count: number, locallyVerified: number, launchLocked: boolean): string {
+  if (launchLocked) return "A run is already active for this project.";
+  if (count > 0) return `Reproduce ${plural(count, "finding")} on the real target.`;
+  if (locallyVerified > 0) return "All locally confirmed findings already have real-target decisions.";
+  return "Confirm becomes available after local verification produces an execution-confirmed finding.";
+}
+
 function verifyStatusSummary(rows: FindingRow[] | undefined): string {
   const passed = localVerifiedFindings(rows).length;
   const pending = (rows ?? []).filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
@@ -1443,9 +1450,11 @@ function ProjectDetailView(props: {
   const runningRun = detail.runs.find((run) => run.status === "running");
   const pendingConfirm = pendingConfirmFindings(detail.allFindings).length;
   const pendingVerify = verifyCandidates.length;
+  const locallyVerified = localVerifiedFindings(detail.allFindings).length;
   const localVerifySummary = verifyStatusSummary(detail.allFindings);
   const setupAttention = prepareMaterialsAttention(detail.prepareSummary);
   const launchLocked = props.busy || Boolean(runningRun);
+  const confirmTitle = confirmButtonTitle(pendingConfirm, locallyVerified, launchLocked);
   const requiredProviders = requiredProviderProfiles(detail, providers);
   const authStatuses = requiredProviders.map((profile) => ({ profile, status: daemonHasProvider(selectedDaemon, profile.provider) }));
   const authUnknown = authStatuses.some((entry) => entry.status === null);
@@ -1538,8 +1547,8 @@ function ProjectDetailView(props: {
             <Button
               icon="shieldcheck"
               disabled={launchLocked || pendingConfirm === 0}
-              title={pendingConfirm === 0 ? "Confirm becomes available after dig produces an audit-confirmed finding." : "Reproduce audit-confirmed findings on the real target."}
-              aria-label={pendingConfirm > 0 ? `Confirm ${plural(pendingConfirm, "finding")} on the real target.` : "Confirm becomes available after dig produces an audit-confirmed finding."}
+              title={confirmTitle}
+              aria-label={confirmTitle}
               onClick={() => props.onLaunch("confirm")}
             >
               {pendingConfirm > 0 ? `Confirm (${pendingConfirm})` : "Confirm"}
