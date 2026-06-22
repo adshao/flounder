@@ -1397,6 +1397,7 @@ small {
 
 .state.running { color: var(--accent); background: var(--sel-bg); border-color: transparent; }
 .state.done { color: var(--success); background: color-mix(in srgb, var(--success) 14%, transparent); border-color: transparent; }
+.state.partial { color: var(--warning); background: color-mix(in srgb, var(--warning) 13%, transparent); border-color: transparent; }
 .state.error, .state.killed { color: var(--danger); background: color-mix(in srgb, var(--danger) 12%, transparent); border-color: transparent; }
 .state.none { color: var(--fg-muted); background: var(--canvas-inset); border-color: transparent; }
 

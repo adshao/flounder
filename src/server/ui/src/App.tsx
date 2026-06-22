@@ -280,6 +280,16 @@ function topCandidateFindings(rows: FindingRow[] | undefined): FindingRow[] {
     .slice(0, 8);
 }
 
+function projectBadgeStatus(project: ProjectSnapshot): string | null | undefined {
+  const latest = project.latestRun?.status;
+  if ((project.activeRuns ?? 0) > 0 || latest === "running") return "running";
+  if (latest === "error" || latest === "killed") return latest;
+  const total = project.progress?.total ?? 0;
+  const pending = project.progress?.pending ?? 0;
+  if (total > 0 && pending > 0) return "partial";
+  return latest;
+}
+
 function phaseLabel(phase: "prepare" | "map" | "dig" | "confirm"): string {
   return {
     prepare: "Prepare",
@@ -1345,7 +1355,7 @@ function ProjectSidebar({ projects, selected, onSelect, onNew }: { projects: Pro
             >
               <span className="project-row-top">
                 <span className="project-name">{shortName(project.name, 31)}</span>
-                <StateBadge status={project.latestRun?.status} />
+                <StateBadge status={projectBadgeStatus(project)} />
               </span>
               <ProjectProgress project={project} />
             </button>
@@ -1467,7 +1477,7 @@ function ProjectDetailView(props: {
           <div className="hero-main">
             <div className="title-line">
               <h1>{project.name}</h1>
-              <StateBadge status={project.latestRun?.status} />
+              <StateBadge status={projectBadgeStatus(project)} />
             </div>
             <div className="subtle-line">
               {provider ? providerProfileLabel(provider) : "no provider set"} · {selectedDaemon ? selectedDaemon.name ?? `daemon-${selectedDaemon.id}` : "no daemon selected"} · {detail.project.dir || project.name}

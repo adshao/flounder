@@ -38,8 +38,8 @@ export function Counter({ children, live }: { children: ReactNode; live?: boolea
 }
 
 export function StateBadge({ status }: { status?: string | null }) {
-  const cls = ["running", "done", "error", "killed"].includes(status ?? "") ? status : "none";
-  return <span className={`state ${cls}`}>{status || "no runs"}</span>;
+  const cls = ["running", "done", "partial", "error", "killed"].includes(status ?? "") ? status : "none";
+  return <span className={`state ${cls}`}>{status === "partial" ? "Partial" : status || "no runs"}</span>;
 }
 
 export function StatusBadge({ status }: { status: string }) {
