@@ -2,6 +2,7 @@ import { useEffect, useMemo, useRef, useState, type FormEvent, type ReactNode } 
 import {
   api,
   type ActivityRecord,
+  type ConfirmDecision,
   type DaemonRow,
   type FindingRow,
   type ProjectDetail,
@@ -1620,8 +1621,9 @@ function ProjectOverview({
   const scopeDetail = progress.total > 0
     ? `${plural(progress.pending, "pending scope")}${progress.deferred ? ` · ${plural(progress.deferred, "deferred scope")}` : ""}`
     : "Run Map scopes or Continue audit to create the inventory.";
+  const runLabel = runningRun ? "Current run" : current ? "Latest run" : "Next run";
   const runValue = current ? runKindLabel(current.kind, current) : "No runs yet";
-  const runDetail = current ? `${current.status} · ${runProgress(current, detail.confirmDecisions)}` : "Start Continue audit to prepare source, map scopes, and dig.";
+  const runDetail = current ? overviewRunDetail(current, detail.confirmDecisions) : "Start Continue audit to prepare source, map scopes, and dig.";
   const synthesis = runStages(latestRunWithStage(detail, "synthesis")).synthesis;
   const verifyValue = verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : "No candidates";
   const verifyDetail = verifyCount
@@ -1663,7 +1665,7 @@ function ProjectOverview({
       </div>
       <Card title="Audit status">
         <div className="queue-grid">
-          <QueueItem label="Current run" value={runValue} detail={runDetail} />
+          <QueueItem label={runLabel} value={runValue} detail={runDetail} />
           <QueueItem label="Scope coverage" value={scopeValue} detail={scopeDetail} />
           <QueueItem label="Synthesis" value={synthesisValue} detail={synthesisDetail} />
           <QueueItem label="Candidate verification" value={verifyValue} detail={verifyDetail} />
@@ -1790,6 +1792,24 @@ function PrepareList({ title, items, tone }: { title: string; items: string[]; t
 function tailPath(value: string, parts = 3): string {
   const chunks = value.split("/").filter(Boolean);
   return chunks.length > parts ? `.../${chunks.slice(-parts).join("/")}` : value;
+}
+
+function overviewRunDetail(run: RunRow, decisions: ConfirmDecision[]): string {
+  if (run.status === "running") return `${run.status} · ${runProgress(run, decisions)}`;
+  const pieces = [run.status, fmtTime(run.ended_at ?? run.started_at)];
+  if (run.kind === "confirm") {
+    const rows = decisions.filter((decision) => decision.run_id === run.id);
+    if (rows.length) pieces.push(`${rows.filter((decision) => decision.reproduced === "yes").length}/${rows.length} reproduced`);
+  } else if (isVerifyRun(run) && run.run_scopes_target != null) {
+    pieces.push(`${run.run_scopes_done ?? 0}/${run.run_scopes_target} candidates checked`);
+  } else if (run.run_scopes_target != null) {
+    pieces.push(`${run.run_scopes_done ?? 0}/${run.run_scopes_target} scopes in this run`);
+  } else if (run.scopes_total != null) {
+    pieces.push(`${run.scopes_audited ?? 0}/${run.scopes_total} scopes in this run`);
+  } else if (run.findings_total != null) {
+    pieces.push(`${run.findings_total} ${run.findings_total === 1 ? "finding" : "findings"}`);
+  }
+  return pieces.filter(Boolean).join(" · ");
 }
 
 function LiveActivityPanel({ run }: { run: RunRow }) {
