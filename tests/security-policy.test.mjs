@@ -14,6 +14,7 @@ test("agent bash allows build/dependency commands (the build phase) across ecosy
     cmd("pip", "install", "-r", "requirements.txt"),
     cmd("cmake", "-S", "source/aztec-packages/barretenberg/cpp", "-B", "build/bbapi-poc", "-DMOBILE=ON"),
     cmd("cmake", "--build", "build/bbapi-poc"),
+    cmd("cmake", "--build", "build/bbapi-poc", "--parallel", "2"),
     cmd("ninja", "-C", "build/bbapi-poc"),
     cmd("make", "-C", "build/bbapi-poc"),
   ]) {
