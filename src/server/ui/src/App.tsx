@@ -268,6 +268,36 @@ function nextAction(finding: FindingRow): string {
   return "Review";
 }
 
+function isLocallyVerified(finding: FindingRow): boolean {
+  return finding.status === "confirmed-executable" || finding.status === "confirmed-differential";
+}
+
+function findingCheckBadges(finding: FindingRow): { label: string; className: string; title: string }[] {
+  const verify = isLocallyVerified(finding)
+    ? { label: "Verified", className: "s-confirmed-executable", title: "Local execution verification passed." }
+    : finding.status === "refuted" || finding.status === "discharged"
+      ? { label: "Refuted", className: "s-refuted", title: "Local verification refuted or discharged this finding." }
+      : { label: "Needs verify", className: "s-suspected", title: "This finding still needs local execution verification." };
+  const confirm = finding.confirm_status === "reproduced"
+    ? { label: "Confirmed", className: "s-confirmed-executable", title: "Real-target confirmation reproduced this finding." }
+    : finding.confirm_status === "not-reproduced" || finding.confirm_status === "not_reproduced"
+      ? { label: "Not confirmed", className: "s-refuted", title: "Real-target confirmation did not reproduce this finding." }
+      : isLocallyVerified(finding)
+        ? { label: "Needs confirm", className: "s-pending", title: "This locally verified finding still needs real-target confirmation." }
+        : { label: "Not ready", className: "s-discharged", title: "Real-target confirmation starts after local verification." };
+  return [verify, confirm];
+}
+
+function FindingChecks({ finding }: { finding: FindingRow }) {
+  return (
+    <span className="finding-checks">
+      {findingCheckBadges(finding).map((badge) => (
+        <span key={badge.label} className={`label check-label ${badge.className}`} title={badge.title}>{badge.label}</span>
+      ))}
+    </span>
+  );
+}
+
 function formatConfidence(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "";
   const pct = value <= 1 ? Math.round(value * 100) : Math.round(value);
@@ -350,7 +380,7 @@ function phaseIcon(phase: ProjectPhase): IconName {
     synthesis: "package",
     verify: "search",
     confirm: "shieldcheck",
-    report: "copy",
+    report: "file",
   }[phase] as IconName;
 }
 
@@ -1934,7 +1964,7 @@ function ConfirmDecisionsCard({ decisions, findings, onOpenReport }: { decisions
                 <div className="decision-actions">
                   {linkedFindings.length ? (
                     linkedFindings.map((finding) => (
-                      <Button key={finding.id} size="sm" icon="copy" title={finding.title ?? "Open finding report"} onClick={() => onOpenReport(finding)}>
+                      <Button key={finding.id} size="sm" icon="file" title={finding.title ?? "Open finding report"} onClick={() => onOpenReport(finding)}>
                         Report #{finding.id}
                       </Button>
                     ))
@@ -2498,6 +2528,7 @@ function FindingList({ findings, compact, empty, onOpenReport }: { findings: Fin
           </span>
           <span className="candidate-meta">
             <StatusBadge status={finding.status} />
+            <FindingChecks finding={finding} />
             {finding.severity ? <span className={`severity sev-${finding.severity}`}>{finding.severity}</span> : null}
             {finding.confidence != null ? <span className="confidence">{formatConfidence(finding.confidence)}</span> : null}
           </span>
@@ -2560,6 +2591,7 @@ function FindingTable({
             <tr>
               {global ? <th>Project</th> : null}
               <th>Status</th>
+              <th>Checks</th>
               <th>Title</th>
               <th>Location</th>
               <th>Next action</th>
@@ -2578,6 +2610,7 @@ function FindingTable({
                   </td>
                 ) : null}
                 <td><StatusBadge status={finding.status} /></td>
+                <td><FindingChecks finding={finding} /></td>
                 <td className="title-cell">{finding.title}</td>
                 <td><code>{finding.location}</code></td>
                 <td>{nextAction(finding)}</td>
@@ -2586,7 +2619,7 @@ function FindingTable({
                     {TRACKING.map((status) => <option key={status} value={status}>{status}</option>)}
                   </select>
                 </td>
-                <td><Button size="sm" onClick={() => onOpenReport(finding)}>Report</Button></td>
+                <td><Button size="sm" icon="file" onClick={() => onOpenReport(finding)}>Report</Button></td>
               </tr>
             ))}
           </tbody>
