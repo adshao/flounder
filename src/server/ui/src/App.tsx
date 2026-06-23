@@ -1944,12 +1944,12 @@ function prepareMaterialsAttention(summary?: PrepareSummary | null): { tone: "wa
   if (summary.quality === "preparing") {
     return { tone: "pending", label: "Prepared materials are still being resolved" };
   }
-  const blocking = summary.blockingIssues?.length ?? 0;
-  const caveats = summary.caveats?.length ?? ((summary.issues?.length ?? 0) + (summary.gaps?.length ?? 0));
+  const { blockingIssues, caveats } = prepareIssueBuckets(summary);
+  const blocking = blockingIssues.length;
   const manifestMissing = summary.manifestStatus && summary.manifestStatus !== "present" ? 1 : 0;
   const manifestState = summary.manifestState?.toLowerCase();
   const manifestPartial = manifestState && !["complete", "ready", "ok"].includes(manifestState) ? 1 : 0;
-  const count = blocking + caveats + manifestMissing + manifestPartial;
+  const count = blocking + caveats.length + manifestMissing + manifestPartial;
   if (count <= 0) return null;
   if (summary.auditReady || summary.quality === "limited") {
     return { tone: "warn", label: `Prepared materials are usable with caveats: ${plural(count, "note")}` };
@@ -1964,6 +1964,71 @@ function prepareMaterialsAttention(summary?: PrepareSummary | null): { tone: "wa
 
 function uniqueText(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))];
+}
+
+function compactText(value: string, max = 120): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  if (normalized.length <= max) return normalized;
+  return `${normalized.slice(0, max - 1).trimEnd()}…`;
+}
+
+function isCleanFirewallIssue(value: string): boolean {
+  const text = value.toLowerCase();
+  return text.includes("no material whose purpose")
+    && text.includes("vulnerability")
+    && text.includes("no vulnerability mechanism");
+}
+
+function prepareIssueBuckets(summary: PrepareSummary): { blockingIssues: string[]; caveats: string[] } {
+  const rawBlocking = summary.blockingIssues ?? [];
+  const blockingIssues = rawBlocking.filter((item) => !isCleanFirewallIssue(item));
+  const caveats = summary.caveats ?? uniqueText([...(summary.issues ?? []), ...(summary.gaps ?? [])]);
+  return {
+    blockingIssues,
+    caveats,
+  };
+}
+
+function answerFirewallBadge(summary: PrepareSummary): { label: string; title?: string } {
+  const detail = summary.answerFirewall || (summary.blockingIssues ?? []).find(isCleanFirewallIssue) || "";
+  if (!detail.trim()) return { label: "not reported" };
+  const lower = detail.toLowerCase();
+  if (lower.startsWith("clean") || isCleanFirewallIssue(detail)) return { label: "clean", title: detail };
+  if (lower.includes("blocked") || lower.includes("violation") || lower.includes("answer-bearing")) return { label: "review", title: detail };
+  return { label: compactText(detail, 36), title: detail };
+}
+
+function prepareScopeSummary(value?: string): { label: string; title?: string } {
+  const readable = readableScopeDeclaration(value);
+  if (!readable) return { label: "" };
+  const lower = readable.toLowerCase();
+  if (lower.includes("crates.io package metadata/manifests") && lower.includes("source-only")) {
+    return {
+      label: "Source-only package audit · official crates.io metadata/manifests",
+      title: readable,
+    };
+  }
+  if (lower.includes("source-only") && lower.includes("blind")) {
+    return {
+      label: "Source-only blind audit",
+      title: readable,
+    };
+  }
+  return {
+    label: compactText(readable, 120),
+    title: readable,
+  };
+}
+
+function realTargetMethodSummary(realTarget: NonNullable<PrepareSummary["realTarget"]>, detail: string): string {
+  const lower = detail.toLowerCase();
+  if (realTarget.requiresConfirmation === false && lower.includes("source-only")) {
+    return "No live target required; confirm against staged packages.";
+  }
+  if (realTarget.requiresConfirmation === true && (lower.includes("fork") || lower.includes("chain"))) {
+    return "Use read-only chain fork for confirmation.";
+  }
+  return compactText(detail, 120);
 }
 
 function ProjectSetupDisclosure({ items }: { items: Array<{ label: string; state: string; ok: boolean }> }) {
@@ -2228,15 +2293,17 @@ function prepareMatchBadge(match?: string): { label: string; className: string; 
 
 function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
   const components = summary.components ?? [];
-  const issues = summary.issues ?? [];
-  const gaps = summary.gaps ?? [];
-  const blockingIssues = summary.blockingIssues ?? [];
-  const caveats = summary.caveats ?? uniqueText([...issues, ...gaps]);
+  const visibleComponents = components.slice(0, 8);
+  const hiddenComponents = Math.max(0, components.length - visibleComponents.length);
+  const { blockingIssues, caveats } = prepareIssueBuckets(summary);
+  const hasOnlyBenignFirewallBlockers = (summary.blockingIssues?.length ?? 0) > 0 && blockingIssues.length === 0;
   const realTarget = summary.realTarget;
   const manifestReady = summary.manifestStatus === "present";
-  const blocked = summary.blocked || summary.quality === "needs-review" || summary.quality === "invalid";
+  const blocked = blockingIssues.length > 0 || ((summary.blocked || summary.quality === "needs-review" || summary.quality === "invalid") && !hasOnlyBenignFirewallBlockers);
   const quality = summary.quality === "ready" ? "ok" : summary.quality === "preparing" || summary.quality === "missing" ? "pending" : "warn";
-  const qualityLabel = summary.quality === "ready"
+  const qualityLabel = hasOnlyBenignFirewallBlockers
+    ? "Usable with caveats"
+    : summary.quality === "ready"
     ? "Ready for sealed audit"
     : summary.quality === "limited"
       ? "Usable with caveats"
@@ -2253,7 +2320,8 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
                 : "Preparing materials";
   const workspace = summary.workspace ?? {};
   const filesLabel = workspace.filesTruncated ? `${(workspace.files ?? 0).toLocaleString()}+` : (workspace.files ?? 0).toLocaleString();
-  const scopeDeclaration = readableScopeDeclaration(summary.scopeDeclaration);
+  const scope = prepareScopeSummary(summary.scopeDeclaration);
+  const firewall = answerFirewallBadge(summary);
   return (
     <Card title={<span>Prepared materials <Counter>{summary.componentsTotal ?? 0}</Counter></span>}>
       <div className="prepare-materials">
@@ -2276,16 +2344,16 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
             </span>
           </div>
         </div>
-        {scopeDeclaration ? <p className="prepare-scope">{scopeDeclaration}</p> : null}
+        {scope.label ? <p className="prepare-scope" title={scope.title}>{scope.label}</p> : null}
         <div className="prepare-meta">
-          <span>Answer firewall: <strong>{summary.answerFirewall || "not reported"}</strong></span>
+          <span title={firewall.title}>Firewall: <strong>{firewall.label}</strong></span>
           {summary.posture ? <span>Posture: <strong>{summary.posture}</strong></span> : null}
           <span>Real target: <strong>{realTargetLabel(realTarget)}</strong></span>
         </div>
         <PrepareRealTargetPanel realTarget={realTarget} />
         {components.length ? (
           <div className="prepare-components" aria-label="Prepared components">
-            {components.map((component, index) => {
+            {visibleComponents.map((component, index) => {
               const match = prepareMatchBadge(component.match);
               return (
                 <div className="prepare-component" key={`${component.identity ?? "component"}-${index}`}>
@@ -2301,15 +2369,22 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
                 </div>
               );
             })}
+            {hiddenComponents ? <div className="prepare-component prepare-component-more">+{hiddenComponents} more components</div> : null}
           </div>
         ) : (
           <EmptyInline>No prepared components have been reported yet.</EmptyInline>
         )}
         {blockingIssues.length || caveats.length ? (
-          <div className="prepare-lists">
-            {blockingIssues.length ? <PrepareList title="Blocking issues" items={blockingIssues} tone="warn" /> : null}
-            {caveats.length ? <PrepareList title={summary.auditReady ? "Caveats" : "Notes"} items={caveats} /> : null}
-          </div>
+          <details className="prepare-details">
+            <summary>
+              <span>{blockingIssues.length ? "Review issues" : "Review details"}</span>
+              <small>{blockingIssues.length ? plural(blockingIssues.length, "issue") : plural(caveats.length, "note")}</small>
+            </summary>
+            <div className="prepare-lists">
+              {blockingIssues.length ? <PrepareList title="Blocking issues" items={blockingIssues} tone="warn" /> : null}
+              {caveats.length ? <PrepareList title={summary.auditReady ? "Caveats" : "Notes"} items={caveats} /> : null}
+            </div>
+          </details>
         ) : null}
       </div>
     </Card>
@@ -2332,11 +2407,13 @@ function PrepareRealTargetPanel({ realTarget }: { realTarget?: PrepareSummary["r
   const required = realTarget.requiresConfirmation === true;
   const tone = issues.length ? "warn" : required ? "needs-confirm" : "ok";
   const method = realTarget.guidance?.recommendedMethod || realTarget.guidance?.notRequiredReason || realTarget.reason;
+  const detail = [realTarget.mode, method].filter(Boolean).join(" · ") || "No method reported";
+  const compactDetail = realTargetMethodSummary(realTarget, detail);
   return (
     <div className={`prepare-real-target ${tone}`}>
       <div>
-        <strong>{required ? "Real-target confirmation required" : "Source or artifact confirmation is enough"}</strong>
-        <small>{[realTarget.mode, method].filter(Boolean).join(" · ") || "No method reported"}</small>
+        <strong>{required ? "Real-target confirmation required" : "Source/artifact confirmation"}</strong>
+        <small title={detail}>{compactDetail}</small>
       </div>
       {ground.length ? (
         <div className="prepare-ground-truth" aria-label="Real target ground truth">

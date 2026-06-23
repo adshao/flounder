@@ -1126,18 +1126,18 @@ small {
 .prepare-meta span {
   min-height: 28px;
   display: inline-flex;
-  align-items: flex-start;
+  align-items: center;
   gap: 5px;
-  flex: 1 1 260px;
+  flex: 0 1 auto;
   min-width: 0;
   max-width: 100%;
   border: 1px solid var(--border);
-  border-radius: 8px;
-  padding: 5px 10px;
+  border-radius: 999px;
+  padding: 0 10px;
   background: var(--canvas-subtle);
   color: var(--fg-muted);
   font-size: 12px;
-  overflow-wrap: anywhere;
+  white-space: nowrap;
 }
 
 .prepare-kpis strong,
@@ -1145,7 +1145,8 @@ small {
   color: var(--fg);
   font-weight: 650;
   min-width: 0;
-  overflow-wrap: anywhere;
+  overflow: hidden;
+  text-overflow: ellipsis;
 }
 
 .prepare-scope {
@@ -1267,6 +1268,50 @@ small {
 
 .prepare-component small {
   color: var(--fg-muted);
+}
+
+.prepare-component-more {
+  min-height: 54px;
+  display: grid;
+  place-items: center;
+  color: var(--fg-muted);
+  font-weight: 650;
+}
+
+.prepare-details {
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  background: var(--canvas-subtle);
+  min-width: 0;
+}
+
+.prepare-details summary {
+  min-height: 38px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+  padding: 0 12px;
+  cursor: pointer;
+  font-weight: 650;
+}
+
+.prepare-details summary small {
+  color: var(--fg-muted);
+  font-weight: 560;
+}
+
+.prepare-details[open] {
+  padding-bottom: 10px;
+}
+
+.prepare-details[open] summary {
+  border-bottom: 1px solid var(--border-muted);
+  margin-bottom: 10px;
+}
+
+.prepare-details .prepare-lists {
+  padding: 0 10px;
 }
 
 .prepare-lists {
