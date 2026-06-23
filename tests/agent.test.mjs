@@ -13,7 +13,7 @@ import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, AUDIT_CONFIRM_S
 import { runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
-import { buildSessionPrompt, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, toolSchemas } from "../dist/agent/pi-session.js";
+import { buildSessionPrompt, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, toolSchemas } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 import { renderDisclosure } from "../dist/reports/disclosure.js";
@@ -67,6 +67,22 @@ test("map checkpoint guard blocks further exploration until scopes.json exists",
 
   assert.equal(mapCheckpointDirective(true, 12, "bash", { cmd: "rg public" }, 1), undefined);
   assert.equal(mapCheckpointDirective(false, 12, "read", { path: "src/lib.rs" }, 0), undefined);
+});
+
+test("prepare checkpoint guard blocks optional work after source is staged but manifest components are empty", () => {
+  const state = { hasManifest: true, componentCount: 0, hasStagedSource: true };
+  const blocked = prepareCheckpointDirective("Clue: official source", 18, state, "bash", { cmd: "find sources -type f" });
+  assert.equal(blocked?.block, true);
+  assert.equal(blocked?.eventKind, "audit_prepare_manifest_refresh_block");
+  assert.match(blocked?.message ?? "", /Source files are already staged/);
+  assert.match(blocked?.message ?? "", /components: \[\]/);
+
+  const write = prepareCheckpointDirective("Clue: official source", 18, state, "write", { path: "prepare_manifest.json" });
+  assert.equal(write?.block, undefined);
+  assert.equal(write?.eventKind, "audit_prepare_manifest_refresh_nudge");
+
+  assert.equal(prepareCheckpointDirective("Clue: official source", 18, { hasManifest: true, componentCount: 1, hasStagedSource: true }, "bash", { cmd: "find sources -type f" }), undefined);
+  assert.equal(prepareCheckpointDirective("Clue: official source", 18, { hasManifest: true, componentCount: 0, hasStagedSource: false }, "bash", { cmd: "python3 stage_crates.py" }), undefined);
 });
 
 test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session paths", () => {

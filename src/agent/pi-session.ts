@@ -1,3 +1,5 @@
+import { existsSync, readdirSync } from "node:fs";
+import path from "node:path";
 import { getModel, getProviders } from "@earendil-works/pi-ai";
 import { createAgentSession, defineTool, SessionManager, type ToolDefinition } from "@earendil-works/pi-coding-agent";
 import { Type } from "typebox";
@@ -72,9 +74,10 @@ export async function runAuditSession(input: {
   let stepNo = 0;
   const hasScratch = (basename: string): boolean =>
     [...input.ctx.session.scratchFiles.keys()].some((key) => key === basename || key.endsWith(`/${basename}`));
+  const prepareState = (): PrepareCheckpointState => inspectPrepareCheckpointState(input.ctx);
   const customTools = input.tools.map((tool) =>
     toPiTool(tool, input.ctx, () => (stepNo += 1), steps, input.logger, (n, toolName, args) =>
-      prepareCheckpointDirective(input.prepare, n, hasScratch("prepare_manifest.json"))
+      prepareCheckpointDirective(input.prepare, n, prepareState(), toolName, args)
       ?? mapCheckpointDirective(input.map, n, toolName, args, readScratchScopes(input.ctx.session).length),
     ),
   );
@@ -301,6 +304,7 @@ function looksLikeAuthError(message: string): boolean {
 }
 
 const PREPARE_CHECKPOINT_TOOL_STEPS = 16;
+const PREPARE_COMPONENT_REFRESH_TOOL_STEPS = 18;
 
 export interface CheckpointDirective {
   message: string;
@@ -308,8 +312,40 @@ export interface CheckpointDirective {
   block?: boolean;
 }
 
-export function prepareCheckpointDirective(prepare: string | undefined, step: number, hasManifest: boolean): CheckpointDirective | undefined {
-  if (!prepare || hasManifest || step < PREPARE_CHECKPOINT_TOOL_STEPS) return undefined;
+export interface PrepareCheckpointState {
+  hasManifest: boolean;
+  componentCount?: number;
+  hasStagedSource: boolean;
+}
+
+export function prepareCheckpointDirective(
+  prepare: string | undefined,
+  step: number,
+  stateOrHasManifest: PrepareCheckpointState | boolean,
+  toolName?: string,
+  args: Record<string, unknown> = {},
+): CheckpointDirective | undefined {
+  if (!prepare) return undefined;
+  const state = typeof stateOrHasManifest === "boolean"
+    ? { hasManifest: stateOrHasManifest, hasStagedSource: false }
+    : stateOrHasManifest;
+  if (state.hasManifest && (state.componentCount ?? 0) === 0 && state.hasStagedSource && step >= PREPARE_COMPONENT_REFRESH_TOOL_STEPS) {
+    const message = [
+      "blocked: PREPARE MANIFEST REFRESH REQUIRED.",
+      "Source files are already staged under sources/, but prepare_manifest.json still has components: [].",
+      "Your next action must rewrite prepare_manifest.json with nonempty component rows for the staged first-party source packages.",
+      "Do not fetch optional docs, reorganize scripts, inspect more dependencies, or emit done until components is nonempty.",
+      "Missing docs/specs are caveats; staged source/provenance is the hard gate.",
+    ].join(" ");
+    if (toolName === "write" && writesPrepareManifestJson(args)) {
+      return {
+        eventKind: "audit_prepare_manifest_refresh_nudge",
+        message: message.replace(/^blocked: /, ""),
+      };
+    }
+    return { eventKind: "audit_prepare_manifest_refresh_block", message, block: true };
+  }
+  if (state.hasManifest || step < PREPARE_CHECKPOINT_TOOL_STEPS) return undefined;
   return {
     eventKind: "audit_prepare_checkpoint_nudge",
     message: [
@@ -323,6 +359,54 @@ export function prepareCheckpointDirective(prepare: string | undefined, step: nu
     "Do not continue long-tail fetching before this checkpoint exists.",
     ].join(" "),
   };
+}
+
+function inspectPrepareCheckpointState(ctx: ToolContext): PrepareCheckpointState {
+  const raw = scratchText(ctx.session, "prepare_manifest.json");
+  let componentCount: number | undefined;
+  if (raw !== undefined) {
+    try {
+      const parsed = JSON.parse(raw) as { components?: unknown };
+      if (Array.isArray(parsed.components)) componentCount = parsed.components.length;
+    } catch {
+      componentCount = 0;
+    }
+  }
+  return {
+    hasManifest: raw !== undefined,
+    ...(componentCount !== undefined ? { componentCount } : {}),
+    hasStagedSource: workspaceDirectoryHasEntries(ctx, "sources") || workspaceDirectoryHasEntries(ctx, "source"),
+  };
+}
+
+function scratchText(session: ToolContext["session"], basename: string): string | undefined {
+  let entry = session.scratchFiles.get(basename);
+  if (entry === undefined) {
+    for (const [key, value] of session.scratchFiles) {
+      if (key.endsWith(`/${basename}`)) {
+        entry = value;
+        break;
+      }
+    }
+  }
+  return entry === undefined ? undefined : String(entry);
+}
+
+function workspaceDirectoryHasEntries(ctx: ToolContext, relative: string): boolean {
+  const workspaceRoot = ctx.session.workspace?.absolute;
+  if (!workspaceRoot) return false;
+  const dir = path.join(workspaceRoot, relative);
+  try {
+    return existsSync(dir) && readdirSync(dir).some((entry) => !entry.startsWith("."));
+  } catch {
+    return false;
+  }
+}
+
+function writesPrepareManifestJson(args: Record<string, unknown>): boolean {
+  if (typeof args.path !== "string") return false;
+  const normalized = args.path.trim().replaceAll("\\", "/");
+  return normalized === "prepare_manifest.json" || normalized.endsWith("/prepare_manifest.json");
 }
 
 const MAP_CHECKPOINT_TOOL_STEPS = 12;
