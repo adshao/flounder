@@ -1544,7 +1544,11 @@ test("api: clean prepare firewall notes and optional material gaps do not block 
         status: "done",
         posture: "blind",
         scope_declaration: "Official published packages selected from package metadata.",
-        answer_firewall: "No material whose purpose is a vulnerability report, CVE, exploit, incident article, post-mortem, or target-specific bug writeup was staged. No vulnerability mechanism, affected code location, exploit steps, or security conclusion has been summarized in this manifest.",
+        answer_firewall: [
+          "No material whose purpose is a vulnerability report, CVE, exploit, incident article, post-mortem, or target-specific bug writeup was staged.",
+          "During neutral documentation resolution, an official protocol prose source surfaced historical vulnerability wording; that source was not copied into the staged docs, and temporary checkout material was removed.",
+          "No vulnerability mechanism, affected code location, exploit steps, or security conclusion has been summarized in this manifest.",
+        ],
         real_target: {
           requires_confirmation: false,
           mode: "source-only/published-packages",
@@ -1600,7 +1604,7 @@ test("api: clean prepare firewall notes and optional material gaps do not block 
     assert.equal(detail.prepareSummary.blocked, false);
     assert.deepEqual(detail.prepareSummary.blockingIssues, []);
     assert.deepEqual(detail.prepareSummary.issues, []);
-    assert.match(detail.prepareSummary.answerFirewall, /^clean · No material/);
+    assert.equal(detail.prepareSummary.answerFirewall, "clean · 3 guardrail notes");
     assert.match(detail.prepareSummary.caveats.join("\n"), /Project-owned docs were best-effort/);
   });
 });
