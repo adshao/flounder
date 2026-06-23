@@ -84,6 +84,7 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
     assert.ok(prompt.includes("10 inspect commands"), "map prompt should force an early scope checkpoint before broad exploration drifts too long");
     assert.ok(prompt.includes("not completion") || prompt.includes("final completeness pass"), "map prompt should treat early scopes.json writes as checkpoints");
     assert.ok(prompt.includes("expansion pass") || prompt.includes("final completeness pass"), "map prompt should require a final expansion pass before done");
+    assert.ok(prompt.includes("complete binding chain"), "map prompt should require value-binding scopes to cover producer, enforcement, and consumer lines");
   }
 
   const deepPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", deep: true });
@@ -581,7 +582,7 @@ test("deep mode: obligation-driven prompt enforces design-intent enumeration and
   // bugs visible: enumerate obligations from design intent, discharge each by the
   // enforcing line, treat a constraint to the wrong referent / an absent constraint
   // as the finding, and never clear on "looks standard".
-  for (const needle of ["obligation", "DESIGN INTENT", "ABSENCE is the finding", "wrong referent", "looks standard"]) {
+  for (const needle of ["obligation", "DESIGN INTENT", "ABSENCE is the finding", "wrong referent", "looks standard", "complete binding chain"]) {
     assert.ok(AUDIT_DEEP_SYSTEM.includes(needle), `deep system prompt missing: ${needle}`);
   }
   const tools = [];
