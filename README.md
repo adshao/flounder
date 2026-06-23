@@ -19,7 +19,14 @@ The important distinction is that Flounder is not a scanner for one stack, a che
 
 ## Use It With An Agent
 
-Install the skill once:
+Install the skill once from GitHub, even when you do not have the source
+checkout locally:
+
+```bash
+npx skills add adshao/flounder --skill flounder -g -a codex -a claude-code
+```
+
+If you are already in a local checkout, install the checked-out copy instead:
 
 ```bash
 npx skills add . --skill flounder -g -a codex -a claude-code
@@ -142,6 +149,105 @@ Prepare can gather official context.
 
 `--mock-llm` runs offline for development. See [docs/USAGE.md](docs/USAGE.md) for commands, materials, daemon setup, provider profiles, budgets, and the API.
 
+## Scenario Commands
+
+These are starting points. Replace placeholders with authorized targets and keep
+private material out of command lines that may be shared.
+
+### Blind Capability Audit
+
+Use this to measure Flounder's unaided audit ability. Do not include an incident
+writeup, known bug name, exploit theory, or answer-bearing corpus.
+
+```bash
+# Let Flounder prepare an authorized public target.
+flounder run https://github.com/org/protocol
+
+# Or audit source that is already staged locally.
+flounder run \
+  --target protocol-blind \
+  --source ./contracts \
+  --build-root . \
+  --corpus ./docs/specs \
+  --max-scopes 30 \
+  --dig-samples 2
+```
+
+### Incident Investigation
+
+Use this when the input is a suspicious transaction, address, or factual exploit
+clue. The clue is evidence, not the root-cause answer.
+
+```bash
+flounder run 0x<transaction-hash>
+flounder run <deployed-address-or-incident-link>
+```
+
+### Open-World Bounty Audit
+
+Use this when Flounder should collect official public context, bounty scope,
+deployments, package metadata, and provenance.
+
+```bash
+flounder run "Open-world bounty audit for https://github.com/org/protocol; use official docs and public scope."
+
+# Hybrid project when source is already checked out but Prepare should still gather public context.
+# "dir" is under the daemon workspace; source/corpus paths are relative to it.
+curl -X POST http://127.0.0.1:4500/api/projects \
+  -H 'content-type: application/json' \
+  -d '{"name":"protocol-bounty","providerId":1,"daemonId":1,"dir":"protocol","sourcePaths":["contracts"],"buildRoot":".","corpusPaths":["docs"],"config":{"prepareClue":"Open-world bounty audit for <program-or-project-link>; use official docs and public scope."}}'
+
+curl -X POST http://127.0.0.1:4500/api/projects/<uuid>/runs \
+  -H 'content-type: application/json' \
+  -d '{"verb":"run"}'
+```
+
+### Scope Mapping And Directed Dig
+
+Use this when the operator wants a scope inventory first, then a specific
+follow-up on chosen scopes or regions.
+
+```bash
+flounder map --target protocol-map --source ./contracts --build-root . --corpus ./docs/specs
+flounder audit --scope <scope-id> --source ./contracts --build-root . --dig-samples 3
+flounder audit src/Vault.sol:120-220 --source ./contracts --build-root .
+```
+
+### Verify Existing Suspicions
+
+Use this for claims from a prior run, a human review, or an imported JSON file.
+
+```bash
+flounder audit --verify claims.json --source ./contracts --build-root .
+```
+
+### Real-Target Confirmation
+
+Use this after a sealed run has locally confirmed findings that need
+deployment-level reproduction.
+
+```bash
+flounder confirm ~/.flounder/protocol-<timestamp> --source ./contracts --build-root .
+```
+
+### Report Regeneration And Finding Triage
+
+Project report generation is a UI/API action because it uses tracked findings.
+
+```bash
+PROJECT_UUID=<uuid>
+
+curl -X POST http://127.0.0.1:4500/api/projects/$PROJECT_UUID/runs \
+  -H 'content-type: application/json' \
+  -d '{"verb":"report","findingIds":[123,456]}'
+
+curl 'http://127.0.0.1:4500/api/projects/'"$PROJECT_UUID"'/findings?tracking=ignored'
+
+curl -X PATCH http://127.0.0.1:4500/api/findings/123/tracking \
+  -H 'content-type: application/json' \
+  -d '{"status":"open"}'
+```
+
 ## Sandbox Runtime
 
 Real audits execute model-generated commands through the sandbox. The safe default is Docker-backed OCI: install and start Docker or a Docker-compatible runtime, then build the default image with `npm run sandbox:build`. `--sandbox-backend auto` uses `flounder-sandbox:latest` when available and otherwise fails closed instead of silently running tests on the host.
@@ -161,7 +267,7 @@ For trusted local smoke tests only, use `--sandbox-backend host --allow-host-exe
 Agents can drive everything through [skills/flounder/SKILL.md](skills/flounder/SKILL.md), but every step is also exposed directly:
 
 - **Dashboard**: `flounder ui` for projects, daemons, provider profiles, runs, scopes, findings, live activity, and reports.
-- **CLI**: workflow verbs (`prepare`, `run`, `map`, `audit`, `confirm`), control-plane resources under `flounder server ...`, daemon-local operations under `flounder daemon ...`, and `config`.
+- **CLI**: workflow verbs (`prepare`, `run`, `map`, `audit`, `confirm`), run-history import, control-plane resources under `flounder server ...`, daemon-local operations under `flounder daemon ...`, and `config`.
 - **REST API**: `GET /api` returns the self-describing catalog; agents can create projects, enqueue runs, watch logs, and read findings without the UI.
 - **pi extension**: `flounder_prepare`, `flounder_run`, `flounder_map`, `flounder_audit`, and `flounder_confirm` mirror the top-level workflow verbs when loaded through pi.
 
@@ -179,12 +285,29 @@ You can run that end to end or drive each phase directly:
 
 | Command | Use |
 | --- | --- |
+| `flounder prepare <clue>` | open-world acquisition from a transaction, address, project, package, repository, or link into staged source, corpus, dependency closure, and deployment-match evidence |
 | `flounder run <clue>` | one-command prepare -> sealed map/dig -> confirm -> report from a transaction, address, repo, package, project, bounty, or link |
-| `flounder prepare <clue>` | acquire and stage a deployment-matched target before audit |
-| `flounder run --source <paths...>` | source-provided entry path: sealed map -> dig on source you already have |
-| `flounder map` | enumerate the scope inventory only |
-| `flounder audit <region>` / `--scope` / `--verify` | deep-audit a region, selected inventory scopes, or suspected findings |
-| `flounder confirm <run-dir>` | reproduce already-confirmed findings on real-world ground truth |
+| `flounder run --source <paths...> --target <name>` | source-provided sealed audit: map -> dig on source already staged locally |
+| `flounder map --target <name> --source <paths...>` | enumerate and persist the scope inventory only; no findings |
+| `flounder audit <region> --source <paths...>` | deep-audit one named file/function/region without a new map |
+| `flounder audit --scope <id,...> --source <paths...>` | deep-audit selected inventory scopes after `flounder map` |
+| `flounder audit --verify <file> --source <paths...>` | confirm or refute suspected findings from JSON by execution |
+| `flounder confirm <run-dir> --source <paths...>` | reproduce locally confirmed findings on real-world ground truth |
+| `flounder history import-run --target <name> --run <dir>` | import an existing run directory into tracked history |
+| `flounder server project list` | list tracked projects |
+| `flounder server run list [--project <name>]` | list global or project run history |
+| `flounder server finding list [--project <name>] [--status <s>] [--tracking <s>]` | list findings globally or for one project |
+| `flounder server daemon list` | list registered execution daemons |
+| `flounder server daemon-token mint [name] [--server <url>]` | create a token for a remote daemon |
+| `flounder daemon start --server <url> --token <token>` | run an executor that claims queued jobs |
+| `flounder daemon provider list/check/login [provider]` | manage provider auth on the executor machine |
+| `flounder config list/get/set/unset/path` | read or write persisted CLI defaults |
+| `flounder ui [--port <n>] [--host <h>] [--no-daemon]` | start the local control-plane dashboard, REST API, store, and optional co-located daemon |
+
+Formal report generation is available from the dashboard More actions menu or
+the project runs API with `{"verb":"report"}`. It is intentionally tied to a
+tracked project because it needs finding ids, tracking state, and confirm
+decisions.
 
 A finding's status is the framework's verdict from execution:
 

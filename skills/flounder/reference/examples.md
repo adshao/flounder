@@ -1,6 +1,16 @@
 # Flounder examples
 
-Read [../SKILL.md](../SKILL.md) first. These examples show common audit paths.
+Read the root `SKILL.md` first. These examples show common audit paths.
+
+## Contents
+
+- [Agent Requests](#agent-requests)
+- [Blind Audit / Capability Check](#blind-audit--capability-check)
+- [Open-World Bounty Audit](#open-world-bounty-audit)
+- [ZK / Proof-System Audit](#zk--proof-system-audit)
+- [Incident Investigation](#incident-investigation)
+- [Dashboard Project Triage](#dashboard-project-triage)
+- [Verify Existing Suspicions](#verify-existing-suspicions)
 
 ## Agent Requests
 

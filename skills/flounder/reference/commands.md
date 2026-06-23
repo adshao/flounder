@@ -1,7 +1,20 @@
 # Flounder command and API reference
 
-Read [../SKILL.md](../SKILL.md) first. This file is for exact command, daemon,
+Read the root `SKILL.md` first. This file is for exact command, daemon,
 provider, API, budget, output, and pi extension details.
+
+## Contents
+
+- [Product Surfaces](#product-surfaces)
+- [Setup Commands](#setup-commands)
+- [Audit Verbs](#audit-verbs)
+- [Materials](#materials)
+- [Coverage And Budget Controls](#coverage-and-budget-controls)
+- [Sandbox And Network](#sandbox-and-network)
+- [Provider Profiles](#provider-profiles)
+- [REST API](#rest-api)
+- [Outputs](#outputs)
+- [Pi Extension](#pi-extension)
 
 ## Product Surfaces
 
@@ -42,7 +55,7 @@ CLI naming convention:
 - Resource commands use noun/action form, matching provider commands:
   `flounder server finding list`, `flounder server run list`,
   `flounder server daemon-token mint`, and
-  `flounder daemon provider list|login|check`.
+  `flounder daemon provider list/login/check`.
 - Do not expose `db` to users; the SQLite store is an implementation detail.
 
 ## Audit Verbs
@@ -57,6 +70,7 @@ CLI naming convention:
 | `flounder audit --scope <id,...> --source ...` | Deep-audit selected inventory scopes |
 | `flounder audit --verify <file> --source ...` | Confirm or refute suspected findings by execution |
 | `flounder confirm <run-dir> --source <paths...>` | Open-world reproduction and submit/no-submit decision sheet |
+| `flounder history import-run --target <name> --run <dir>` | Import an existing run directory into tracked history |
 
 ## Materials
 
@@ -89,11 +103,11 @@ is done unless capped by launch config.
 
 | Flag | Meaning |
 | --- | --- |
-| `--sandbox-backend auto|oci|host` | Default `auto`; OCI is preferred for model-generated commands |
+| `--sandbox-backend <auto,oci,host>` | Default `auto`; OCI is preferred for model-generated commands |
 | `--sandbox-image <image>` | OCI image for sandboxed commands |
 | `--allow-host-execution` | Trusted-local opt-in fallback only |
-| `--prepare-network none|enabled` | Dependency warm-up/build network policy |
-| `--confirm-network none|enabled` | Prepare/confirm open-world network policy |
+| `--prepare-network <none,enabled>` | Dependency warm-up/build network policy |
+| `--confirm-network <none,enabled>` | Prepare/confirm open-world network policy |
 | `--no-prepare` | Skip toolchain warm-up |
 | `--prepare-timeout-ms <n>` | Warm-up timeout |
 
@@ -154,12 +168,14 @@ curl http://127.0.0.1:4500/api/projects/<uuid>/confirm-decisions
 curl http://127.0.0.1:4500/api/runs/<id>/log
 ```
 
-Creating a project requires both a provider profile and a daemon:
+Creating a project requires both a provider profile and a daemon. `dir` is the
+project directory under the daemon workspace; source and corpus paths are
+relative to that directory.
 
 ```bash
 curl -X POST http://127.0.0.1:4500/api/projects \
   -H 'content-type: application/json' \
-  -d '{"name":"p","providerId":1,"daemonId":1,"sourcePaths":["."],"buildRoot":".","corpusPaths":["docs/specs"],"config":{"prepareClue":"audit this project","maxScopes":30}}'
+  -d '{"name":"p","providerId":1,"daemonId":1,"dir":"p","sourcePaths":["."],"buildRoot":".","corpusPaths":["docs/specs"],"config":{"prepareClue":"audit this project","maxScopes":30}}'
 ```
 
 If `dir` is omitted, the project directory under the selected daemon workspace

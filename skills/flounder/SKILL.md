@@ -30,9 +30,8 @@ gates.
 | `SKILL.md` | Always after this skill triggers. It is the operating playbook. |
 | `reference/commands.md` | Exact CLI, REST, provider, daemon, budget, output, and pi extension details. |
 | `reference/examples.md` | Concrete Solidity/EVM and ZK examples. |
-| `../../docs/USAGE.md` | Product workflow and dashboard/API usage. |
-| `../../docs/ARCHITECTURE.md` | Trust boundary, run semantics, tracking store, and daemon architecture. |
-| `../../SECURITY.md` | White-hat policy and disclosure boundaries. |
+| `reference/product.md` | Dashboard, project lifecycle, run phases, tracking, and artifact model. |
+| `reference/safety.md` | White-hat policy, sandbox boundary, evidence ladder, and public-release hygiene. |
 
 Use progressive disclosure: open only the reference file needed for the current
 task. Do not duplicate long command references into the conversation when a
@@ -370,12 +369,10 @@ Open only the references needed for the current task:
   [reference/commands.md](reference/commands.md)
 - Solidity/EVM and ZK examples:
   [reference/examples.md](reference/examples.md)
-- product usage details:
-  [../../docs/USAGE.md](../../docs/USAGE.md)
-- architecture and trust boundary:
-  [../../docs/ARCHITECTURE.md](../../docs/ARCHITECTURE.md)
-- white-hat policy:
-  [../../SECURITY.md](../../SECURITY.md)
+- dashboard, project lifecycle, run phases, and artifact model:
+  [reference/product.md](reference/product.md)
+- white-hat policy, sandbox boundary, and evidence ladder:
+  [reference/safety.md](reference/safety.md)
 
 ## Task Routing
 

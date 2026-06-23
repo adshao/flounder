@@ -15,7 +15,7 @@ answer-bearing material were not supplied as corpus.
 - Control plane reachable through the Flounder UI/API.
 - Three execution daemons were online.
 - No validation jobs were active when this report was written.
-- `openai-codex` with high reasoning was the primary provider path.
+- The default provider profile was `openai-codex · gpt-5.5 · xhigh`; daemon-local auth was required before live model work.
 - Current source/material state is versioned by Prepare and Map boundaries; old
   findings and scopes remain inspectable as historical data but no longer count
   in the current project view after a newer Prepare or Map.

@@ -191,7 +191,7 @@ Model and provider selection stays runtime-configured. Do not assume every model
 
 A project selects one execution daemon and one default provider profile. It can also set `config.phaseProviders` for `prepare`, `map`, `dig`, and `confirm` when a phase needs a different provider profile. The selected daemon must authenticate every provider profile the project can use. `launchSpec` resolves the verb's primary phase into the run's top-level provider/model/thinking and maps map/dig/refute into role overrides, so a run can use different models for acquisition, enumeration, deep audit, refutation, and real-target confirmation without changing the audit kernel.
 
-For blind benchmarks with `provider=codex-cli`, set `FLOUNDER_CODEX_WEB_SEARCH=disabled` to prevent public-report contamination. Real audits may leave Codex web search at its runtime default or set `FLOUNDER_CODEX_WEB_SEARCH=live|cached|disabled` explicitly.
+For blind benchmarks with `provider=codex-cli`, set `FLOUNDER_CODEX_WEB_SEARCH=disabled` to prevent public-report contamination. Real audits may leave Codex web search at its runtime default or set `FLOUNDER_CODEX_WEB_SEARCH=live/cached/disabled` explicitly.
 
 ## Pi Integration
 
