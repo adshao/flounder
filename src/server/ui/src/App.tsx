@@ -156,7 +156,30 @@ function statusCount(project: ProjectSnapshot, status: string): number {
 }
 
 function totalConfirmed(project: ProjectSnapshot): number {
-  return statusCount(project, "confirmed-differential") + statusCount(project, "confirmed-executable");
+  return project.auditConfirmedFindings ?? (statusCount(project, "confirmed-differential") + statusCount(project, "confirmed-executable"));
+}
+
+function detailSnapshotDiffers(project: ProjectSnapshot, detail: ProjectDetail | null): boolean {
+  if (!detail || project.uuid !== detail.project.uuid) return true;
+  const detailRuns = currentMaterialRuns(detail.runs, detail.material);
+  const detailLatest = detailRuns[0] ?? null;
+  const progress = project.progress ?? { total: 0, audited: 0, pending: 0, deferred: 0 };
+  return (
+    (progress.total ?? 0) !== (detail.progress.total ?? 0)
+    || (progress.audited ?? 0) !== (detail.progress.audited ?? 0)
+    || (progress.pending ?? 0) !== (detail.progress.pending ?? 0)
+    || (progress.deferred ?? 0) !== (detail.progress.deferred ?? 0)
+    || (project.findingsTotal ?? 0) !== detail.findingsTotal
+    || (project.auditConfirmedFindings ?? 0) !== detail.auditConfirmedFindings
+    || (project.reproducedBugs ?? project.confirmedBugs ?? 0) !== detail.reproducedBugs
+    || (project.confirmDecisionCount ?? 0) !== detail.confirmDecisions.length
+    || (project.currentRunCount ?? 0) !== (detail.currentRunsTotal ?? detailRuns.length)
+    || (project.latestRun?.id ?? null) !== (detailLatest?.id ?? null)
+    || (project.latestRun?.status ?? null) !== (detailLatest?.status ?? null)
+    || (project.material?.currentPrepareRunId ?? null) !== (detail.material?.currentPrepareRunId ?? null)
+    || (project.material?.currentPrepareStatus ?? null) !== (detail.material?.currentPrepareStatus ?? null)
+    || (project.material?.activePrepareRefreshStartedAt ?? null) !== (detail.material?.activePrepareRefreshStartedAt ?? null)
+  );
 }
 
 function daemonAgeMs(daemon: DaemonRow): number {
@@ -1152,8 +1175,15 @@ export function App() {
           setProjects(payload.projects);
           const currentUuid = route.projectUuid;
           const current = currentUuid ? payload.projects.find((project) => project.uuid === currentUuid) : undefined;
-          const detailStillRunning = detailRef.current?.runs.some((run) => run.status === "running") ?? false;
-          const shouldRefreshDetail = Boolean(current && ((current.activeRuns ?? 0) > 0 || current.latestRun?.status === "running" || detailStillRunning));
+          const detailStillRunning = detailRef.current
+            ? currentMaterialRuns(detailRef.current.runs, detailRef.current.material).some((run) => run.status === "running")
+            : false;
+          const shouldRefreshDetail = Boolean(current && (
+            (current.activeRuns ?? 0) > 0
+            || current.latestRun?.status === "running"
+            || detailStillRunning
+            || detailSnapshotDiffers(current, detailRef.current)
+          ));
           const now = Date.now();
           if (currentUuid && shouldRefreshDetail && now - detailRefreshRef.current > 2500) {
             detailRefreshRef.current = now;
@@ -1602,7 +1632,7 @@ function ProjectDetailView(props: {
   const topCandidates = topCandidateFindings(detail.allFindings);
   const verifyCandidates = pendingVerifyFindings(detail.allFindings);
   const overviewCandidates = verifyCandidates.length ? verifyCandidates : topCandidates;
-  const confirmed = totalConfirmed(project);
+  const confirmed = detail.auditConfirmedFindings;
   const reproduced = confirmedDecisions(detail.confirmDecisions).length;
   const runningRun = currentRuns.find((run) => run.status === "running");
   const runningInactive = runningRun ? runInactiveLabel(runningRun) : null;
@@ -1622,6 +1652,24 @@ function ProjectDetailView(props: {
   const phaseOverrides = PROVIDER_PHASES
     .map((phase) => ({ phase, provider: phaseProvider(detail, providers, phase) }))
     .filter((entry) => entry.provider);
+  const currentRunningRuns = currentRuns.filter((run) => run.status === "running").length;
+  const materialRefreshActive = Boolean(detail.material?.activePrepareRefreshStartedAt || detail.material?.currentPrepareStatus === "running");
+  const currentProject: ProjectSnapshot = {
+    ...project,
+    progress: detail.progress,
+    findingCounts: detail.statusCounts,
+    findingsTotal: detail.findingsTotal,
+    auditConfirmedFindings: detail.auditConfirmedFindings,
+    reproducedBugs: detail.reproducedBugs,
+    confirmedBugs: detail.confirmedBugs,
+    verifyPendingFindings: pendingVerify,
+    confirmPendingFindings: pendingConfirm,
+    confirmDecisionCount: detail.confirmDecisions.length,
+    latestRun: currentRuns[0] ?? null,
+    activeRuns: Math.max(project.activeRuns ?? 0, currentRunningRuns, materialRefreshActive ? 1 : 0),
+    currentRunCount: detail.currentRunsTotal ?? currentRuns.length,
+    material: detail.material,
+  };
   const readyItems = [
     {
       label: "Daemon",
@@ -1700,11 +1748,11 @@ function ProjectDetailView(props: {
         <div className="project-hero">
           <div className="hero-main">
             <div className="title-line">
-              <h1>{project.name}</h1>
-              <StateBadge status={projectBadgeStatus(project)} />
+              <h1>{detail.project.name}</h1>
+              <StateBadge status={projectBadgeStatus(currentProject)} />
             </div>
             <div className="subtle-line">
-              {provider ? providerProfileLabel(provider) : "no provider set"} · {selectedDaemon ? selectedDaemon.name ?? `daemon-${selectedDaemon.id}` : "no daemon selected"} · {detail.project.dir || project.name}
+              {provider ? providerProfileLabel(provider) : "no provider set"} · {selectedDaemon ? selectedDaemon.name ?? `daemon-${selectedDaemon.id}` : "no daemon selected"} · {detail.project.dir || detail.project.name}
             </div>
             {localVerifySummary ? <div className="subtle-line verify-summary">{localVerifySummary}</div> : null}
             {phaseOverrides.length ? (
