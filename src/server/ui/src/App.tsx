@@ -2004,7 +2004,7 @@ function prepareScopeSummary(value?: string): { label: string; title?: string } 
   const lower = readable.toLowerCase();
   if (lower.includes("crates.io package metadata/manifests") && lower.includes("source-only")) {
     return {
-      label: "Source-only package audit · official crates.io metadata/manifests",
+      label: "Source-only package audit",
       title: readable,
     };
   }
@@ -2015,7 +2015,7 @@ function prepareScopeSummary(value?: string): { label: string; title?: string } 
     };
   }
   return {
-    label: compactText(readable, 120),
+    label: compactText(readable, 80),
     title: readable,
   };
 }
@@ -2293,7 +2293,7 @@ function prepareMatchBadge(match?: string): { label: string; className: string; 
 
 function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
   const components = summary.components ?? [];
-  const visibleComponents = components.slice(0, 8);
+  const visibleComponents = components.slice(0, 6);
   const hiddenComponents = Math.max(0, components.length - visibleComponents.length);
   const { blockingIssues, caveats } = prepareIssueBuckets(summary);
   const hasOnlyBenignFirewallBlockers = (summary.blockingIssues?.length ?? 0) > 0 && blockingIssues.length === 0;
@@ -2322,6 +2322,13 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
   const filesLabel = workspace.filesTruncated ? `${(workspace.files ?? 0).toLocaleString()}+` : (workspace.files ?? 0).toLocaleString();
   const scope = prepareScopeSummary(summary.scopeDeclaration);
   const firewall = answerFirewallBadge(summary);
+  const showFirewall = firewall.label !== "clean" && firewall.label !== "not reported";
+  const showRealTargetPanel = Boolean(
+    !realTarget?.reported
+    || realTarget.requiresConfirmation === true
+    || (realTarget.issues?.length ?? 0) > 0,
+  );
+  const reviewCount = blockingIssues.length + caveats.length;
   return (
     <Card title={<span>Prepared materials <Counter>{summary.componentsTotal ?? 0}</Counter></span>}>
       <div className="prepare-materials">
@@ -2344,13 +2351,13 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
             </span>
           </div>
         </div>
-        {scope.label ? <p className="prepare-scope" title={scope.title}>{scope.label}</p> : null}
-        <div className="prepare-meta">
-          <span title={firewall.title}>Firewall: <strong>{firewall.label}</strong></span>
-          {summary.posture ? <span>Posture: <strong>{summary.posture}</strong></span> : null}
-          <span>Real target: <strong>{realTargetLabel(realTarget)}</strong></span>
+        <div className="prepare-summary-line">
+          <span title={scope.title}>{scope.label || "Prepared source available"}</span>
+          {summary.posture ? <span>Posture <strong>{summary.posture}</strong></span> : null}
+          <span>Confirmation <strong>{realTargetSummaryLabel(realTarget)}</strong></span>
+          {showFirewall ? <span title={firewall.title}>Firewall <strong>{firewall.label}</strong></span> : null}
         </div>
-        <PrepareRealTargetPanel realTarget={realTarget} />
+        {showRealTargetPanel ? <PrepareRealTargetPanel realTarget={realTarget} /> : null}
         {components.length ? (
           <div className="prepare-components" aria-label="Prepared components">
             {visibleComponents.map((component, index) => {
@@ -2374,10 +2381,10 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
         ) : (
           <EmptyInline>No prepared components have been reported yet.</EmptyInline>
         )}
-        {blockingIssues.length || caveats.length ? (
+        {reviewCount ? (
           <details className="prepare-details">
             <summary>
-              <span>{blockingIssues.length ? "Review issues" : "Review details"}</span>
+              <span>{blockingIssues.length ? "Review issues" : "Details"}</span>
               <small>{blockingIssues.length ? plural(blockingIssues.length, "issue") : plural(caveats.length, "note")}</small>
             </summary>
             <div className="prepare-lists">
@@ -2389,6 +2396,13 @@ function PrepareMaterialsCard({ summary }: { summary: PrepareSummary }) {
       </div>
     </Card>
   );
+}
+
+function realTargetSummaryLabel(realTarget?: PrepareSummary["realTarget"]): string {
+  if (!realTarget?.reported) return "missing";
+  if (realTarget.requiresConfirmation === true) return "real target";
+  if (realTarget.requiresConfirmation === false) return "source/artifact";
+  return "unspecified";
 }
 
 function PrepareRealTargetPanel({ realTarget }: { realTarget?: PrepareSummary["realTarget"] }) {
