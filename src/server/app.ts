@@ -723,7 +723,9 @@ async function projectGet(c: Ctx): Promise<void> {
     const activePrepareRefresh = activePrepareRefreshStartedAt(c.store, project, materialBoundary);
     const viewBoundary = materialViewBoundary(materialBoundary, activePrepareRefresh);
     const currentRunsRaw = currentVisibleRuns(allRunsRaw, materialBoundary, activePrepareRefresh);
-    const currentRunIds = runIdSet(currentRunsRaw);
+    const scopeBoundary = latestScopeInventoryBoundaryRun(currentRunsRaw);
+    const currentResultRunsRaw = currentResultRuns(currentRunsRaw, scopeBoundary);
+    const currentRunIds = runIdSet(currentResultRunsRaw);
     const runs = runApiRows(c.store, allRunsRaw.slice(0, 50), c.plane, viewBoundary);
     const scopeView = currentScopeView(c.store, id, currentRunsRaw, activePrepareRefresh);
     const scopes = scopeApiRows(scopeView.scopes.slice(0, 50));
@@ -747,7 +749,7 @@ async function projectGet(c: Ctx): Promise<void> {
       confirmedBugs: reproducedBugs,
       runs,
       runsTotal: c.store.countRuns(id),
-      currentRunsTotal: currentRunsRaw.length,
+      currentRunsTotal: currentResultRunsRaw.length,
       activeScopeCount: scopeView.hasInventory ? c.store.countScopesByStatus(id, "auditing") : 0,
       confirmDecisions,
       scopes,
@@ -802,12 +804,26 @@ function latestPrepareRun(runs: Array<Record<string, unknown>>): Record<string, 
   return runs.find((entry) => entry.kind === "prepare" && typeof entry.started_at === "string");
 }
 
+function latestScopeInventoryBoundaryRun(runs: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
+  return runs.find((entry) => entry.kind === "map" && typeof entry.started_at === "string");
+}
+
 function isCurrentMaterialRun(run: Record<string, unknown>, boundary?: Record<string, unknown>): boolean {
   if (!boundary) return true;
   const runStarted = stringValue(run.started_at);
   const boundaryStarted = stringValue(boundary.started_at);
   if (!runStarted || !boundaryStarted) return true;
   return runStarted >= boundaryStarted;
+}
+
+function currentResultRuns(runs: Array<Record<string, unknown>>, boundary?: Record<string, unknown>): Array<Record<string, unknown>> {
+  if (!boundary) return runs;
+  const boundaryStarted = stringValue(boundary.started_at);
+  if (!boundaryStarted) return runs;
+  return runs.filter((run) => {
+    const runStarted = stringValue(run.started_at);
+    return Boolean(runStarted && runStarted >= boundaryStarted);
+  });
 }
 
 function currentMaterialRuns(runs: Array<Record<string, unknown>>, boundary?: Record<string, unknown>): Array<Record<string, unknown>> {
@@ -916,11 +932,17 @@ function materialStaleness(run: Record<string, unknown>, boundary?: Record<strin
 
 function materialSummary(runs: Array<Record<string, unknown>>, boundary?: Record<string, unknown>, activePrepareRefreshStartedAt?: string): Record<string, unknown> {
   if (!boundary) return { currentPrepareRunId: null, staleRunCount: 0, activePrepareRefreshStartedAt };
+  const scopeBoundary = latestScopeInventoryBoundaryRun(currentVisibleRuns(runs, boundary, activePrepareRefreshStartedAt));
   const staleRunCount = runs.filter((run) => !isCurrentMaterialRun(run, boundary)).length;
   return {
     currentPrepareRunId: boundary.id,
     currentPrepareStatus: boundary.status,
     currentPrepareStartedAt: boundary.started_at,
+    ...(scopeBoundary ? {
+      currentScopeInventoryRunId: scopeBoundary.id,
+      currentScopeInventoryStatus: scopeBoundary.status,
+      currentScopeInventoryStartedAt: scopeBoundary.started_at,
+    } : {}),
     staleRunCount,
     ...(activePrepareRefreshStartedAt ? { activePrepareRefreshStartedAt } : {}),
   };
@@ -1614,7 +1636,8 @@ async function runLaunch(c: Ctx): Promise<void> {
   const runs = allRuns.slice(0, 50);
   const materialBoundary = latestPrepareRun(allRuns);
   const currentRuns = currentMaterialRuns(allRuns, materialBoundary);
-  const currentRunIds = runIdSet(currentRuns);
+  const scopeBoundary = latestScopeInventoryBoundaryRun(currentRuns);
+  const currentResultRunIds = runIdSet(currentResultRuns(currentRuns, scopeBoundary));
   const currentScopeRunExists = !materialBoundary || currentRuns.some(isScopeInventoryRun);
   const progress = currentScopeRunExists ? c.store.scopeProgress(projectId) : emptyProgress();
   const spec = launchSpec(project, body, c.out, profile, progress, phaseProfiles);
@@ -1645,7 +1668,7 @@ async function runLaunch(c: Ctx): Promise<void> {
       const selected = findingIds.map((id) => ({ id, row: c.store.getConfirmable(Number(project.id), id) }));
       const missing = selected.filter((entry) => !entry.row || !entry.row.run_dir).map((entry) => entry.id);
       if (missing.length > 0) return sendJson(c.res, 400, { error: `finding ${missing.join(", ")} is not pending confirm for this project, or has no source run dir` });
-      const stale = selected.filter((entry) => entry.row && !rowBelongsToCurrentMaterial(entry.row as unknown as Record<string, unknown>, currentRunIds, materialBoundary)).map((entry) => entry.id);
+      const stale = selected.filter((entry) => entry.row && !rowBelongsToCurrentMaterial(entry.row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary)).map((entry) => entry.id);
       if (stale.length > 0 && body.allowMaterialDrift !== true) {
         return sendJson(c.res, 409, {
           error: `finding ${stale.join(", ")} belongs to an older prepared material snapshot. Re-run Map/Dig on the current prepared source, or pass allowMaterialDrift:true only to inspect historical results.`,
@@ -1661,7 +1684,7 @@ async function runLaunch(c: Ctx): Promise<void> {
     } else {
       const pending = c.store.pendingConfirmable(Number(project.id))
         .filter((p) => p.run_dir)
-        .filter((p) => rowBelongsToCurrentMaterial(p as unknown as Record<string, unknown>, currentRunIds, materialBoundary));
+        .filter((p) => rowBelongsToCurrentMaterial(p as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary));
       if (pending.length === 0) return sendJson(c.res, 400, { error: "nothing to confirm — every audit-confirmed finding already has a real-target decision (use --fresh to redo)" });
       spec.inputRunDirs = [...new Set(pending.map((p) => String(p.run_dir)))];
       spec.inputRunDir = spec.inputRunDirs[0];
@@ -1670,7 +1693,7 @@ async function runLaunch(c: Ctx): Promise<void> {
   }
   if (spec.verb === "report") {
     const selected = selectedFindingIds(body);
-    const reports = reportWorklist(c.store, Number(project.id), selected, currentRunIds, materialBoundary, latestPrepareRequiresRealTargetConfirmation(runs));
+    const reports = reportWorklist(c.store, Number(project.id), selected, currentResultRunIds, materialBoundary, latestPrepareRequiresRealTargetConfirmation(runs));
     if (reports.error) return sendJson(c.res, 400, { error: reports.error });
     spec.reportFindings = reports.findings;
   }
@@ -1969,10 +1992,11 @@ function findingsList(c: Ctx): void {
     const materialBoundary = latestPrepareRun(allRuns);
     const activePrepareRefresh = activePrepareRefreshStartedAt(c.store, project, materialBoundary);
     const currentRuns = currentVisibleRuns(allRuns, materialBoundary, activePrepareRefresh);
-    const currentRunIds = runIdSet(currentRuns);
+    const scopeBoundary = latestScopeInventoryBoundaryRun(currentRuns);
+    const currentResultRunIds = runIdSet(currentResultRuns(currentRuns, scopeBoundary));
     const rows = reportableFindings(c.store.listFindings(id)
-      .filter((finding) => includeStale || (!activePrepareRefresh && rowBelongsToCurrentMaterial(finding, currentRunIds, materialBoundary))))
-      .map((finding) => annotateFindingMaterialStaleness(finding, currentRunIds, materialBoundary, activePrepareRefresh))
+      .filter((finding) => includeStale || (!activePrepareRefresh && rowBelongsToCurrentMaterial(finding, currentResultRunIds, materialBoundary))))
+      .map((finding) => annotateFindingMaterialStaleness(finding, currentResultRunIds, materialBoundary, activePrepareRefresh))
       .filter((finding) => findingStatusMatches(finding, status))
       .filter((finding) => !search || `${finding.title ?? ""} ${finding.location ?? ""}`.toLowerCase().includes(search.toLowerCase()))
       .sort((a, b) => findingSeverityScore(b) - findingSeverityScore(a) || String(b.updated_at ?? "").localeCompare(String(a.updated_at ?? "")));
@@ -2282,11 +2306,12 @@ function confirmDecisionsList(c: Ctx): void {
     const materialBoundary = latestPrepareRun(allRuns);
     const activePrepareRefresh = activePrepareRefreshStartedAt(c.store, project, materialBoundary);
     const currentRuns = currentVisibleRuns(allRuns, materialBoundary, activePrepareRefresh);
-    const currentRunIds = runIdSet(currentRuns);
+    const scopeBoundary = latestScopeInventoryBoundaryRun(currentRuns);
+    const currentResultRunIds = runIdSet(currentResultRuns(currentRuns, scopeBoundary));
     let rows = c.store.listConfirmDecisions(id);
     rows = rows
-      .filter((row) => includeStale || (!activePrepareRefresh && rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)))
-      .map((row) => annotateConfirmDecisionMaterialStaleness(row, currentRunIds, materialBoundary, activePrepareRefresh));
+      .filter((row) => includeStale || (!activePrepareRefresh && rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary)))
+      .map((row) => annotateConfirmDecisionMaterialStaleness(row, currentResultRunIds, materialBoundary, activePrepareRefresh));
     if (reproduced) rows = rows.filter((row) => row.reproduced === reproduced);
     sendJson(c.res, 200, { confirmDecisions: rows });
   });
@@ -2840,7 +2865,9 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
     const activePrepareRefresh = activePrepareRefreshStartedAt(store, project, materialBoundary);
     const currentRuns = currentVisibleRuns(allRuns, materialBoundary, activePrepareRefresh);
     const viewBoundary = materialViewBoundary(materialBoundary, activePrepareRefresh);
-    const currentRunIds = runIdSet(currentRuns);
+    const scopeBoundary = latestScopeInventoryBoundaryRun(currentRuns);
+    const currentResultRows = currentResultRuns(currentRuns, scopeBoundary);
+    const currentRunIds = runIdSet(currentResultRows);
     const scopeView = currentScopeView(store, id, currentRuns, activePrepareRefresh);
     const findings = activePrepareRefresh
       ? []
@@ -2876,7 +2903,7 @@ function projectSnapshots(store: MetadataStore): Array<Record<string, unknown>> 
       confirmPendingFindings,
       confirmDecisionCount: confirmDecisions.length,
       runCount: store.countRuns(id),
-      currentRunCount: currentRuns.length,
+      currentRunCount: currentResultRows.length,
       latestRun: runApiRows(store, currentRuns.slice(0, 1), undefined, viewBoundary)[0] ?? null,
       activeRuns: activeByTarget.get(String(project.name)) ?? 0,
       material: materialSummary(allRuns, materialBoundary, activePrepareRefresh),

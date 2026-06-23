@@ -631,6 +631,97 @@ test("api: running prepare resets the project current view to the new material s
   });
 });
 
+test("api: remap resets downstream findings and decisions from the current view", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "remap-current-view", sourcePaths: ["./src"] }));
+    const mapDir = await mkdtemp(path.join(out, "remap-current-view-map-"));
+    const workspace = path.join(mapDir, "audit", "workspace");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      path.join(workspace, "scopes.json"),
+      JSON.stringify([
+        { id: "NEW-1", obligation: "Bind remapped input.", region: "src/New.sol:1-40", score: 9 },
+        { id: "NEW-2", obligation: "Reject stale state.", region: "src/New.sol:41-80", score: 8 },
+      ]),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "remap-current-view-prepare") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", prepareRun);
+      store.finishRun(prepareRun, "done");
+
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "remap-current-view-audit") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T01:00:00.000Z", auditRun);
+      store.upsertScopes(created.id, [{ scopeId: "OLD-1", title: "Old scope", status: "audited", score: 10 }]);
+      store.upsertFindings(created.id, auditRun, [
+        {
+          findingKey: "old-bug",
+          title: "Old bug",
+          location: "src/Old.sol:9",
+          severity: "high",
+          status: "confirmed-executable",
+        },
+      ]);
+      store.finishRun(auditRun, "done");
+
+      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "remap-current-view-confirm") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T02:00:00.000Z", confirmRun);
+      store.upsertConfirmDecisions(created.id, confirmRun, [
+        {
+          bug: "Old bug",
+          reproduced: "yes",
+          recommendation: "submit-candidate",
+          members: ["old-bug"],
+        },
+      ]);
+      store.finishRun(confirmRun, "done");
+
+      const mapRun = store.startRun({ projectId: created.id, kind: "map", runDir: mapDir });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T03:00:00.000Z", mapRun);
+      store.finishRun(mapRun, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.deepEqual(detail.progress, { total: 2, audited: 0, deferred: 0, pending: 2 });
+    assert.equal(detail.findingsTotal, 0);
+    assert.equal(detail.auditConfirmedFindings, 0);
+    assert.equal(detail.reproducedBugs, 0);
+    assert.deepEqual(detail.confirmDecisions, []);
+    assert.deepEqual(detail.allFindings, []);
+    assert.equal(detail.material.currentScopeInventoryStatus, "done");
+    assert.equal(detail.currentRunsTotal, 1);
+    assert.equal(detail.runs.find((run) => !run.material_stale)?.kind, "map");
+
+    const currentFindings = await json(await fetch(base + `/api/projects/${created.uuid}/findings`));
+    assert.equal(currentFindings.total, 0);
+    const staleFindings = await json(await fetch(base + `/api/projects/${created.uuid}/findings?includeStale=true`));
+    assert.equal(staleFindings.total, 1);
+    assert.equal(staleFindings.findings[0].title, "Old bug");
+    assert.equal(staleFindings.findings[0].material_stale, true);
+
+    const currentDecisions = await json(await fetch(base + `/api/projects/${created.uuid}/confirm-decisions`));
+    assert.deepEqual(currentDecisions.confirmDecisions, []);
+    const staleDecisions = await json(await fetch(base + `/api/projects/${created.uuid}/confirm-decisions?includeStale=true`));
+    assert.equal(staleDecisions.confirmDecisions.length, 1);
+    assert.equal(staleDecisions.confirmDecisions[0].bug, "Old bug");
+    assert.equal(staleDecisions.confirmDecisions[0].material_stale, true);
+
+    const list = await json(await fetch(base + "/api/projects"));
+    const snapshot = list.projects.find((project) => project.uuid === created.uuid);
+    assert.deepEqual(snapshot.progress, { total: 2, audited: 0, deferred: 0, pending: 2 });
+    assert.equal(snapshot.findingsTotal, 0);
+    assert.equal(snapshot.reproducedBugs, 0);
+    assert.equal(snapshot.confirmDecisionCount, 0);
+    assert.equal(snapshot.currentRunCount, 1);
+    assert.equal(snapshot.latestRun.kind, "map");
+  });
+});
+
 test("api: report launch queues only reproduced real-target findings that were not dropped", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

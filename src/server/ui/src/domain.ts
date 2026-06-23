@@ -195,7 +195,11 @@ export function currentMaterialRuns(runs: RunRow[] | undefined, material?: Proje
   const current = (runs ?? []).filter((run) => !run.material_stale);
   const prepareRefreshStartedAt = material?.activePrepareRefreshStartedAt
     ?? (material?.currentPrepareStatus === "running" ? material.currentPrepareStartedAt ?? undefined : undefined);
-  if (!prepareRefreshStartedAt) return current;
+  if (!prepareRefreshStartedAt && !material?.currentScopeInventoryStartedAt) return current;
+  if (!prepareRefreshStartedAt) {
+    const boundaryMs = startedAtMs(material?.currentScopeInventoryStartedAt);
+    return current.filter((run) => run.kind === "prepare" || startedAtMs(run.started_at) >= boundaryMs);
+  }
   const boundaryMs = startedAtMs(prepareRefreshStartedAt);
   return current.filter((run) => run.kind === "prepare" && startedAtMs(run.started_at) >= boundaryMs);
 }
@@ -239,7 +243,13 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const startMs = auditRun?.started_at ? new Date(auditRun.started_at).getTime() : 0;
   const endMs = auditLatest?.ended_at ? new Date(auditLatest.ended_at).getTime() : 0;
   const boundMs = auditRun?.dig_started_at ? new Date(auditRun.dig_started_at).getTime() : 0;
-  const mapDur = mapRunning ? runDur(audit, true) : progress.total > 0 && startMs && boundMs > startMs ? fmtDur(boundMs - startMs) : "";
+  const mapDur = mapRunning
+    ? runDur(audit, true)
+    : progress.total > 0 && auditLatest?.kind === "map"
+      ? runDur(auditLatest, false)
+      : progress.total > 0 && startMs && boundMs > startMs
+        ? fmtDur(boundMs - startMs)
+        : "";
   const digDur = digRunning
     ? boundMs
       ? fmtDur(Date.now() - boundMs)

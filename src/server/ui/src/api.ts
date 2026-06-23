@@ -163,6 +163,9 @@ export interface MaterialSummary {
   currentPrepareRunId?: number | null;
   currentPrepareStatus?: string | null;
   currentPrepareStartedAt?: string | null;
+  currentScopeInventoryRunId?: number | null;
+  currentScopeInventoryStatus?: string | null;
+  currentScopeInventoryStartedAt?: string | null;
   staleRunCount?: number;
   activePrepareRefreshStartedAt?: string;
 }
