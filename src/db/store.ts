@@ -608,7 +608,6 @@ export class MetadataStore {
          JOIN run source ON source.id = ?
          WHERE newer.project_id = ?
            AND newer.kind = 'prepare'
-           AND newer.status = 'done'
            AND newer.started_at > source.started_at
          ORDER BY newer.started_at DESC
          LIMIT 1`,

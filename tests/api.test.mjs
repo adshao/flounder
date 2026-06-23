@@ -353,6 +353,43 @@ test("api: verify launch rejects findings produced before a newer prepare run", 
   });
 });
 
+test("api: verify launch treats killed newer prepare as material drift", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "verify-killed-material-drift", sourcePaths: ["./src"] }));
+    const store = MetadataStore.openForOutput(out);
+    let prepareRun;
+    try {
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "verify-killed-material-drift-audit") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", auditRun);
+      store.upsertFindings(created.id, auditRun, [
+        {
+          findingKey: "stale-suspected-bug",
+          title: "Stale proof input is not bound",
+          location: "src/Rollup.sol:44",
+          severity: "high",
+          status: "suspected",
+        },
+      ]);
+      prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "verify-killed-material-drift-prepare") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-02T00:00:00.000Z", prepareRun);
+      store.finishRun(prepareRun, "killed");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    const finding = detail.allFindings[0];
+    const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "audit", verifyFindings: [finding] });
+    assert.equal(rejected.status, 409);
+    const rejectedBody = await json(rejected);
+    assert.equal(rejectedBody.materialDrift, true);
+    assert.equal(rejectedBody.findings[0].findingId, finding.id);
+    assert.equal(rejectedBody.findings[0].prepareRunId, prepareRun);
+  });
+});
+
 test("api: report launch queues only reproduced real-target findings that were not dropped", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
