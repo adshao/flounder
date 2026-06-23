@@ -802,19 +802,20 @@ small {
 }
 
 .phase-detail {
-  display: flex;
-  flex-direction: column;
+  display: grid;
+  grid-template-rows: minmax(0, 1fr) auto;
   align-items: flex-start;
   gap: 4px;
   min-height: 0;
   flex: 1;
-  justify-content: space-between;
   color: var(--fg-muted);
 }
 
 .phase-detail > span:first-child {
   display: block;
-  max-height: 3.7em;
+  min-height: 0;
+  max-height: none;
+  width: 100%;
   overflow: auto;
   overflow-wrap: anywhere;
   padding-right: 2px;
@@ -823,7 +824,7 @@ small {
 
 .phase-time {
   display: block;
-  margin-top: auto;
+  margin-top: 0;
   color: var(--accent);
   font-weight: 650;
   white-space: nowrap;

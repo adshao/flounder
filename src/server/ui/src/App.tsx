@@ -18,7 +18,12 @@ import {
 import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge } from "./components";
 import {
   confirmedDecisions,
+  currentMaterialDetail,
+  currentMaterialConfirmDecisions,
+  currentMaterialFindings,
+  currentMaterialProgress,
   currentMaterialRuns,
+  materialRefreshInProgress,
   fmtDur,
   fmtTime,
   isVerifyRun,
@@ -180,6 +185,30 @@ function detailSnapshotDiffers(project: ProjectSnapshot, detail: ProjectDetail |
     || (project.material?.currentPrepareStatus ?? null) !== (detail.material?.currentPrepareStatus ?? null)
     || (project.material?.activePrepareRefreshStartedAt ?? null) !== (detail.material?.activePrepareRefreshStartedAt ?? null)
   );
+}
+
+function snapshotFromDetail(project: ProjectSnapshot, detail: ProjectDetail): ProjectSnapshot {
+  const current = currentMaterialDetail(detail);
+  const currentRuns = currentMaterialRuns(detail.runs, detail.material);
+  const requiresConfirmation = needsRealTargetConfirmation(current);
+  const currentRunningRuns = currentRuns.filter((run) => run.status === "running").length;
+  const materialRefreshActive = materialRefreshInProgress(detail.material);
+  return {
+    ...project,
+    progress: current.progress,
+    findingCounts: current.statusCounts,
+    findingsTotal: current.findingsTotal,
+    auditConfirmedFindings: current.auditConfirmedFindings,
+    reproducedBugs: current.reproducedBugs,
+    confirmedBugs: current.confirmedBugs,
+    verifyPendingFindings: pendingVerifyFindings(current.allFindings).length,
+    confirmPendingFindings: pendingConfirmFindings(current.allFindings, requiresConfirmation).length,
+    confirmDecisionCount: current.confirmDecisions.length,
+    latestRun: currentRuns[0] ?? null,
+    currentRunCount: current.currentRunsTotal ?? currentRuns.length,
+    activeRuns: Math.max(project.activeRuns ?? 0, currentRunningRuns, materialRefreshActive ? 1 : 0),
+    material: current.material,
+  };
 }
 
 function daemonAgeMs(daemon: DaemonRow): number {
@@ -1156,6 +1185,10 @@ export function App() {
   }, [bugPage, bugPageCount]);
 
   const selectedProject = route.projectUuid ? projects.find((p) => p.uuid === route.projectUuid) : undefined;
+  const currentDetailForModal = detail ? currentMaterialDetail(detail) : null;
+  const sidebarProjects = detail && selectedProject
+    ? projects.map((project) => project.uuid === detail.project.uuid ? snapshotFromDetail(project, detail) : project)
+    : projects;
   const onlineDaemons = daemons.filter((daemon) => daemonHealth(daemon) === "online");
   const latestRunning = projects.reduce((n, project) => n + (project.activeRuns ?? (project.latestRun?.status === "running" ? 1 : 0)), 0);
   const visibleRunningRun = detail?.runs.some((run) => run.status === "running") ?? false;
@@ -1208,8 +1241,9 @@ export function App() {
     if (!route.projectUuid) return;
     let verifyCandidates: FindingRow[] = [];
     if (detail?.project.uuid === route.projectUuid) {
-      const running = detail.runs.find((run) => run.status === "running");
-      const selectedDaemon = daemons.find((daemon) => daemon.id === detail.project.daemon_id);
+      const currentDetail = currentMaterialDetail(detail);
+      const running = currentMaterialRuns(detail.runs, detail.material).find((run) => run.status === "running");
+      const selectedDaemon = daemons.find((daemon) => daemon.id === currentDetail.project.daemon_id);
       if (!selectedDaemon) {
         setToast({ tone: "warning", message: "Select a project daemon before launching. Project paths and provider credentials live on the daemon machine." });
         setModal(null);
@@ -1220,7 +1254,7 @@ export function App() {
         setModal(null);
         return;
       }
-      const missingAuth = requiredProviderProfiles(detail, providers).filter((profile) => daemonHasProvider(selectedDaemon, profile.provider) === false);
+      const missingAuth = requiredProviderProfiles(currentDetail, providers).filter((profile) => daemonHasProvider(selectedDaemon, profile.provider) === false);
       if (missingAuth.length > 0) {
         setToast({ tone: "warning", message: `Configure ${missingAuth.map((profile) => profile.provider).join(", ")} on ${selectedDaemon.name ?? `daemon-${selectedDaemon.id}`} before launching.` });
         setModal(null);
@@ -1231,26 +1265,26 @@ export function App() {
         setModal(null);
         return;
       }
-      const requiresConfirmation = needsRealTargetConfirmation(detail);
-      if (action === "confirm" && pendingConfirmFindings(detail.allFindings, requiresConfirmation).length === 0) {
+      const requiresConfirmation = needsRealTargetConfirmation(currentDetail);
+      if (action === "confirm" && pendingConfirmFindings(currentDetail.allFindings, requiresConfirmation).length === 0) {
         setToast({ tone: "warning", message: "There are no audit-confirmed findings waiting for real-target confirmation yet." });
         setModal(null);
         return;
       }
-      if (action === "report" && reportableFindings(detail.allFindings, requiresConfirmation).length === 0) {
+      if (action === "report" && reportableFindings(currentDetail.allFindings, requiresConfirmation).length === 0) {
         setToast({ tone: "warning", message: requiresConfirmation ? "There are no real-target reproduced findings ready for formal reports yet." : "There are no locally execution-confirmed findings ready for formal reports yet." });
         setModal(null);
         return;
       }
       if (action === "verify") {
-        verifyCandidates = pendingVerifyFindings(detail.allFindings);
+        verifyCandidates = pendingVerifyFindings(currentDetail.allFindings);
         if (verifyCandidates.length === 0) {
           setToast({ tone: "warning", message: "There are no suspected or source-confirmed candidates waiting for execution verification." });
           setModal(null);
           return;
         }
       }
-      if (action === "audit" && (detail.progress.pending ?? 0) === 0) {
+      if (action === "audit" && (currentDetail.progress.pending ?? 0) === 0) {
         setToast({ tone: "warning", message: "There are no pending scopes to dig. Run map first or continue audit when new scopes are available." });
         setModal(null);
         return;
@@ -1371,7 +1405,7 @@ export function App() {
         {route.view === "projects" ? (
           <>
             <ProjectSidebar
-              projects={projects}
+              projects={sidebarProjects}
               selected={route.projectUuid}
               onNew={() => setModal("new-project")}
               onSelect={(uuid) => go(projectPath(uuid))}
@@ -1458,7 +1492,7 @@ export function App() {
           onError={(message) => setToast({ tone: "error", message })}
         />
       ) : null}
-      {modal === "run" && detail ? <RunModal detail={detail} busy={busy} onClose={() => setModal(null)} onLaunch={requestLaunch} onUpdateRunTarget={(run, target) => void updateRunTarget(run, target)} onError={(message) => setToast({ tone: "error", message })} /> : null}
+      {modal === "run" && currentDetailForModal ? <RunModal detail={currentDetailForModal} busy={busy} onClose={() => setModal(null)} onLaunch={requestLaunch} onUpdateRunTarget={(run, target) => void updateRunTarget(run, target)} onError={(message) => setToast({ tone: "error", message })} /> : null}
       {modal === "edit-project" && detail ? <EditProjectModal detail={detail} providers={providers} daemons={daemons} onClose={() => setModal(null)} onSaved={async () => { setDetail(await api.project(detail.project.uuid)); setModal(null); }} onError={(message) => setToast({ tone: "error", message })} /> : null}
       {modal === "report" && reportFinding ? <ReportModal finding={reportFinding} onClose={() => setModal(null)} /> : null}
       {modal === "artifact" && artifactPreview ? <ArtifactModal artifact={artifactPreview} onClose={() => { setModal(null); setArtifactPreview(null); }} /> : null}
@@ -1471,10 +1505,10 @@ export function App() {
           onConfirm={() => void stopRun(stopConfirmRun)}
         />
       ) : null}
-      {launchConfirmAction && detail ? (
+      {launchConfirmAction && currentDetailForModal ? (
         <LaunchConfirmModal
           action={launchConfirmAction}
-          detail={detail}
+          detail={currentDetailForModal}
           busy={busy}
           onCancel={() => setLaunchConfirmAction(null)}
           onConfirm={(selectedFindings) => {
@@ -1627,21 +1661,26 @@ function ProjectDetailView(props: {
   const config = projectConfig(detail);
   const selectedDaemonOnline = selectedDaemon ? daemonHealth(selectedDaemon) === "online" : false;
   const online = selectedDaemonOnline ? [selectedDaemon] : [];
-  const phases = phaseState(detail, detail.progress);
+  const progress = currentMaterialProgress(detail);
+  const allFindings = currentMaterialFindings(detail);
+  const confirmDecisions = currentMaterialConfirmDecisions(detail);
+  const materialRefreshActive = materialRefreshInProgress(detail.material);
+  const currentDetail = currentMaterialDetail(detail);
+  const phases = phaseState(currentDetail, progress);
   const currentRuns = currentMaterialRuns(detail.runs, detail.material);
-  const topCandidates = topCandidateFindings(detail.allFindings);
-  const verifyCandidates = pendingVerifyFindings(detail.allFindings);
+  const topCandidates = topCandidateFindings(allFindings);
+  const verifyCandidates = pendingVerifyFindings(allFindings);
   const overviewCandidates = verifyCandidates.length ? verifyCandidates : topCandidates;
-  const confirmed = detail.auditConfirmedFindings;
-  const reproduced = confirmedDecisions(detail.confirmDecisions).length;
+  const confirmed = allFindings.filter((finding) => finding.status === "confirmed-executable" || finding.status === "confirmed-differential").length;
+  const reproduced = confirmedDecisions(confirmDecisions).length;
   const runningRun = currentRuns.find((run) => run.status === "running");
   const runningInactive = runningRun ? runInactiveLabel(runningRun) : null;
   const requiresConfirmation = needsRealTargetConfirmation(detail);
-  const pendingConfirm = pendingConfirmFindings(detail.allFindings, requiresConfirmation).length;
+  const pendingConfirm = pendingConfirmFindings(allFindings, requiresConfirmation).length;
   const pendingVerify = verifyCandidates.length;
-  const pendingReports = pendingFormalReports(detail.allFindings, requiresConfirmation).length;
-  const locallyVerified = localVerifiedFindings(detail.allFindings).length;
-  const localVerifySummary = verifyStatusSummary(detail.allFindings);
+  const pendingReports = pendingFormalReports(allFindings, requiresConfirmation).length;
+  const locallyVerified = localVerifiedFindings(allFindings).length;
+  const localVerifySummary = verifyStatusSummary(allFindings);
   const setupAttention = prepareMaterialsAttention(detail.prepareSummary);
   const launchLocked = props.busy || Boolean(runningRun);
   const confirmTitle = confirmButtonTitle(pendingConfirm, locallyVerified, launchLocked);
@@ -1653,18 +1692,17 @@ function ProjectDetailView(props: {
     .map((phase) => ({ phase, provider: phaseProvider(detail, providers, phase) }))
     .filter((entry) => entry.provider);
   const currentRunningRuns = currentRuns.filter((run) => run.status === "running").length;
-  const materialRefreshActive = Boolean(detail.material?.activePrepareRefreshStartedAt || detail.material?.currentPrepareStatus === "running");
   const currentProject: ProjectSnapshot = {
     ...project,
-    progress: detail.progress,
-    findingCounts: detail.statusCounts,
-    findingsTotal: detail.findingsTotal,
-    auditConfirmedFindings: detail.auditConfirmedFindings,
-    reproducedBugs: detail.reproducedBugs,
-    confirmedBugs: detail.confirmedBugs,
+    progress,
+    findingCounts: materialRefreshActive ? {} : detail.statusCounts,
+    findingsTotal: allFindings.length,
+    auditConfirmedFindings: confirmed,
+    reproducedBugs: reproduced,
+    confirmedBugs: reproduced,
     verifyPendingFindings: pendingVerify,
     confirmPendingFindings: pendingConfirm,
-    confirmDecisionCount: detail.confirmDecisions.length,
+    confirmDecisionCount: confirmDecisions.length,
     latestRun: currentRuns[0] ?? null,
     activeRuns: Math.max(project.activeRuns ?? 0, currentRunningRuns, materialRefreshActive ? 1 : 0),
     currentRunCount: detail.currentRunsTotal ?? currentRuns.length,
@@ -1823,7 +1861,7 @@ function ProjectDetailView(props: {
                 ? `Last activity was ${runningInactive} ago. Stop the run if the daemon is no longer making progress.`
                 : online.length
                   ? "New launches are locked until this run finishes or you stop it."
-                  : "No daemon is online, so the run may be stalled until an executor reconnects."} Current progress: {runProgress(runningRun, detail.confirmDecisions)}.
+                : "No daemon is online, so the run may be stalled until an executor reconnects."} Current progress: {runProgress(runningRun, confirmDecisions)}.
             </span>
           </div>
         ) : null}
@@ -1856,14 +1894,14 @@ function ProjectDetailView(props: {
           })}
         </div>
         <div className="stats">
-          <Stat n={detail.progress.total} label="scopes" onClick={() => setTab("scopes")} />
-          <Stat n={detail.findingsTotal} label="findings" onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); setTab("findings"); }} />
+          <Stat n={progress.total} label="scopes" onClick={() => setTab("scopes")} />
+          <Stat n={allFindings.length} label="findings" onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); setTab("findings"); }} />
           <Stat n={overviewCandidates.length} label={pendingVerify ? "to verify" : "top candidates"} onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); setTab("overview"); scrollToProjectSection("project-top-candidates"); }} />
           <Stat n={confirmed} label="confirmed" good onClick={() => { props.setFindingStatus("execution-confirmed"); props.setFindingQuery(""); setTab("findings"); }} />
           <Stat n={reproduced} label="reproduced" onClick={() => { setTab("overview"); scrollToProjectSection("project-real-target-decisions"); }} />
           <Stat n={detail.currentRunsTotal ?? currentRuns.length} label="runs" onClick={() => setTab("runs")} />
         </div>
-        <RealTargetCallout decisions={detail.confirmDecisions} onOpen={() => { setTab("overview"); scrollToProjectSection("project-real-target-decisions"); }} />
+        <RealTargetCallout decisions={confirmDecisions} onOpen={() => { setTab("overview"); scrollToProjectSection("project-real-target-decisions"); }} />
         <ProjectSetupDisclosure items={readyItems} />
       </Card>
       <div className="tabs" role="tablist" aria-label="Project sections">
@@ -1881,10 +1919,10 @@ function ProjectDetailView(props: {
           </button>
         ))}
       </div>
-      {tab === "overview" ? <ProjectOverview detail={detail} candidates={overviewCandidates} verifyCount={pendingVerify} verifyLocked={launchLocked || pendingVerify === 0} onVerifyCandidates={() => props.onLaunch("verify")} onOpenReport={props.onOpenReport} /> : null}
+      {tab === "overview" ? <ProjectOverview detail={currentDetail} candidates={overviewCandidates} verifyCount={pendingVerify} verifyLocked={launchLocked || pendingVerify === 0} onVerifyCandidates={() => props.onLaunch("verify")} onOpenReport={props.onOpenReport} /> : null}
       {tab === "findings" ? (
         <ProjectFindings
-          detail={detail}
+          detail={currentDetail}
           query={props.findingQuery}
           setQuery={props.setFindingQuery}
           status={props.findingStatus}
@@ -1893,8 +1931,8 @@ function ProjectDetailView(props: {
           onTracking={props.onTracking}
         />
       ) : null}
-      {tab === "scopes" ? <ScopesView detail={detail} onPatchScope={props.onPatchScope} /> : null}
-      {tab === "runs" ? <RunsView detail={detail} onStopRun={props.onStopRun} onOpenLog={props.onOpenRunLog} /> : null}
+      {tab === "scopes" ? <ScopesView detail={currentDetail} onPatchScope={props.onPatchScope} /> : null}
+      {tab === "runs" ? <RunsView detail={currentDetail} onStopRun={props.onStopRun} onOpenLog={props.onOpenRunLog} /> : null}
       {tab === "setup" ? <ProjectSetupTab detail={detail} /> : null}
     </div>
   );
@@ -3545,7 +3583,7 @@ function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onErro
 }
 
 function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError }: { detail: ProjectDetail; busy: boolean; onClose: () => void; onLaunch: (action: LaunchAction) => void; onUpdateRunTarget: (run: RunRow, target: number) => void; onError: (message: string) => void }) {
-  const running = detail.runs.find((run) => run.status === "running");
+  const running = currentMaterialRuns(detail.runs, detail.material).find((run) => run.status === "running");
   const pendingScopes = detail.progress.pending ?? 0;
   const requiresConfirmation = needsRealTargetConfirmation(detail);
   const confirmable = pendingConfirmFindings(detail.allFindings, requiresConfirmation).length;
