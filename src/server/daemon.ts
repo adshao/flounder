@@ -112,9 +112,11 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
         }
       }
       sink.flush();
+      await tracker?.flush();
       await post(base, headers, `/api/daemon/jobs/${job.id}/status`, { status: abort.signal.aborted ? "canceled" : "done" });
     } catch (error) {
       sink.flush();
+      await tracker?.flush();
       await post(base, headers, `/api/daemon/jobs/${job.id}/status`, { status: abort.signal.aborted ? "canceled" : "error", error: error instanceof Error ? error.message.slice(0, 500) : String(error) });
     } finally {
       inflight.delete(job.id);
@@ -251,6 +253,10 @@ class RemoteTracker implements RunTracker {
 
   activity(events: Activity[]): void {
     this.enqueue(() => (this.runId ? this.req("POST", `/api/daemon/runs/${this.runId}/activity`, { events }) : Promise.resolve()));
+  }
+
+  flush(): Promise<void> {
+    return this.chain;
   }
 }
 

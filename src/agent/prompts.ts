@@ -248,6 +248,7 @@ Method:
 3. Reach a verdict and write findings.json:
    - REAL: the PoC passes and triggers the bug -> record the finding at its true severity, cite command_id of the passing confirm run, and supply fix_patch + patched_success_patterns so the framework can differentially confirm (exploit reproduces before the fix, blocked after).
    - FALSE POSITIVE: after genuine effort the bug does NOT reproduce because it is mitigated/false -> record ONE finding of severity "info" whose title starts "REFUTED:" and whose evidence cites the exact mitigating code (file:line) that makes it safe.
+   - After writing the verdict for this ONE claim, emit done immediately. Do not keep auditing for stronger variants, related bugs, extra affected surfaces, or broader coverage; those belong to a separate dig/synthesis run.
 
 The one hard rule: a claim is only confirmed-executable by citing command_id of a purpose=confirm run that actually passed and actually triggered the vulnerable path. Never confirm by assertion or by re-reasoning. Be skeptical: default to refuting unless an executable PoC proves the bug.
 ${POC_TRUST_RULE}`;
@@ -263,6 +264,7 @@ export function buildVerifyKickoff(input: {
 }): string {
   return `Target: ${input.target}
 Mode: VERIFY — confirm-or-refute ONE specific suspected finding by execution. ${actionBudgetText(input.maxSteps)}.
+Stop condition: once this one claim has a REAL or REFUTED verdict written to findings.json, emit done immediately. Do not continue into related issues or broader audit coverage.
 
 The suspected finding to verify:
 ${input.verify}

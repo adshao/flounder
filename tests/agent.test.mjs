@@ -170,6 +170,11 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
     assert.ok(prompt.includes("missing-registry-package"), "verify should avoid repeating missing registry-package failures");
     assert.ok(prompt.includes("DNS failure"), "verify should avoid repeating network setup failures");
     assert.ok(prompt.includes("setup blocker"), "verify should distinguish environment setup failures from false-positive refutations");
+    assert.ok(prompt.includes("emit done immediately"), "verify should stop after the selected claim has a verdict");
+    assert.ok(
+      prompt.includes("broader coverage") || prompt.includes("broader audit coverage") || prompt.includes("related bugs"),
+      "verify should not drift into open-ended audit coverage",
+    );
   }
 
   const preparePrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "(empty)", prepare: "Clue: official source" });
