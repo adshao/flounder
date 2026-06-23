@@ -10,6 +10,7 @@ import { ProjectMemory } from "./memory.js";
 import { isPiSessionProvider, runAuditSession } from "./pi-session.js";
 import { buildTools, newSession, type AgentSession, type ToolContext } from "./tools.js";
 import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
+import type { RunStatus } from "../db/store.js";
 
 // `flounder prepare` — the open-world ACQUISITION phase that runs BEFORE map. Given a clue
 // (a tx, an address, a project, a package, a repo, a link), it resolves the complete dependency
@@ -128,6 +129,7 @@ export async function runPrepare(
   let manifest = readPrepareManifest(session, workspace.absolute);
   const validation = validatePrepareManifest(manifest, options.matchDeployed);
   manifest = normalizePrepareManifest(manifest, validation);
+  const blockingIssues = prepareValidationBlockingIssues(validation);
   if (manifest !== undefined) {
     const content = `${JSON.stringify(manifest, null, 2)}\n`;
     await writeSandboxFiles(workspace.absolute, [{ path: "prepare_manifest.json", content }]);
@@ -142,11 +144,27 @@ export async function runPrepare(
     unverified: validation.unverified,
     sourcePinned: validation.sourcePinned,
     issues: validation.issues.length,
+    blockingIssues: blockingIssues.length,
   });
 
-  recorder.finish(manifest !== undefined ? "done" : "error");
+  const finalStatus: RunStatus = options.signal?.aborted ? "killed" : manifest !== undefined && blockingIssues.length === 0 ? "done" : "error";
+  recorder.finish(finalStatus);
+  if (finalStatus === "error") {
+    const reason = blockingIssues.length > 0 ? blockingIssues.join("; ") : "no prepare_manifest.json written by the model";
+    throw new Error(`prepare did not produce usable source materials: ${reason}`);
+  }
 
   return { runDir: logger.runDir, workspaceDir: workspace.absolute, manifest: manifest ?? null, validation };
+}
+
+export function prepareValidationBlockingIssues(validation: PrepareValidation): string[] {
+  return uniqueStrings(
+    validation.issues.filter((issue) => {
+      const raw = issue.toLowerCase();
+      return raw.includes("no prepare_manifest.json")
+        || raw.includes("manifest lists no components");
+    }),
+  );
 }
 
 export function normalizePrepareManifest(manifest: unknown, validation: PrepareValidation): unknown {
@@ -437,6 +455,10 @@ function isPendingPreparePlaceholder(value: unknown): boolean {
     || raw.includes("not yet resolved")
     || raw.includes("unresolved")
     || raw.includes("unverified placeholder");
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.map((value) => value.trim()).filter(Boolean))];
 }
 
 function historyLocation(cfg: AuditorConfig): { outputDir: string; targetName: string; historyDir?: string } {

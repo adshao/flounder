@@ -7,7 +7,7 @@ import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../di
 import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings } from "../dist/agent/tools.js";
 import { runAudit } from "../dist/agent/audit.js";
-import { normalizePrepareManifest, readPrepareManifest } from "../dist/agent/acquire.js";
+import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
 import { runDifferentialConfirmation } from "../dist/agent/differential.js";
@@ -191,6 +191,26 @@ test("prepare manifest normalization turns ended in-progress manifests into term
   );
   assert.equal(placeholder.status, "partial");
   assert.match(placeholder.status_reason, /placeholders/);
+});
+
+test("prepare validation treats missing source components as a hard blocker", () => {
+  const noComponents = prepareValidationBlockingIssues({
+    components: 0,
+    matched: 0,
+    unverified: 0,
+    sourcePinned: 0,
+    issues: ["manifest lists no components", "missing docs/specs are best-effort"],
+  });
+  assert.deepEqual(noComponents, ["manifest lists no components"]);
+
+  const sourceReadyWithCaveat = prepareValidationBlockingIssues({
+    components: 1,
+    matched: 0,
+    unverified: 0,
+    sourcePinned: 1,
+    issues: ["official docs unavailable"],
+  });
+  assert.deepEqual(sourceReadyWithCaveat, []);
 });
 
 test("prepare manifest reader prefers the workspace file over stale scratch content", async () => {
