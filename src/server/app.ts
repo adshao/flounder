@@ -717,16 +717,22 @@ async function projectCreate(c: Ctx): Promise<void> {
 async function projectGet(c: Ctx): Promise<void> {
   await withProjectAsync(c, async (id, project) => {
     await reconcileStaleAuditingScopes(c, project);
-    const runs = runApiRows(c.store, c.store.listRuns(id, 50), c.plane);
-    const storedProgress = c.store.scopeProgress(id);
-    const storedScopes = c.store.queryScopes(id, { limit: 50, offset: 0 });
-    const scopeCheckpoint = latestScopeCheckpoint(runs);
+    const allRunsRaw = c.store.listRuns(id);
+    const materialBoundary = latestPrepareRun(allRunsRaw);
+    const currentRunsRaw = currentMaterialRuns(allRunsRaw, materialBoundary);
+    const currentRunIds = runIdSet(currentRunsRaw);
+    const runs = runApiRows(c.store, allRunsRaw.slice(0, 50), c.plane, materialBoundary);
+    const currentScopeRunExists = !materialBoundary || currentRunsRaw.some(isScopeInventoryRun);
+    const storedProgress = currentScopeRunExists ? c.store.scopeProgress(id) : emptyProgress();
+    const storedScopes = currentScopeRunExists ? c.store.queryScopes(id, { limit: 50, offset: 0 }) : [];
+    const scopeCheckpoint = latestScopeCheckpoint(currentRunsRaw);
     const scopes = scopeApiRows(storedScopes.length > 0 ? storedScopes : scopeCheckpoint?.scopes ?? storedScopes);
     const progress = storedProgress.total > 0 ? storedProgress : scopeCheckpoint?.progress ?? storedProgress;
-    const allFindings = reportableFindings(c.store.listFindings(id));
+    const allFindings = reportableFindings(c.store.listFindings(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const findingSummaries = allFindings.map(findingSummaryRow);
     const auditConfirmedFindings = countAuditConfirmedFindings(allFindings);
-    const reproducedBugs = c.store.countConfirmedBugs(id);
+    const confirmDecisions = c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary));
+    const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes").length;
     sendJson(c.res, 200, {
       project,
       progress,
@@ -737,29 +743,32 @@ async function projectGet(c: Ctx): Promise<void> {
       confirmedBugs: reproducedBugs,
       runs,
       runsTotal: c.store.countRuns(id),
-      activeScopeCount: c.store.countScopesByStatus(id, "auditing"),
-      confirmDecisions: c.store.listConfirmDecisions(id),
+      activeScopeCount: currentScopeRunExists ? c.store.countScopesByStatus(id, "auditing") : 0,
+      confirmDecisions,
       scopes,
       allFindings: findingSummaries,
       prepareSummary: latestPrepareSummary(runs),
+      material: materialSummary(allRunsRaw, materialBoundary),
     });
   });
 }
 
-function runApiRows(store: MetadataStore, runs: Array<Record<string, unknown>>, plane?: ControlPlane): Array<Record<string, unknown>> {
-  return runs.map((run) => runApiRow(store, run, plane));
+function runApiRows(store: MetadataStore, runs: Array<Record<string, unknown>>, plane?: ControlPlane, materialBoundary?: Record<string, unknown>): Array<Record<string, unknown>> {
+  return runs.map((run) => runApiRow(store, run, plane, materialBoundary));
 }
 
-function runApiRow(store: MetadataStore, run: Record<string, unknown>, plane?: ControlPlane): Record<string, unknown> {
+function runApiRow(store: MetadataStore, run: Record<string, unknown>, plane?: ControlPlane, materialBoundary?: Record<string, unknown>): Record<string, unknown> {
   const runId = Number(run.id);
   const job = Number.isFinite(runId) ? store.getJobByRun(runId) : undefined;
   const activity = runActivityFields(store, plane, run);
-  if (!job) return { ...run, ...activity };
+  const material = materialStaleness(run, materialBoundary);
+  if (!job) return { ...run, ...activity, ...material };
   const runStatus = typeof run.status === "string" ? run.status : "";
   const jobError = runStatus === "done" ? undefined : stringValue(job.error) || undefined;
   return {
     ...run,
     ...activity,
+    ...material,
     job_id: job.id,
     job_status: job.status,
     job_error: jobError,
@@ -780,16 +789,83 @@ function runActivityFields(store: MetadataStore, plane: ControlPlane | undefined
   };
 }
 
+function emptyProgress(): Coverage {
+  return { total: 0, audited: 0, deferred: 0, pending: 0 };
+}
+
+function latestPrepareRun(runs: Array<Record<string, unknown>>): Record<string, unknown> | undefined {
+  return runs.find((entry) => entry.kind === "prepare" && typeof entry.started_at === "string");
+}
+
+function isCurrentMaterialRun(run: Record<string, unknown>, boundary?: Record<string, unknown>): boolean {
+  if (!boundary) return true;
+  const runStarted = stringValue(run.started_at);
+  const boundaryStarted = stringValue(boundary.started_at);
+  if (!runStarted || !boundaryStarted) return true;
+  return runStarted >= boundaryStarted;
+}
+
+function currentMaterialRuns(runs: Array<Record<string, unknown>>, boundary?: Record<string, unknown>): Array<Record<string, unknown>> {
+  return runs.filter((run) => isCurrentMaterialRun(run, boundary));
+}
+
+function runIdSet(runs: Array<Record<string, unknown>>): Set<number> {
+  return new Set(runs.map((run) => Number(run.id)).filter(Number.isFinite));
+}
+
+function rowBelongsToCurrentMaterial(row: Record<string, unknown>, currentRunIds: Set<number>, boundary?: Record<string, unknown>): boolean {
+  if (!boundary) return true;
+  const runId = Number(row.run_id);
+  return Number.isFinite(runId) && currentRunIds.has(runId);
+}
+
+function isScopeInventoryRun(run: Record<string, unknown>): boolean {
+  return ["run", "map", "audit"].includes(stringValue(run.kind));
+}
+
+function materialStaleness(run: Record<string, unknown>, boundary?: Record<string, unknown>): Record<string, unknown> {
+  if (!boundary || isCurrentMaterialRun(run, boundary)) return {};
+  return {
+    material_stale: true,
+    stale_since_prepare_run_id: boundary.id,
+    stale_since_prepare_started_at: boundary.started_at,
+  };
+}
+
+function materialSummary(runs: Array<Record<string, unknown>>, boundary?: Record<string, unknown>): Record<string, unknown> {
+  if (!boundary) return { currentPrepareRunId: null, staleRunCount: 0 };
+  const staleRunCount = runs.filter((run) => !isCurrentMaterialRun(run, boundary)).length;
+  return {
+    currentPrepareRunId: boundary.id,
+    currentPrepareStatus: boundary.status,
+    currentPrepareStartedAt: boundary.started_at,
+    staleRunCount,
+  };
+}
+
 async function projectScopesGet(c: Ctx): Promise<void> {
   await withProjectAsync(c, async (id, project) => {
     await reconcileStaleAuditingScopes(c, project);
+    const allRuns = c.store.listRuns(id);
+    const materialBoundary = latestPrepareRun(allRuns);
+    const currentRuns = currentMaterialRuns(allRuns, materialBoundary);
+    if (materialBoundary && !currentRuns.some(isScopeInventoryRun)) {
+      return sendJson(c.res, 200, {
+        scopes: [],
+        progress: emptyProgress(),
+        total: 0,
+        limit: clampInt(c.url.searchParams.get("limit"), 50, 1, 500),
+        offset: clampInt(c.url.searchParams.get("offset"), 0, 0, 1_000_000),
+        material: materialSummary(allRuns, materialBoundary),
+      });
+    }
     const limit = clampInt(c.url.searchParams.get("limit"), 50, 1, 500);
     const offset = clampInt(c.url.searchParams.get("offset"), 0, 0, 1_000_000);
     const total = c.store.countScopes(id);
     const scopes = scopeApiRows(c.store.queryScopes(id, { limit, offset }));
     const progress = c.store.scopeProgress(id);
     if (scopes.length > 0 || progress.total > 0) return sendJson(c.res, 200, { scopes, progress, total, limit, offset });
-    const checkpoint = latestScopeCheckpoint(c.store.listRuns(id, 50));
+    const checkpoint = latestScopeCheckpoint(currentRuns);
     const checkpointScopes = scopeApiRows(checkpoint?.scopes ?? scopes);
     sendJson(c.res, 200, {
       scopes: checkpointScopes.slice(offset, offset + limit),
@@ -797,6 +873,7 @@ async function projectScopesGet(c: Ctx): Promise<void> {
       total: checkpointScopes.length,
       limit,
       offset,
+      material: materialSummary(allRuns, materialBoundary),
     });
   });
 }
@@ -1439,8 +1516,11 @@ async function runLaunch(c: Ctx): Promise<void> {
   const profile = project.provider_id != null ? c.store.getProvider(Number(project.provider_id)) : undefined;
   const phaseProfiles = phaseProviderProfiles(project, c.store);
   const projectId = Number(project.id);
-  const runs = c.store.listRuns(projectId, 50);
-  const progress = c.store.scopeProgress(projectId);
+  const allRuns = c.store.listRuns(projectId);
+  const runs = allRuns.slice(0, 50);
+  const materialBoundary = latestPrepareRun(allRuns);
+  const currentRunIds = runIdSet(currentMaterialRuns(allRuns, materialBoundary));
+  const progress = !materialBoundary || currentMaterialRuns(allRuns, materialBoundary).some(isScopeInventoryRun) ? c.store.scopeProgress(projectId) : emptyProgress();
   const spec = launchSpec(project, body, c.out, profile, progress, phaseProfiles);
   if (spec.verb === "prepare") applyProjectPrepareDefaults(spec, project, runs);
   const prepared = applyPreparedWorkspaceIfNeeded(spec, runs);
@@ -1469,12 +1549,23 @@ async function runLaunch(c: Ctx): Promise<void> {
       const selected = findingIds.map((id) => ({ id, row: c.store.getConfirmable(Number(project.id), id) }));
       const missing = selected.filter((entry) => !entry.row || !entry.row.run_dir).map((entry) => entry.id);
       if (missing.length > 0) return sendJson(c.res, 400, { error: `finding ${missing.join(", ")} is not pending confirm for this project, or has no source run dir` });
+      const stale = selected.filter((entry) => entry.row && !rowBelongsToCurrentMaterial(entry.row as unknown as Record<string, unknown>, currentRunIds, materialBoundary)).map((entry) => entry.id);
+      if (stale.length > 0 && body.allowMaterialDrift !== true) {
+        return sendJson(c.res, 409, {
+          error: `finding ${stale.join(", ")} belongs to an older prepared material snapshot. Re-run Map/Dig on the current prepared source, or pass allowMaterialDrift:true only to inspect historical results.`,
+          materialDrift: true,
+          staleFindings: stale,
+          material: materialSummary(allRuns, materialBoundary),
+        });
+      }
       const rows = selected.flatMap((entry) => entry.row ? [entry.row] : []);
       spec.inputRunDirs = [...new Set(rows.map((row) => String(row.run_dir)))];
       spec.inputRunDir = spec.inputRunDirs[0];
       spec.confirmKeys = rows.map((row) => row.finding_key);
     } else {
-      const pending = c.store.pendingConfirmable(Number(project.id)).filter((p) => p.run_dir);
+      const pending = c.store.pendingConfirmable(Number(project.id))
+        .filter((p) => p.run_dir)
+        .filter((p) => rowBelongsToCurrentMaterial(p as unknown as Record<string, unknown>, currentRunIds, materialBoundary));
       if (pending.length === 0) return sendJson(c.res, 400, { error: "nothing to confirm — every audit-confirmed finding already has a real-target decision (use --fresh to redo)" });
       spec.inputRunDirs = [...new Set(pending.map((p) => String(p.run_dir)))];
       spec.inputRunDir = spec.inputRunDirs[0];
@@ -1483,7 +1574,7 @@ async function runLaunch(c: Ctx): Promise<void> {
   }
   if (spec.verb === "report") {
     const selected = selectedFindingIds(body);
-    const reports = reportWorklist(c.store, Number(project.id), selected);
+    const reports = reportWorklist(c.store, Number(project.id), selected, currentRunIds, materialBoundary);
     if (reports.error) return sendJson(c.res, 400, { error: reports.error });
     spec.reportFindings = reports.findings;
   }
@@ -1498,6 +1589,7 @@ async function runLaunch(c: Ctx): Promise<void> {
       daemonOnline: false,
     });
   }
+  if (spec.verb === "prepare") await resetCurrentScopeProjection(c, project);
   const jobId = c.store.enqueueJob(spec.target, spec, daemonId);
   c.plane.nudge();
   sendJson(c.res, 200, { jobId, verb: spec.verb, queued: true, daemons: c.plane.daemonCount(daemonId), daemonId });
@@ -1523,6 +1615,17 @@ function selectedFindingIds(body: Record<string, unknown>): number[] {
     }
   }
   return [...ids];
+}
+
+async function resetCurrentScopeProjection(c: Ctx, project: Record<string, unknown>): Promise<void> {
+  const projectId = Number(project.id);
+  c.store.clearScopes(projectId);
+  const inventoryDir = projectHistoryDir({ outputDir: c.out, targetName: String(project.name) });
+  try {
+    await saveScopeInventory(inventoryDir, []);
+  } catch {
+    // The DB projection is the API source of truth; a missing history dir should not block prepare.
+  }
 }
 
 function verifyMaterialDrift(store: MetadataStore, projectId: number, verifyFindings: unknown, allowOverride: boolean): Record<string, unknown> | null {
@@ -1582,13 +1685,20 @@ function extractVerifyOriginIds(input: unknown): number[] {
   return [...out];
 }
 
-function reportWorklist(store: MetadataStore, projectId: number, selectedIds: number[] = []): { findings: ReportFindingSpec[]; error?: undefined } | { findings?: undefined; error: string } {
+function reportWorklist(
+  store: MetadataStore,
+  projectId: number,
+  selectedIds: number[] = [],
+  currentRunIds?: Set<number>,
+  materialBoundary?: Record<string, unknown>,
+): { findings: ReportFindingSpec[]; error?: undefined } | { findings?: undefined; error: string } {
   const selected = selectedIds.length ? new Set(selectedIds) : undefined;
   const rows = reportableFindings(store.listFindings(projectId)).filter((row) => {
     if (selected && !selected.has(Number(row.id))) return false;
+    if (!rowBelongsToCurrentMaterial(row, currentRunIds ?? new Set(), materialBoundary)) return false;
     if (String(row.confirm_status ?? "") !== "reproduced") return false;
     const decisions = store.listConfirmDecisionsForFinding(projectId, String(row.finding_key ?? ""));
-    return decisions.some((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop");
+    return decisions.some((decision) => rowBelongsToCurrentMaterial(decision, currentRunIds ?? new Set(), materialBoundary) && decision.reproduced === "yes" && decision.recommendation !== "drop");
   });
   if (selected && rows.length !== selected.size) {
     const found = new Set(rows.map((row) => Number(row.id)));
@@ -1610,7 +1720,8 @@ function reportWorklist(store: MetadataStore, projectId: number, selectedIds: nu
       exploitSketch: stringValue(row.exploit_sketch) || undefined,
       fix: stringValue(row.fix) || undefined,
       confidence: Number.isFinite(Number(row.confidence)) ? Number(row.confidence) : undefined,
-      decisions: store.listConfirmDecisionsForFinding(projectId, String(row.finding_key ?? "")).filter((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop"),
+      decisions: store.listConfirmDecisionsForFinding(projectId, String(row.finding_key ?? ""))
+        .filter((decision) => rowBelongsToCurrentMaterial(decision, currentRunIds ?? new Set(), materialBoundary) && decision.reproduced === "yes" && decision.recommendation !== "drop"),
     })),
   };
 }

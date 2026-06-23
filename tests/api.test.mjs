@@ -313,6 +313,7 @@ test("api: verify launch rejects findings produced before a newer prepare run", 
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const created = await json(await post("/api/projects", { name: "verify-material-drift", sourcePaths: ["./src"] }));
     const store = MetadataStore.openForOutput(out);
+    let findingId;
     try {
       const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "verify-material-drift-audit") });
       store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", auditRun);
@@ -325,6 +326,7 @@ test("api: verify launch rejects findings produced before a newer prepare run", 
           status: "suspected",
         },
       ]);
+      findingId = Number(store.listFindings(created.id)[0].id);
       const prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "verify-material-drift-prepare") });
       store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-02T00:00:00.000Z", prepareRun);
       store.finishRun(prepareRun, "done");
@@ -332,24 +334,22 @@ test("api: verify launch rejects findings produced before a newer prepare run", 
       store.close();
     }
 
-    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
-    const finding = detail.allFindings[0];
-    const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "audit", verifyFindings: [finding] });
+    const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "audit", verifyFindings: [{ id: findingId }] });
     assert.equal(rejected.status, 409);
     const rejectedBody = await json(rejected);
     assert.equal(rejectedBody.materialDrift, true);
-    assert.equal(rejectedBody.findings[0].findingId, finding.id);
+    assert.equal(rejectedBody.findings[0].findingId, findingId);
     assert.match(rejectedBody.error, /newer Prepare run/);
 
     const launched = await json(await post(`/api/projects/${created.uuid}/runs`, {
       verb: "audit",
-      verifyFindings: [finding],
+      verifyFindings: [{ id: findingId }],
       allowMaterialDrift: true,
     }));
     assert.equal(launched.queued, true);
     const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
     const spec = JSON.parse(job.spec_json);
-    assert.equal(spec.verifyFindings[0].originId, finding.id);
+    assert.equal(spec.verifyFindings[0].originId, findingId);
   });
 });
 
@@ -360,6 +360,7 @@ test("api: verify launch treats killed newer prepare as material drift", async (
     const created = await json(await post("/api/projects", { name: "verify-killed-material-drift", sourcePaths: ["./src"] }));
     const store = MetadataStore.openForOutput(out);
     let prepareRun;
+    let findingId;
     try {
       const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "verify-killed-material-drift-audit") });
       store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", auditRun);
@@ -372,6 +373,7 @@ test("api: verify launch treats killed newer prepare as material drift", async (
           status: "suspected",
         },
       ]);
+      findingId = Number(store.listFindings(created.id)[0].id);
       prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "verify-killed-material-drift-prepare") });
       store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-02T00:00:00.000Z", prepareRun);
       store.finishRun(prepareRun, "killed");
@@ -379,14 +381,81 @@ test("api: verify launch treats killed newer prepare as material drift", async (
       store.close();
     }
 
-    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
-    const finding = detail.allFindings[0];
-    const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "audit", verifyFindings: [finding] });
+    const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "audit", verifyFindings: [{ id: findingId }] });
     assert.equal(rejected.status, 409);
     const rejectedBody = await json(rejected);
     assert.equal(rejectedBody.materialDrift, true);
-    assert.equal(rejectedBody.findings[0].findingId, finding.id);
+    assert.equal(rejectedBody.findings[0].findingId, findingId);
     assert.equal(rejectedBody.findings[0].prepareRunId, prepareRun);
+  });
+});
+
+test("api: project current view ignores downstream data from older prepare materials", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "material-current-view", sourcePaths: ["./src"] }));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const prepare1 = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "material-current-view-prepare-1") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", prepare1);
+      store.finishRun(prepare1, "done");
+      const auditRun = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "material-current-view-audit") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T01:00:00.000Z", auditRun);
+      store.upsertScopes(created.id, [{ scopeId: "old-scope", title: "Old scope", status: "audited", score: 1 }]);
+      store.upsertFindings(created.id, auditRun, [
+        {
+          findingKey: "old-bug",
+          title: "Old source bug",
+          location: "src/Old.sol:1",
+          severity: "high",
+          status: "confirmed-executable",
+        },
+      ]);
+      const prepare2 = store.startRun({ projectId: created.id, kind: "prepare", runDir: path.join(out, "material-current-view-prepare-2") });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-02T00:00:00.000Z", prepare2);
+      store.finishRun(prepare2, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.equal(detail.findingsTotal, 0);
+    assert.equal(detail.progress.total, 0);
+    assert.equal(detail.auditConfirmedFindings, 0);
+    assert.equal(detail.material.currentPrepareRunId > 0, true);
+    assert.equal(detail.runs.some((run) => run.kind === "audit" && run.material_stale === true), true);
+
+    const scopes = await json(await fetch(base + `/api/projects/${created.uuid}/scopes`));
+    assert.equal(scopes.total, 0);
+    assert.deepEqual(scopes.scopes, []);
+  });
+});
+
+test("api: launching prepare clears the current scope inventory projection", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "prepare-clears-scopes", sourcePaths: ["./src"] }));
+    const inventoryDir = projectHistoryDir({ outputDir: out, targetName: "prepare-clears-scopes" });
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [{ scopeId: "old-scope", title: "Old scope", status: "pending", score: 1 }]);
+      await saveScopeInventory(inventoryDir, [{ id: "old-scope", title: "Old scope", status: "pending", score: 1 }]);
+    } finally {
+      store.close();
+    }
+
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "prepare" }));
+    assert.equal(launched.queued, true);
+    const after = MetadataStore.openForOutput(out);
+    try {
+      assert.equal(after.countScopes(created.id), 0);
+    } finally {
+      after.close();
+    }
+    const inventory = await loadScopeInventory(inventoryDir);
+    assert.deepEqual(inventory, []);
   });
 });
 

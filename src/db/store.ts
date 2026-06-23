@@ -700,6 +700,13 @@ export class MetadataStore {
     return Number(info.changes);
   }
 
+  /** Clear the current scope projection when project materials are refreshed. Run artifacts keep
+   * the historical inventory; this table represents the active material snapshot only. */
+  clearScopes(projectId: number): number {
+    const info = this.db.prepare("DELETE FROM scope WHERE project_id = ?").run(projectId);
+    return Number(info.changes);
+  }
+
   /** Recover scopes left in-flight by a killed daemon or interrupted server process. */
   resetAuditingScopes(projectId: number): number {
     const info = this.db
@@ -840,28 +847,28 @@ export class MetadataStore {
   /** The project's findings that are confirmed by the audit (source-level) but NOT yet decided on
    * the real target — the work list for a project-level confirm. Joins the source run dir so the
    * confirm can load each finding's full PoC/fix data. confirm_status NULL = pending. */
-  pendingConfirmable(projectId: number): Array<{ finding_key: string; title: string; run_dir: string | null }> {
+  pendingConfirmable(projectId: number): Array<{ finding_key: string; title: string; run_id: number | null; run_dir: string | null }> {
     return this.db
       .prepare(
-        `SELECT f.finding_key, f.title, r.run_dir
+        `SELECT f.finding_key, f.title, f.run_id, r.run_dir
            FROM finding f LEFT JOIN run r ON r.id = f.run_id
           WHERE f.project_id = ? AND f.confirm_status IS NULL
             AND f.status IN ('confirmed-differential','confirmed-executable','confirmed-source')
           ORDER BY f.status, f.id`,
       )
-      .all(projectId) as Array<{ finding_key: string; title: string; run_dir: string | null }>;
+      .all(projectId) as Array<{ finding_key: string; title: string; run_id: number | null; run_dir: string | null }>;
   }
 
   /** One pending confirmable finding by project + id (for finding-level confirm). */
-  getConfirmable(projectId: number, findingId: number): { finding_key: string; title: string; run_dir: string | null } | undefined {
+  getConfirmable(projectId: number, findingId: number): { finding_key: string; title: string; run_id: number | null; run_dir: string | null } | undefined {
     return this.db
       .prepare(
-        `SELECT f.finding_key, f.title, r.run_dir
+        `SELECT f.finding_key, f.title, f.run_id, r.run_dir
            FROM finding f LEFT JOIN run r ON r.id = f.run_id
           WHERE f.project_id = ? AND f.id = ? AND f.confirm_status IS NULL
             AND f.status IN ('confirmed-differential','confirmed-executable','confirmed-source')`,
       )
-      .get(projectId, findingId) as { finding_key: string; title: string; run_dir: string | null } | undefined;
+      .get(projectId, findingId) as { finding_key: string; title: string; run_id: number | null; run_dir: string | null } | undefined;
   }
 
   /** Set a finding's real-target confirm state, addressed by its content key within a project
