@@ -5,18 +5,18 @@
 //
 //   defaultConfig()  <  user-global file  <  project-local file  <  env  <  flags
 //
-// The user-global file is $XDG_CONFIG_HOME/flounder/config.json (else ~/.config/flounder/
-// config.json); the project-local file is the nearest .flounder/config.json found by walking
+// The user-global file is ~/.flounder/config.json; the project-local file is the nearest
+// .flounder/config.json found by walking
 // up from the cwd (like .git). `flounder config get|set|unset|list|path` reads and writes
 // these files. This module is the source of truth for WHICH keys are persistable and how each
 // validates; cli.ts layers the resolved values under --config and the flags.
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
-import os from "node:os";
 import path from "node:path";
+import { flounderHomeDir } from "./config.js";
 
-export type ThinkingLevel = "minimal" | "low" | "medium" | "high" | "xhigh";
-const THINKING_LEVELS: readonly ThinkingLevel[] = ["minimal", "low", "medium", "high", "xhigh"];
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
 const POSTURES = ["blind", "informed"] as const;
 
 // The persistable keys. Each maps 1:1 to a CLI concept; the type drives validation in `set`
@@ -46,7 +46,7 @@ export const CLI_CONFIG_KEYS: Record<CliConfigKey, KeySpec> = {
   server: { type: "string", summary: "control-plane URL the CLI drives, e.g. http://127.0.0.1:4500" },
   provider: { type: "string", summary: "pi-ai provider id (default openai-codex)" },
   model: { type: "string", summary: "audit model id" },
-  thinking: { type: "thinking", summary: "reasoning effort: minimal|low|medium|high|xhigh" },
+  thinking: { type: "thinking", summary: "reasoning effort: off|minimal|low|medium|high|xhigh" },
   out: { type: "string", summary: "artifact output dir + store location (match the control plane to share state)" },
   posture: { type: "posture", summary: "flounder prepare default posture: blind|informed" },
 };
@@ -63,11 +63,9 @@ export interface LoadedCliConfig {
   projectFile?: string;
 }
 
-/** The user-global config path: $XDG_CONFIG_HOME/flounder/config.json or ~/.config/flounder/config.json. */
+/** The user-global config path. Keep Flounder's runtime state under one product-owned home. */
 export function userConfigPath(): string {
-  const xdg = process.env.XDG_CONFIG_HOME?.trim();
-  const base = xdg && xdg.length > 0 ? xdg : path.join(os.homedir(), ".config");
-  return path.join(base, "flounder", "config.json");
+  return path.join(flounderHomeDir(), "config.json");
 }
 
 /** Walk up from `cwd` for the nearest .flounder/config.json (like git). Undefined if none. */

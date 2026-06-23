@@ -6,16 +6,18 @@
 
 import path from "node:path";
 import os from "node:os";
-import { writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
+import { runReport } from "../agent/report.js";
 import { runPrepare } from "../agent/acquire.js";
 import { MockAuditLlmClient } from "../llm/mock.js";
 import { specToConfig, type LaunchSpec } from "./run-manager.js";
-import { toScopeRow, toFindingRow, configSnapshot, type RunTracker, type ConfirmDecisionInput } from "../db/record.js";
-import type { AuditorConfig } from "../config.js";
+import { toScopeRow, toFindingRow, configSnapshot, type RunTracker, type ConfirmDecisionInput, type FindingReportInput } from "../db/record.js";
+import { defaultOutputDir, defaultWorkspaceDir, type AuditorConfig } from "../config.js";
 import type { Coverage, RunStatus } from "../db/store.js";
 import type { AgentFinding, AuditScope } from "../agent/tools.js";
+import { assertProviderAuthenticated, knownRuntimeProviders, providerAuthStatus } from "../provider-auth.js";
 
 export interface DaemonOptions {
   server: string;
@@ -23,7 +25,7 @@ export interface DaemonOptions {
   out?: string;
   name?: string;
   concurrency?: number;
-  workspace?: string; // root under which project dirs live; materials resolve here (default ./workspace)
+  workspace?: string; // root under which project dirs live; materials resolve here (default ~/.flounder/workspace)
 }
 
 type Activity = { kind: string; delta?: string; tool?: string; step?: number };
@@ -31,12 +33,14 @@ type Activity = { kind: string; delta?: string; tool?: string; step?: number };
 export async function runDaemon(opts: DaemonOptions): Promise<void> {
   const base = opts.server.replace(/\/$/, "");
   const headers = { authorization: `Bearer ${opts.token}`, "content-type": "application/json" };
-  const out = opts.out ?? "runs";
-  const workspace = path.resolve(opts.workspace ?? "workspace"); // where project dirs (and their relative materials) live
+  const out = opts.out ?? defaultOutputDir();
+  const workspace = path.resolve(opts.workspace ?? defaultWorkspaceDir()); // where project dirs (and their relative materials) live
+  await ensureDaemonDirectories(out, workspace);
   const maxConcurrent = Math.max(1, opts.concurrency ?? 2);
   const inflight = new Map<number, AbortController>(); // jobId -> abort
+  const runScopeTargets = new Map<number, number>(); // jobId -> live dig-batch target
 
-  const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", capabilities: {}, workspace }) }).catch(() => null);
+  const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", capabilities: await daemonCapabilities(), workspace }) }).catch(() => null);
   if (!reg || !reg.ok) throw new Error(`daemon: could not register with ${base} (status ${reg ? reg.status : "no response"}) — check --server and --token`);
   console.log(`[flounder daemon] connected to ${base}  (out=${out}, workspace=${workspace}, concurrency=${maxConcurrent})`);
 
@@ -57,12 +61,20 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     let tracker: RemoteTracker | undefined;
     const sink = activitySink(() => tracker);
     const makeTracker = (cfg: AuditorConfig, runDir: string, kind: string): RunTracker => {
-      tracker = new RemoteTracker(base, headers, { jobId: job.id, project: cfg.targetName, kind, runDir, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, budgets: configSnapshot(cfg) });
+      tracker = new RemoteTracker(base, headers, { jobId: job.id, project: cfg.targetName, kind, runDir, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, budgets: cfg.auditVerify ? { ...configSnapshot(cfg), verify: true } : configSnapshot(cfg) });
       return tracker;
     };
     try {
       const cfg = specToConfig(spec, out, workspace);
-      if (spec.verb === "confirm") {
+      if (spec.mockLlm) {
+        cfg.sandboxBackend = "host";
+        cfg.sandboxAllowHostFallback = true;
+      }
+      if (!spec.mockLlm) await assertProviderAuthenticated(cfg.provider);
+      if (spec.verb === "report") {
+        if (!spec.reportFindings?.length) throw new Error("report requires reproduced finding inputs");
+        await runReport(cfg, { findings: spec.reportFindings, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}) });
+      } else if (spec.verb === "confirm") {
         if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir");
         await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.inputRunDirs ? { inputRunDirs: spec.inputRunDirs } : {}), ...(spec.confirmKeys ? { confirmKeys: spec.confirmKeys } : {}), ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
       } else if (spec.verb === "prepare") {
@@ -78,21 +90,37 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}),
         });
       } else {
+        let verifyTempDir: string | undefined;
         if (spec.verb === "audit" && spec.verifyFindings !== undefined) {
           // verify posture: write the inline findings to a temp file the kernel's verify path reads.
-          const vf = path.join(os.tmpdir(), `flounder-verify-${job.id}.json`);
+          verifyTempDir = await mkdtemp(path.join(os.tmpdir(), `flounder-verify-${job.id}-`));
+          const vf = path.join(verifyTempDir, "findings.json");
           await writeFile(vf, JSON.stringify(spec.verifyFindings), "utf8");
           cfg.auditVerify = vf;
         }
-        await runAudit(cfg, { kind: spec.verb, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.mockLlm ? { llm: new MockAuditLlmClient() } : {}) });
+        try {
+          await runAudit(cfg, {
+            kind: spec.verb,
+            signal: abort.signal,
+            makeTracker,
+            onActivity: sink.push,
+            control: { getRunScopesTarget: () => runScopeTargets.get(job.id) },
+            ...(spec.mockLlm ? { llm: new MockAuditLlmClient() } : {}),
+          });
+        } finally {
+          if (verifyTempDir) await rm(verifyTempDir, { recursive: true, force: true });
+        }
       }
       sink.flush();
+      await tracker?.flush();
       await post(base, headers, `/api/daemon/jobs/${job.id}/status`, { status: abort.signal.aborted ? "canceled" : "done" });
     } catch (error) {
       sink.flush();
+      await tracker?.flush();
       await post(base, headers, `/api/daemon/jobs/${job.id}/status`, { status: abort.signal.aborted ? "canceled" : "error", error: error instanceof Error ? error.message.slice(0, 500) : String(error) });
     } finally {
       inflight.delete(job.id);
+      runScopeTargets.delete(job.id);
       void claimLoop();
     }
   };
@@ -117,9 +145,12 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           const line = frame.split("\n").find((l) => l.startsWith("data:"));
           if (!line) continue;
           try {
-            const ev = JSON.parse(line.slice(5).trim()) as { type: string; jobId?: number };
+            const ev = JSON.parse(line.slice(5).trim()) as { type: string; jobId?: number; target?: number };
             if (ev.type === "poll") void claimLoop();
             else if (ev.type === "cancel" && ev.jobId !== undefined) inflight.get(ev.jobId)?.abort();
+            else if (ev.type === "set-run-scopes-target" && ev.jobId !== undefined && typeof ev.target === "number" && Number.isFinite(ev.target)) {
+              runScopeTargets.set(ev.jobId, Math.max(1, Math.floor(ev.target)));
+            }
           } catch {
             // ignore malformed frame
           }
@@ -132,18 +163,45 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
   }
 }
 
+export async function ensureDaemonDirectories(out: string, workspace: string): Promise<void> {
+  await mkdir(path.resolve(out), { recursive: true });
+  await mkdir(path.resolve(workspace), { recursive: true });
+}
+
+async function daemonCapabilities(): Promise<Record<string, unknown>> {
+  const providers = await Promise.all(
+    knownRuntimeProviders().map(async (provider) => {
+      try {
+        const status = await providerAuthStatus(provider);
+        return {
+          provider,
+          required: status.required,
+          configured: status.configured,
+          oauthLogin: status.oauthLogin,
+          expectedEnvVars: status.expectedEnvVars,
+        };
+      } catch {
+        return { provider, required: true, configured: false };
+      }
+    }),
+  );
+  return { providers };
+}
+
 // Reports a run's progress to the server. Serializes calls on one chain so the run is
 // created first (and updates land in order); keys everything by the server-assigned runId.
 class RemoteTracker implements RunTracker {
   readonly runDbId = undefined; // remote: the server owns the run id; not needed by the kernel
   private chain: Promise<void>;
   private runId: number | undefined;
+  private readonly targetName: string;
 
   constructor(
     private readonly base: string,
     private readonly headers: Record<string, string>,
     start: { jobId: number; project: string; kind: string; runDir: string; provider?: string; model?: string; thinking?: string; budgets: unknown },
   ) {
+    this.targetName = start.project;
     this.chain = this.req("POST", "/api/daemon/runs", start).then((r) => {
       this.runId = (r as { runId?: number } | null)?.runId;
     });
@@ -170,13 +228,23 @@ class RemoteTracker implements RunTracker {
   }
 
   findings(findings: AgentFinding[], runDir: string, reason?: string): void {
-    if (findings.length === 0) return;
-    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { findings: findings.map((f) => toFindingRow(f, runDir)), reason }) : Promise.resolve()));
+    const reportable = findings.filter((finding) => finding.severity !== "info" && finding.confirmationStatus !== "discharged");
+    if (reportable.length === 0) return;
+    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { findings: reportable.map((f) => toFindingRow(f, runDir, this.targetName)), reason }) : Promise.resolve()));
+  }
+
+  stage(name: string, info: Record<string, unknown>): void {
+    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { stage: { name, info } }) : Promise.resolve()));
   }
 
   confirmDecisions(rows: ConfirmDecisionInput[], decisionPath?: string): void {
     if (rows.length === 0) return;
     this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { confirmDecisions: rows, decisionPath }) : Promise.resolve()));
+  }
+
+  findingReports(reports: FindingReportInput[]): void {
+    if (reports.length === 0) return;
+    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { findingReports: reports }) : Promise.resolve()));
   }
 
   finish(status: RunStatus, coverage?: Coverage, findingsTotal?: number): void {
@@ -185,6 +253,10 @@ class RemoteTracker implements RunTracker {
 
   activity(events: Activity[]): void {
     this.enqueue(() => (this.runId ? this.req("POST", `/api/daemon/runs/${this.runId}/activity`, { events }) : Promise.resolve()));
+  }
+
+  flush(): Promise<void> {
+    return this.chain;
   }
 }
 

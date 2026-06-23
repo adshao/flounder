@@ -5,10 +5,11 @@
 // run's evidentiary files remain the source of the content regardless.
 
 import path from "node:path";
-import { reportArtifactName } from "../reports/disclosure.js";
+import { renderDisclosure, reportArtifactName } from "../reports/disclosure.js";
 import { findingContentKey } from "../util/finding-key.js";
 import type { AuditorConfig } from "../config.js";
 import type { AgentFinding, AuditScope } from "../agent/tools.js";
+import type { RankedFinding } from "../types.js";
 import { MetadataStore, type Coverage, type FindingRow, type FindingStatus, type RunKind, type RunStatus, type ScopeRow } from "./store.js";
 
 export interface RunLoggerLike {
@@ -20,6 +21,19 @@ export interface ConfirmDecisionInput {
   reproduced?: string | undefined;
   recommendation?: string | undefined;
   members?: string[] | undefined;
+  distinctFix?: string | undefined;
+  reproEvidence?: string | undefined;
+  corroboration?: string | undefined;
+  novelty?: string | undefined;
+  humanGates?: string | undefined;
+  mergedFrom?: string[] | undefined;
+  reproCommandId?: string | undefined;
+  reportMarkdown?: string | undefined;
+}
+
+export interface FindingReportInput {
+  findingId: number;
+  markdown: string;
 }
 
 // What runAudit/runConfirm need to report a run's progress. The default impl (RunRecorder)
@@ -31,7 +45,10 @@ export interface RunTracker {
   /** This run's dig batch: how many scopes it is digging (target) + how many done so far. */
   runScopes(done: number, target: number): void;
   findings(findings: AgentFinding[], runDir: string, reason?: string): void;
+  /** Record one post-dig stage's outcome (synthesis / differential / refutation / discharge-challenge). */
+  stage(name: string, info: Record<string, unknown>): void;
   confirmDecisions(rows: ConfirmDecisionInput[], decisionPath?: string): void;
+  findingReports(reports: FindingReportInput[]): void;
   finish(status: RunStatus, coverage?: Coverage, findingsTotal?: number): void;
 }
 
@@ -42,15 +59,17 @@ export class RunRecorder implements RunTracker {
   private projectId: number | undefined;
   private runId: number | undefined;
   private readonly logger: RunLoggerLike | undefined;
+  private readonly targetName: string;
 
-  private constructor(logger?: RunLoggerLike) {
+  private constructor(targetName: string, logger?: RunLoggerLike) {
+    this.targetName = targetName;
     this.logger = logger;
   }
 
   /** Open the store and record the project + a running run. Returns a recorder that is a
    * no-op if the DB could not be opened. */
   static start(cfg: AuditorConfig, runDir: string, kind: RunKind, logger?: RunLoggerLike): RunRecorder {
-    const recorder = new RunRecorder(logger);
+    const recorder = new RunRecorder(cfg.targetName, logger);
     try {
       recorder.store = MetadataStore.openForOutput(cfg.outputDir);
       recorder.projectId = recorder.store.upsertProject({
@@ -67,7 +86,9 @@ export class RunRecorder implements RunTracker {
         provider: cfg.provider,
         model: cfg.auditModel,
         thinking: cfg.thinkingLevel,
-        budgets: configSnapshot(cfg),
+        // Mark a verify run (in the run's budgets only, not the project config) so the dashboard can
+        // show "verifying N/M findings" instead of mislabeling it as a dig.
+        budgets: cfg.auditVerify ? { ...configSnapshot(cfg), verify: true } : configSnapshot(cfg),
         // The OS pid lets a supervising run-manager correlate this DB row to the process
         // it spawned (and reconcile status if the process dies before finalize).
         pid: process.pid,
@@ -86,7 +107,7 @@ export class RunRecorder implements RunTracker {
   scopes(scopes: AuditScope[]): void {
     if (!this.ready()) return;
     try {
-      this.store!.upsertScopes(this.projectId!, scopes.map(toScopeRow));
+      this.store!.replaceScopes(this.projectId!, scopes.map(toScopeRow));
       this.store!.updateRunCoverage(this.runId!, this.store!.scopeProgress(this.projectId!));
     } catch (error) {
       this.disable("scopes", error);
@@ -107,18 +128,38 @@ export class RunRecorder implements RunTracker {
   findings(findings: AgentFinding[], runDir: string, reason?: string): void {
     if (!this.ready() || findings.length === 0) return;
     try {
-      this.store!.upsertFindings(this.projectId!, this.runId!, findings.map((finding) => toFindingRow(finding, runDir)), reason);
+      this.store!.upsertFindings(this.projectId!, this.runId!, findings.map((finding) => toFindingRow(finding, runDir, this.targetName)), reason);
     } catch (error) {
       this.disable("findings", error);
     }
   }
 
-  confirmDecisions(rows: Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }>, decisionPath?: string): void {
+  stage(name: string, info: Record<string, unknown>): void {
+    if (!this.ready()) return;
+    try {
+      this.store!.recordStage(this.runId!, name, info);
+    } catch (error) {
+      this.disable("stage", error);
+    }
+  }
+
+  confirmDecisions(rows: ConfirmDecisionInput[], decisionPath?: string): void {
     if (!this.ready() || rows.length === 0) return;
     try {
       this.store!.upsertConfirmDecisions(this.projectId!, this.runId!, rows, decisionPath);
     } catch (error) {
       this.disable("confirm-decisions", error);
+    }
+  }
+
+  findingReports(reports: FindingReportInput[]): void {
+    if (!this.ready() || reports.length === 0) return;
+    try {
+      for (const report of reports) {
+        this.store!.setFindingReport(this.projectId!, report.findingId, report.markdown);
+      }
+    } catch (error) {
+      this.disable("finding-reports", error);
     }
   }
 
@@ -173,7 +214,7 @@ function stableFindingKey(finding: AgentFinding): string {
   return key === "k0" ? finding.id : key;
 }
 
-export function toFindingRow(finding: AgentFinding, runDir: string): FindingRow {
+export function toFindingRow(finding: AgentFinding, runDir: string, targetName = "Flounder audit target"): FindingRow {
   return {
     findingKey: stableFindingKey(finding),
     title: finding.title,
@@ -182,8 +223,40 @@ export function toFindingRow(finding: AgentFinding, runDir: string): FindingRow 
     status: toFindingStatus(finding),
     // Only confirmed findings get a disclosure report artifact (written at finalize under the final id).
     reportPath: finding.id && isConfirmedLike(finding.confirmationStatus) ? path.join(runDir, reportArtifactName(finding.id)) : undefined,
+    reportMarkdown: renderFindingDisclosure(targetName, finding),
     scopeId: finding.scopeId,
+    // The rich content, so the DB holds the finding in full (the verify/confirm pipeline + UI read
+    // it from here instead of scraping the run dir's audit_hypotheses / audit_findings artifacts).
+    description: finding.description,
+    evidence: finding.evidence,
+    exploitSketch: finding.exploitSketch,
+    fix: finding.fix,
+    confidence: finding.confidence,
+    // VERIFY provenance: when set, the verdict flips the original suspected row instead of inserting.
+    originId: finding.originId,
   };
+}
+
+function renderFindingDisclosure(targetName: string, finding: AgentFinding): string {
+  return renderDisclosure(targetName, {
+    id: finding.id,
+    location: finding.location,
+    failureMode: "autonomous",
+    title: finding.title,
+    severity: finding.severity,
+    hitRate: 1,
+    confidence: finding.confidence,
+    score: finding.confidence,
+    description: finding.description,
+    evidence: finding.evidence,
+    exploitSketch: finding.exploitSketch,
+    fix: finding.fix,
+    confirmationStatus: finding.confirmationStatus,
+    commandRunId: finding.commandRunId,
+    patchedSuccessPatterns: finding.patchedSuccessPatterns,
+    disputed: finding.disputed,
+    refutationReason: finding.refutation?.reason,
+  } as RankedFinding);
 }
 
 export function toScopeRow(scope: AuditScope): ScopeRow {

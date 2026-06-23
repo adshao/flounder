@@ -44,7 +44,7 @@ export async function runConfirm(
   // mock/CLI fallbacks cannot, so this mode requires a pi-session provider.
   if (!isPiSessionProvider(cfg.provider)) {
     throw new Error(
-      `flounder confirm needs a pi-session provider (e.g. openai-codex) for real-world reproduction; provider "${cfg.provider}" cannot fork a live network. Set --provider openai-codex (and log pi in).`,
+      `flounder confirm needs a session provider (e.g. openai-codex) for real-world reproduction; provider "${cfg.provider}" cannot fork a live network. Set --provider openai-codex and run \`flounder daemon provider login openai-codex\` on the daemon machine first.`,
     );
   }
   if (cfg.sourcePaths.length === 0) throw new Error("flounder confirm needs --source (the target code to reproduce against)");
@@ -203,7 +203,19 @@ export async function runConfirm(
 
   // SQLite tracking: the decision sheet (one row per distinct bug) + mark the run done.
   recorder.confirmDecisions(
-    rows.map((row) => ({ bug: row.bug, reproduced: row.reproduced, recommendation: row.recommendation, members: row.members })),
+    rows.map((row) => ({
+      bug: row.bug,
+      reproduced: row.reproduced,
+      recommendation: row.recommendation,
+      members: row.members,
+      distinctFix: row.distinctFix,
+      reproEvidence: row.reproEvidence,
+      corroboration: row.corroboration,
+      novelty: row.novelty,
+      humanGates: row.humanGates,
+      mergedFrom: row.mergedFrom,
+      reproCommandId: row.reproCommandId,
+    })),
     path.join(logger.runDir, "confirm_report.md"),
   );
   recorder.finish(options.signal?.aborted ? "killed" : "done");
@@ -213,7 +225,7 @@ export async function runConfirm(
 
 // --- freeze / provenance -----------------------------------------------------
 
-const FROZEN_FILE = /^(audit_report\.md|audit_findings\.json|report_f\d+\.md)$/;
+const FROZEN_FILE = /^(audit_report\.md|audit_findings\.json|report_[a-z0-9_.-]+\.md)$/;
 
 async function freezeInputRun(runDir: string): Promise<ConfirmProvenance> {
   let names: string[] = [];
@@ -319,16 +331,59 @@ function renderFileManifest(source: Doc[], corpusEntries: string[]): string {
 
 // Map the model's raw, mid-run decision rows to the minimal shape the tracker stores, for
 // LIVE reproduction progress. The end-of-run write replaces these with the consolidated set.
-function toLiveConfirmRows(raw: unknown[]): Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }> {
-  const rows: Array<{ bug: string; reproduced?: string; recommendation?: string; members?: string[] }> = [];
+function toLiveConfirmRows(raw: unknown[]): Array<{
+  bug: string;
+  reproduced?: string;
+  recommendation?: string;
+  members?: string[];
+  distinctFix?: string;
+  reproEvidence?: string;
+  corroboration?: string;
+  novelty?: string;
+  humanGates?: string;
+  reproCommandId?: string;
+}> {
+  const rows: Array<{
+    bug: string;
+    reproduced?: string;
+    recommendation?: string;
+    members?: string[];
+    distinctFix?: string;
+    reproEvidence?: string;
+    corroboration?: string;
+    novelty?: string;
+    humanGates?: string;
+    reproCommandId?: string;
+  }> = [];
   for (const entry of raw) {
     if (!entry || typeof entry !== "object" || Array.isArray(entry)) continue;
     const obj = entry as Record<string, unknown>;
     if (typeof obj.bug !== "string" || !obj.bug.trim()) continue;
-    const row: { bug: string; reproduced?: string; recommendation?: string; members?: string[] } = { bug: obj.bug };
+    const row: {
+      bug: string;
+      reproduced?: string;
+      recommendation?: string;
+      members?: string[];
+      distinctFix?: string;
+      reproEvidence?: string;
+      corroboration?: string;
+      novelty?: string;
+      humanGates?: string;
+      reproCommandId?: string;
+    } = { bug: obj.bug };
     if (typeof obj.reproduced === "string") row.reproduced = obj.reproduced;
     if (typeof obj.recommendation === "string") row.recommendation = obj.recommendation;
     if (Array.isArray(obj.members)) row.members = obj.members.filter((m): m is string => typeof m === "string");
+    if (typeof obj.distinct_fix === "string") row.distinctFix = obj.distinct_fix;
+    else if (typeof obj.distinctFix === "string") row.distinctFix = obj.distinctFix;
+    if (typeof obj.repro_evidence === "string") row.reproEvidence = obj.repro_evidence;
+    else if (typeof obj.reproEvidence === "string") row.reproEvidence = obj.reproEvidence;
+    if (typeof obj.corroboration === "string") row.corroboration = obj.corroboration;
+    if (typeof obj.novelty === "string") row.novelty = obj.novelty;
+    if (typeof obj.human_gates === "string") row.humanGates = obj.human_gates;
+    else if (typeof obj.humanGates === "string") row.humanGates = obj.humanGates;
+    if (typeof obj.repro_command_id === "string") row.reproCommandId = obj.repro_command_id;
+    else if (typeof obj.reproCommandId === "string") row.reproCommandId = obj.reproCommandId;
     rows.push(row);
   }
   return rows;

@@ -1,15 +1,19 @@
 import { isToolCallEventType, type ExtensionAPI, type ToolCallEvent, type UserBashEvent } from "@earendil-works/pi-coding-agent";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import path from "node:path";
 import { Type } from "typebox";
 import { defaultConfig, type AuditorConfig } from "../config.js";
+import { runPrepare } from "../agent/acquire.js";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
+import { deriveScopeNote } from "../scope-note.js";
 import { analyzeCommandSafety } from "../security/policy.js";
 
-// Budget policy for the `flounder_run` pi tool, kept in step with the `flounder run` CLI
-// (cli.ts:33-35): UNBOUNDED by default — a real map→dig audit's decisive obligation can
-// surface late, and a fixed budget silently truncates it, so the run ends when the model
-// emits done, not at a step count. A finite maxSteps caps every phase (the tool exposes
-// one knob where the CLI splits --max-steps / --map-steps / --dig-steps).
+// Budget policy for pi tools that invoke the sealed run/map/audit verbs, kept in step with
+// the CLI: UNBOUNDED by default. A real map/dig audit's decisive obligation can surface late,
+// and a fixed budget silently truncates it, so the run ends when the model emits done unless
+// the caller explicitly caps it.
 export function applyFsaRunBudgets(cfg: AuditorConfig, maxSteps?: number): void {
   if (typeof maxSteps === "number" && Number.isFinite(maxSteps)) {
     const capped = Math.max(1, Math.floor(maxSteps));
@@ -23,47 +27,332 @@ export function applyFsaRunBudgets(cfg: AuditorConfig, maxSteps?: number): void 
   cfg.auditDigSteps = Number.POSITIVE_INFINITY;
 }
 
+type ToolParams = Record<string, unknown>;
+
+function str(params: ToolParams, key: string): string | undefined {
+  const value = params[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function bool(params: ToolParams, key: string): boolean | undefined {
+  return typeof params[key] === "boolean" ? (params[key] as boolean) : undefined;
+}
+
+function num(params: ToolParams, key: string): number | undefined {
+  const value = params[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : undefined;
+}
+
+function stringArray(params: ToolParams, key: string): string[] {
+  const value = params[key];
+  return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
+}
+
+function applyCommonConfig(cfg: AuditorConfig, params: ToolParams): void {
+  cfg.targetName = str(params, "target") ?? cfg.targetName;
+  cfg.provider = str(params, "provider") ?? cfg.provider;
+  cfg.auditModel = str(params, "model") ?? cfg.auditModel;
+  const thinking = str(params, "thinking");
+  if (thinking === "off" || thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh") {
+    cfg.thinkingLevel = thinking;
+  }
+  cfg.outputDir = str(params, "outputDir") ?? cfg.outputDir;
+  const historyDir = str(params, "historyDir");
+  if (historyDir !== undefined) cfg.historyDir = historyDir;
+}
+
+function applyMaterialConfig(cfg: AuditorConfig, params: ToolParams): void {
+  const sourcePaths = stringArray(params, "sourcePaths");
+  if (sourcePaths.length > 0) cfg.sourcePaths = sourcePaths;
+  const corpusPaths = stringArray(params, "corpusPaths");
+  if (corpusPaths.length > 0) cfg.corpusPaths = corpusPaths;
+  const buildRoot = str(params, "buildRoot");
+  if (buildRoot !== undefined) cfg.buildRoot = buildRoot;
+  const scopeNote = str(params, "scopeNote");
+  if (scopeNote) cfg.auditScopeNote = scopeNote;
+}
+
+function applySandboxConfig(cfg: AuditorConfig, params: ToolParams): void {
+  const backend = str(params, "sandboxBackend");
+  if (backend === "auto" || backend === "oci" || backend === "host") cfg.sandboxBackend = backend;
+  cfg.sandboxImage = str(params, "sandboxImage") ?? cfg.sandboxImage;
+  const allowHost = bool(params, "sandboxAllowHostFallback");
+  if (allowHost !== undefined) cfg.sandboxAllowHostFallback = allowHost;
+  const prepareNetwork = str(params, "sandboxPrepareNetwork");
+  if (prepareNetwork === "none" || prepareNetwork === "enabled") cfg.sandboxPrepareNetwork = prepareNetwork;
+  const confirmNetwork = str(params, "sandboxConfirmNetwork");
+  if (confirmNetwork === "none" || confirmNetwork === "enabled") cfg.sandboxConfirmNetwork = confirmNetwork;
+  const memoryMb = num(params, "sandboxMemoryMb");
+  if (memoryMb !== undefined) cfg.sandboxMemoryMb = Math.max(64, Math.floor(memoryMb));
+  const cpus = num(params, "sandboxCpus");
+  if (cpus !== undefined) cfg.sandboxCpus = Math.max(0.1, cpus);
+}
+
+function applyAuditBudgets(cfg: AuditorConfig, params: ToolParams): void {
+  applyFsaRunBudgets(cfg, num(params, "maxSteps"));
+  const mapSteps = num(params, "mapSteps");
+  if (mapSteps !== undefined) cfg.auditMapSteps = Math.max(1, Math.floor(mapSteps));
+  const digSteps = num(params, "digSteps");
+  if (digSteps !== undefined) cfg.auditDigSteps = Math.max(1, Math.floor(digSteps));
+  const maxScopes = num(params, "maxScopes");
+  if (maxScopes !== undefined) cfg.auditMaxScopes = Math.max(1, Math.floor(maxScopes));
+  const digSamples = num(params, "digSamples");
+  if (digSamples !== undefined) cfg.auditDigSamples = Math.max(1, Math.floor(digSamples));
+  const digConcurrency = num(params, "digConcurrency");
+  if (digConcurrency !== undefined) cfg.auditDigConcurrency = Math.max(1, Math.floor(digConcurrency));
+  if (bool(params, "remap")) cfg.auditRemap = true;
+}
+
+function configured(params: ToolParams): AuditorConfig {
+  const cfg = defaultConfig();
+  applyCommonConfig(cfg, params);
+  applyMaterialConfig(cfg, params);
+  applySandboxConfig(cfg, params);
+  return cfg;
+}
+
+function confirmedCount(findings: Array<{ confirmationStatus: string }>): number {
+  return findings.filter((finding) => finding.confirmationStatus === "confirmed-executable" || finding.confirmationStatus === "confirmed-differential").length;
+}
+
+function summaryLine(runDir: string, total: number, confirmed: number): string {
+  return `Run dir: ${runDir}\nFindings: ${total} (confirmed: ${confirmed})`;
+}
+
+function details(value: unknown): Record<string, unknown> {
+  return value as Record<string, unknown>;
+}
+
+async function runPipeline(params: ToolParams): Promise<Record<string, unknown>> {
+  const clue = str(params, "clue");
+  if (!clue) throw new Error("flounder_run needs either sourcePaths for a sealed source audit or clue for the prepare -> run -> confirm pipeline.");
+
+  const prepCfg = configured(params);
+  const posture = str(params, "posture") === "informed" ? "informed" : "blind";
+  const matchDeployed = bool(params, "matchDeployed") ?? true;
+  const endpoint = str(params, "endpoint");
+  const prepareMaxSteps = num(params, "prepareMaxSteps");
+  const prep = await runPrepare(prepCfg, {
+    clue,
+    posture,
+    matchDeployed,
+    ...(endpoint !== undefined ? { endpoint } : {}),
+    ...(prepareMaxSteps !== undefined ? { maxSteps: Math.max(1, Math.floor(prepareMaxSteps)) } : {}),
+  });
+
+  const auditParams: ToolParams = { ...params, sourcePaths: [prep.workspaceDir], buildRoot: prep.workspaceDir };
+  const auditCfg = configured(auditParams);
+  applyAuditBudgets(auditCfg, auditParams);
+  if (!bool(params, "quick")) auditCfg.auditDeep = true;
+  const derived = deriveScopeNote(prep.manifest);
+  if (derived) auditCfg.auditScopeNote = [str(params, "scopeNote"), derived].filter(Boolean).join("\n\n");
+
+  const audit = await runAudit(auditCfg, { kind: "run" });
+  const confirmed = confirmedCount(audit.summary.findings);
+  let confirm: Awaited<ReturnType<typeof runConfirm>> | undefined;
+  if (!bool(params, "noConfirm") && audit.summary.findings.length > 0) {
+    const confirmCfg = configured({ ...params, sourcePaths: [prep.workspaceDir], buildRoot: prep.workspaceDir });
+    const confirmMaxSteps = num(params, "confirmMaxSteps");
+    confirm = await runConfirm(confirmCfg, {
+      inputRunDir: audit.runDir,
+      ...(confirmMaxSteps !== undefined ? { maxSteps: Math.max(1, Math.floor(confirmMaxSteps)) } : {}),
+    });
+  }
+
+  return { prepare: prep, audit, confirm, confirmed };
+}
+
+const sharedParams = {
+  target: Type.String({ description: "Target name used for run artifacts and durable memory." }),
+  provider: Type.Optional(Type.String({ description: "pi-ai provider, for example openai-codex." })),
+  model: Type.Optional(Type.String({ description: "Model id used to drive the agent loop." })),
+  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh." })),
+  outputDir: Type.Optional(Type.String({ description: "Artifact output directory." })),
+  historyDir: Type.Optional(Type.String({ description: "Project history directory. Defaults to outputDir/history." })),
+  sandboxBackend: Type.Optional(Type.String({ description: "auto|oci|host." })),
+  sandboxImage: Type.Optional(Type.String({ description: "OCI image for sandboxed commands." })),
+  sandboxAllowHostFallback: Type.Optional(Type.Boolean({ description: "Trusted-local opt-in for host fallback when OCI is unavailable." })),
+  sandboxPrepareNetwork: Type.Optional(Type.String({ description: "none|enabled for prepare/build warm-up commands." })),
+  sandboxConfirmNetwork: Type.Optional(Type.String({ description: "none|enabled for open-world confirm commands." })),
+  sandboxMemoryMb: Type.Optional(Type.Number({ description: "Memory limit for OCI sandbox commands." })),
+  sandboxCpus: Type.Optional(Type.Number({ description: "CPU limit for OCI sandbox commands." })),
+};
+
+const materialParams = {
+  sourcePaths: Type.Array(Type.String(), { description: "Local authorized source files or directories to audit." }),
+  buildRoot: Type.Optional(Type.String({ description: "Directory copied into the sandbox so the target is buildable. Defaults to sourcePaths." })),
+  corpusPaths: Type.Optional(Type.Array(Type.String(), { description: "Local spec/reference files or directories." })),
+  scopeNote: Type.Optional(Type.String({ description: "One-line authorized-scope hint surfaced to map/dig." })),
+};
+
+const auditBudgetParams = {
+  maxSteps: Type.Optional(Type.Number({ description: "Cap on agent actions. Default: unbounded." })),
+  mapSteps: Type.Optional(Type.Number({ description: "Cap on map actions. Default: unbounded." })),
+  digSteps: Type.Optional(Type.Number({ description: "Cap on each dig. Default: unbounded." })),
+  maxScopes: Type.Optional(Type.Number({ description: "How many mapped scopes the next dig batch audits. Default follows Flounder config." })),
+  digSamples: Type.Optional(Type.Number({ description: "Independent dig passes per selected scope." })),
+  digConcurrency: Type.Optional(Type.Number({ description: "How many scopes run in parallel." })),
+  remap: Type.Optional(Type.Boolean({ description: "Re-enumerate scopes from scratch instead of resuming inventory." })),
+};
+
 export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
   pi.registerTool({
-    name: "flounder_run",
-    label: "Autonomous Security Audit",
+    name: "flounder_prepare",
+    label: "Prepare Audit Target",
     description:
-      "Run the thin agentic audit: the model drives its own investigation with pi-style read/write/edit/bash tools. The framework supplies capability and verification, not a checklist. Verification is local-only; a finding only reaches confirmed-executable when a sandboxed local command passes. Requires a live model provider.",
+      "Open-world acquisition phase. Turn a clue (transaction, address, package, repo, project link, or other authorized target pointer) into staged source/corpus with provenance and deployment-match evidence. Runs before map; does not hunt bugs.",
     parameters: Type.Object({
-      target: Type.String({ description: "Target name used for run artifacts and durable memory." }),
-      sourcePaths: Type.Array(Type.String(), { description: "Local authorized source files or directories to audit." }),
-      corpusPaths: Type.Optional(Type.Array(Type.String(), { description: "Local spec/reference files or directories." })),
-      provider: Type.Optional(Type.String({ description: "pi-ai provider, for example openai; use codex-cli or claude-code only as explicit local CLI fallbacks." })),
-      model: Type.Optional(Type.String({ description: "Model id used to drive the agent loop." })),
-      maxSteps: Type.Optional(Type.Number({ description: "Cap on agent actions per phase. Default: unbounded — the run ends when the model emits done (matching the `flounder run` CLI). When set, caps each of the map, dig, and breadth phases." })),
-      scopeNote: Type.Optional(Type.String({ description: "One-line authorized-scope hint surfaced to the agent." })),
-      outputDir: Type.Optional(Type.String({ description: "Artifact output directory." })),
-      historyDir: Type.Optional(Type.String({ description: "Project history directory. Defaults to outputDir/history." })),
+      ...sharedParams,
+      clue: Type.String({ description: "Transaction, address, package, repo, project link, or other authorized target clue." }),
+      posture: Type.Optional(Type.String({ description: "blind|informed. Default blind." })),
+      matchDeployed: Type.Optional(Type.Boolean({ description: "Prove deployed/published components match staged source when possible. Default true." })),
+      endpoint: Type.Optional(Type.String({ description: "Read-only access hint, such as an RPC URL." })),
+      maxSteps: Type.Optional(Type.Number({ description: "Cap on prepare actions. Default: unbounded." })),
     }),
     async execute(_toolCallId, params) {
-      const cfg = defaultConfig();
-      cfg.targetName = params.target;
-      cfg.sourcePaths = params.sourcePaths;
-      cfg.corpusPaths = params.corpusPaths ?? [];
-      cfg.provider = params.provider ?? cfg.provider;
-      if (params.model) cfg.auditModel = params.model;
-      applyFsaRunBudgets(cfg, params.maxSteps);
-      if (params.scopeNote) cfg.auditScopeNote = params.scopeNote;
-      cfg.outputDir = params.outputDir ?? cfg.outputDir;
-      if (params.historyDir !== undefined) cfg.historyDir = params.historyDir;
-      cfg.auditDeep = true; // flounder_run = map -> audit, matching the `flounder run` CLI verb
+      const cfg = configured(params);
+      const result = await runPrepare(cfg, {
+        clue: params.clue,
+        posture: params.posture === "informed" ? "informed" : "blind",
+        matchDeployed: params.matchDeployed ?? true,
+        ...(params.endpoint ? { endpoint: params.endpoint } : {}),
+        ...(typeof params.maxSteps === "number" && Number.isFinite(params.maxSteps) ? { maxSteps: Math.max(1, Math.floor(params.maxSteps)) } : {}),
+      });
+      return {
+        content: [{ type: "text", text: `Prepare dir: ${result.runDir}\nWorkspace: ${result.workspaceDir}\nComponents: ${result.validation.components} (matched: ${result.validation.matched}, unverified: ${result.validation.unverified})` }],
+        details: details(result),
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "flounder_run",
+    label: "Continue Audit",
+    description:
+      "Current flounder run semantics. With clue and no sourcePaths, run the full prepare -> sealed map/dig -> confirm pipeline. With sourcePaths, run the sealed source audit: map scopes if needed, then dig the next batch. The model drives read/write/edit/bash inside Flounder's sandbox; findings require execution evidence.",
+    parameters: Type.Object({
+      ...sharedParams,
+      clue: Type.Optional(Type.String({ description: "When set without sourcePaths, runs prepare -> sealed map/dig -> confirm." })),
+      sourcePaths: Type.Optional(Type.Array(Type.String(), { description: "Local authorized source files or directories. When set, runs sealed map/dig on this source." })),
+      buildRoot: Type.Optional(Type.String({ description: "Directory copied into the sandbox so the target is buildable. Defaults to sourcePaths." })),
+      corpusPaths: Type.Optional(Type.Array(Type.String(), { description: "Local spec/reference files or directories." })),
+      scopeNote: Type.Optional(Type.String({ description: "One-line authorized-scope hint surfaced to map/dig." })),
+      quick: Type.Optional(Type.Boolean({ description: "Source audit only: run one breadth pass instead of map/dig." })),
+      noConfirm: Type.Optional(Type.Boolean({ description: "Clue pipeline only: stop after sealed audit instead of running open-world confirm." })),
+      posture: Type.Optional(Type.String({ description: "Clue pipeline prepare posture: blind|informed. Default blind." })),
+      matchDeployed: Type.Optional(Type.Boolean({ description: "Clue pipeline prepare: deployment-match staged source when possible. Default true." })),
+      endpoint: Type.Optional(Type.String({ description: "Clue pipeline prepare read-only endpoint hint." })),
+      prepareMaxSteps: Type.Optional(Type.Number({ description: "Clue pipeline prepare cap. Default: unbounded." })),
+      confirmMaxSteps: Type.Optional(Type.Number({ description: "Clue pipeline confirm cap. Default: unbounded." })),
+      ...auditBudgetParams,
+    }),
+    async execute(_toolCallId, params) {
+      const sourcePaths = stringArray(params, "sourcePaths");
+      const clue = str(params, "clue");
+      if (sourcePaths.length > 0 && clue) throw new Error("flounder_run accepts either sourcePaths or clue, not both.");
+      if (sourcePaths.length === 0 && clue) {
+        const result = await runPipeline(params);
+        const audit = result.audit as Awaited<ReturnType<typeof runAudit>>;
+        const confirm = result.confirm as Awaited<ReturnType<typeof runConfirm>> | undefined;
+        return {
+          content: [{
+            type: "text",
+            text: `Prepare dir: ${(result.prepare as Awaited<ReturnType<typeof runPrepare>>).runDir}\n${summaryLine(audit.runDir, audit.summary.findings.length, result.confirmed as number)}${confirm ? `\nConfirm dir: ${confirm.runDir}\nDecision rows: ${confirm.decisionRows}` : "\nConfirm skipped or no findings to confirm."}`,
+          }],
+          details: details(result),
+        };
+      }
+      if (sourcePaths.length === 0) throw new Error("flounder_run needs sourcePaths for a sealed source audit, or clue for the prepare -> run -> confirm pipeline.");
+
+      const cfg = configured(params);
+      applyAuditBudgets(cfg, params);
+      if (!params.quick) cfg.auditDeep = true; // source run = map -> dig; quick = breadth pass
 
       const result = await runAudit(cfg, { kind: "run" });
-      const confirmed = result.summary.findings.filter((finding) => finding.confirmationStatus === "confirmed-executable").length;
+      const confirmed = confirmedCount(result.summary.findings);
       return {
         content: [
           {
             type: "text",
-            text: `Run dir: ${result.runDir}\nFindings: ${result.summary.findings.length} (confirmed-executable: ${confirmed})\nBy severity: ${JSON.stringify(result.summary.coverage.bySeverity)}`,
+            text: `${summaryLine(result.runDir, result.summary.findings.length, confirmed)}\nBy severity: ${JSON.stringify(result.summary.coverage.bySeverity)}`,
           },
         ],
-        details: result,
+        details: details(result),
       };
+    },
+  });
+
+  pi.registerTool({
+    name: "flounder_map",
+    label: "Map Audit Scopes",
+    description:
+      "Sealed map phase. Enumerate and persist the scope inventory for authorized source/corpus without digging or producing findings. Use before flounder_audit when you want separate map and dig steps.",
+    parameters: Type.Object({
+      ...sharedParams,
+      ...materialParams,
+      maxSteps: Type.Optional(Type.Number({ description: "Alias for mapSteps. Default: unbounded." })),
+      mapSteps: Type.Optional(Type.Number({ description: "Cap on map actions. Default: unbounded." })),
+      remap: Type.Optional(Type.Boolean({ description: "Re-enumerate scopes from scratch instead of resuming inventory." })),
+    }),
+    async execute(_toolCallId, params) {
+      const cfg = configured(params);
+      applyFsaRunBudgets(cfg, num(params, "maxSteps"));
+      const mapSteps = num(params, "mapSteps");
+      if (mapSteps !== undefined) cfg.auditMapSteps = Math.max(1, Math.floor(mapSteps));
+      if (bool(params, "remap")) cfg.auditRemap = true;
+      cfg.auditDeep = true;
+      cfg.auditMapOnly = true;
+      const result = await runAudit(cfg, { kind: "map" });
+      return {
+        content: [{ type: "text", text: `Map dir: ${result.runDir}\nScopes: ${result.scopeCoverage?.total ?? 0}` }],
+        details: details(result),
+      };
+    },
+  });
+
+  pi.registerTool({
+    name: "flounder_audit",
+    label: "Dig Or Verify",
+    description:
+      "Sealed audit phase. Dig pending scopes from an existing map, dig a named region, dig selected scope ids, or verify supplied suspected finding JSON by execution. Network remains sealed; local confirmation still requires a sandboxed test command.",
+    parameters: Type.Object({
+      ...sharedParams,
+      ...materialParams,
+      region: Type.Optional(Type.String({ description: "Deep-audit one pinned region, e.g. src/Foo.sol:120-180." })),
+      scope: Type.Optional(Type.String({ description: "Comma-separated scope ids from the persisted inventory." })),
+      verifyFindings: Type.Optional(Type.Any({ description: "Inline suspected finding object or array to confirm-or-refute by execution." })),
+      ...auditBudgetParams,
+    }),
+    async execute(_toolCallId, params) {
+      const cfg = configured(params);
+      applyAuditBudgets(cfg, params);
+      let verifyTempDir: string | undefined;
+      if (params.verifyFindings !== undefined) {
+        const dir = await mkdtemp(path.join(tmpdir(), "flounder-verify-"));
+        verifyTempDir = dir;
+        const file = path.join(dir, "findings.json");
+        await writeFile(file, JSON.stringify(params.verifyFindings), "utf8");
+        cfg.auditVerify = file;
+      } else {
+        cfg.auditDeep = true;
+        const region = str(params, "region");
+        if (region) cfg.auditDeepFocus = region;
+        else {
+          cfg.auditRequireInventory = true;
+          const scope = str(params, "scope");
+          if (scope) cfg.auditScopeIds = scope.split(",").map((item) => item.trim()).filter(Boolean);
+        }
+      }
+      try {
+        const result = await runAudit(cfg, { kind: "audit" });
+        const confirmed = confirmedCount(result.summary.findings);
+        return {
+          content: [{ type: "text", text: `${summaryLine(result.runDir, result.summary.findings.length, confirmed)}${result.scopeCoverage ? `\nScopes: ${result.scopeCoverage.audited}/${result.scopeCoverage.total} audited (${result.scopeCoverage.pending} pending)` : ""}` }],
+          details: details(result),
+        };
+      } finally {
+        if (verifyTempDir) await rm(verifyTempDir, { recursive: true, force: true });
+      }
     },
   });
 
@@ -71,30 +360,18 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
     name: "flounder_confirm",
     label: "Open-World Confirmation",
     description:
-      "Open-world counterpart to flounder_run: take a finished run's findings to a real-world standard. Freeze + fingerprint the findings (before any network access), reproduce each against real ground truth (e.g. a mainnet fork of the deployed contract), consolidate duplicates by fix-equivalence, check novelty online, and emit a submit/no-submit decision sheet. Networked, but white-hat: it may fork and read live networks/data, and NEVER broadcasts to a live one. Unbounded by default (ends when the model is done); auto-resumes an interrupted prior confirm of the same run. Requires a pi-session provider (e.g. openai-codex) — it cannot run on a mock/CLI fallback.",
+      "Open-world confirmation phase. Take a finished run's confirmed findings to a real-world standard: freeze provenance, reproduce against real ground truth, consolidate duplicates, check novelty online, and emit a submit/no-submit decision sheet. Networked but white-hat: may fork/read/fetch/search, never broadcast to a live target.",
     parameters: Type.Object({
-      target: Type.String({ description: "Target name; should match the run being confirmed (names the confirm dir and enables resume)." }),
+      ...sharedParams,
       runDir: Type.String({ description: "Directory of the finished flounder_run to confirm (it must contain audit_findings.json with confirmed findings)." }),
       sourcePaths: Type.Array(Type.String(), { description: "Local authorized source/target code to reproduce the findings against." }),
       buildRoot: Type.Optional(Type.String({ description: "Directory copied into the sandbox so the target is buildable (e.g. a Foundry/cargo workspace root). Defaults to sourcePaths." })),
       corpusPaths: Type.Optional(Type.Array(Type.String(), { description: "Local spec/reference files or directories." })),
-      provider: Type.Optional(Type.String({ description: "pi-ai provider; must be a pi-session provider such as openai-codex (mock/CLI fallbacks cannot fork a live network)." })),
-      model: Type.Optional(Type.String({ description: "Model id used to drive the confirmation session." })),
       maxSteps: Type.Optional(Type.Number({ description: "Cap on agent actions. Default: unbounded — the run ends when the model emits done. Reproduction is heavy; a fixed budget silently truncates it." })),
       fresh: Type.Optional(Type.Boolean({ description: "Ignore any prior interrupted confirm of this run and start over (default: auto-resume, carrying already-settled rows forward)." })),
-      outputDir: Type.Optional(Type.String({ description: "Artifact output directory." })),
-      historyDir: Type.Optional(Type.String({ description: "Project history directory. Defaults to outputDir/history." })),
     }),
     async execute(_toolCallId, params) {
-      const cfg = defaultConfig();
-      cfg.targetName = params.target;
-      cfg.sourcePaths = params.sourcePaths;
-      cfg.corpusPaths = params.corpusPaths ?? [];
-      if (params.buildRoot !== undefined) cfg.buildRoot = params.buildRoot;
-      cfg.provider = params.provider ?? cfg.provider;
-      if (params.model) cfg.auditModel = params.model;
-      cfg.outputDir = params.outputDir ?? cfg.outputDir;
-      if (params.historyDir !== undefined) cfg.historyDir = params.historyDir;
+      const cfg = configured(params);
 
       // Confirm is UNBOUNDED by default: runConfirm sets the budget to non-finite unless a
       // finite maxSteps is passed. Resume is automatic unless `fresh` is set.
@@ -111,7 +388,7 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
             text: `Confirm dir: ${result.runDir}\nDecision rows (distinct bugs): ${result.decisionRows}\nDecision sheet: ${result.runDir}/confirm_report.md\nProvenance (frozen pre-network): ${result.runDir}/confirm_provenance.json`,
           },
         ],
-        details: result,
+        details: details(result),
       };
     },
   });
@@ -119,7 +396,7 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
   pi.registerCommand("flounder", {
     description: "Show flounder usage.",
     handler: async (_args, ctx) => {
-      ctx.ui.notify("Tools: flounder_run (sealed map→dig audit) and flounder_confirm (open-world reproduction of a run's findings). Or run `flounder run` / `flounder confirm` from the terminal.", "info");
+      ctx.ui.notify("Tools: flounder_prepare, flounder_run, flounder_map, flounder_audit, flounder_confirm. They mirror the top-level Flounder workflow verbs.", "info");
     },
   });
 

@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { buildArgs, specToConfig, ActivityBus } from "../dist/server/run-manager.js";
 import { MetadataStore } from "../dist/db/store.js";
+import { defaultOutputDir } from "../dist/config.js";
 
 test("ActivityBus: a subscriber replays backlog then receives live events", () => {
   const bus = new ActivityBus();
@@ -18,6 +19,15 @@ test("ActivityBus: a subscriber replays backlog then receives live events", () =
   unsub();
   bus.push({ kind: "thinking_delta", delta: "x" });
   assert.equal(seen.length, 3); // no events after unsubscribe
+});
+
+test("ActivityBus: snapshot returns a bounded recent tail", () => {
+  const bus = new ActivityBus();
+  bus.push({ kind: "step", step: 1, tool: "read" });
+  bus.push({ kind: "step", step: 2, tool: "bash" });
+  bus.push({ kind: "thinking_delta", delta: "done" });
+  assert.deepEqual(bus.snapshot(2).map((ev) => ev.tool ?? ev.delta), ["bash", "done"]);
+  assert.deepEqual(bus.snapshot(10).map((ev) => ev.kind), ["step", "step", "thinking_delta"]);
 });
 
 // buildArgs is the pure core of launching: spec -> flounder CLI argv. The run-manager shells out
@@ -74,6 +84,40 @@ test("buildArgs: confirm without a run dir is rejected", () => {
   assert.throws(() => buildArgs({ verb: "confirm", target: "p", sourcePaths: ["./s"] }), /inputRunDir/);
 });
 
+test("buildArgs/specToConfig: sandbox isolation settings round-trip through launch specs", () => {
+  const spec = {
+    verb: "run",
+    target: "p",
+    sourcePaths: ["./s"],
+    sandboxBackend: "oci",
+    sandboxImage: "audit-sandbox:v1",
+    sandboxAllowHostFallback: true,
+    sandboxPrepareNetwork: "enabled",
+    sandboxConfirmNetwork: "none",
+    sandboxMemoryMb: 2048,
+    sandboxCpus: 1.5,
+  };
+  assert.deepEqual(buildArgs(spec).slice(-15), [
+    "--sandbox-backend", "oci",
+    "--sandbox-image", "audit-sandbox:v1",
+    "--allow-host-execution",
+    "--prepare-network", "enabled",
+    "--confirm-network", "none",
+    "--sandbox-memory-mb", "2048",
+    "--sandbox-cpus", "1.5",
+    "--out", defaultOutputDir(),
+  ]);
+
+  const cfg = specToConfig(spec, "runs");
+  assert.equal(cfg.sandboxBackend, "oci");
+  assert.equal(cfg.sandboxImage, "audit-sandbox:v1");
+  assert.equal(cfg.sandboxAllowHostFallback, true);
+  assert.equal(cfg.sandboxPrepareNetwork, "enabled");
+  assert.equal(cfg.sandboxConfirmNetwork, "none");
+  assert.equal(cfg.sandboxMemoryMb, 2048);
+  assert.equal(cfg.sandboxCpus, 1.5);
+});
+
 // The manager runs the library in-process; specToConfig is the spec -> AuditorConfig
 // translation (the in-process equivalent of the CLI's parseConfig + applyAuditPosture).
 test("specToConfig: posture per verb + unbounded budgets by default", () => {
@@ -118,6 +162,21 @@ test("specToConfig: a project dir + relative materials resolve under the daemon 
   assert.equal(cfg.sourcePaths[1], path.resolve("/ws/myproj/lib"));
   assert.equal(cfg.buildRoot, path.resolve("/ws/myproj")); // "." resolves to the project root
   assert.equal(cfg.corpusPaths[0], path.resolve("/ws/myproj/docs/specs"));
+});
+
+test("specToConfig: project-relative specs cannot escape the daemon workspace", () => {
+  assert.throws(
+    () => specToConfig({ verb: "run", target: "p", dir: "../outside", sourcePaths: ["src"] }, "runs", "/ws"),
+    /Unsafe project dir/,
+  );
+  assert.throws(
+    () => specToConfig({ verb: "run", target: "p", dir: "p", sourcePaths: ["../secret"] }, "runs", "/ws"),
+    /Unsafe project material/,
+  );
+  assert.throws(
+    () => specToConfig({ verb: "run", target: "p", dir: "p", sourcePaths: ["/abs/secret"] }, "runs", "/ws"),
+    /absolute paths are not allowed/,
+  );
 });
 
 test("specToConfig: per-phase models from the profile land on cfg.models; no dir = materials as-is", () => {

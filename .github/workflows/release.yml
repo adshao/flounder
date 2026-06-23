@@ -1,0 +1,62 @@
+name: Release
+
+# Release automation only packages the Node artifact. Do not add
+# provider secrets, pi login, live Flounder audit commands, or extra deploy
+# targets here.
+
+on:
+  push:
+    tags:
+      - "v*"
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-${{ github.ref }}
+  cancel-in-progress: false
+
+jobs:
+  release-gate:
+    name: Release gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    env:
+      npm_config_cache: .npm-cache
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          registry-url: "https://registry.npmjs.org"
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Build and test
+        run: npm test
+
+      - name: API catalog contract
+        run: npm run check:api-catalog:dist
+
+      - name: Public-surface scan
+        run: npm run check:public
+
+      - name: Pack artifact
+        run: npm pack
+
+      - name: Upload package artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: npm-package
+          path: "*.tgz"
+          if-no-files-found: error

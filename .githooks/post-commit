@@ -1,0 +1,6 @@
+#!/bin/sh
+#
+# Fast public-surface guard for everyday development. It scans only the commit
+# that was just created; release/verify uses `npm run check:public` to scan the
+# current tree plus HEAD.
+npm run check:public:commit

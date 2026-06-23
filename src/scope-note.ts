@@ -26,13 +26,14 @@ export function deriveScopeNote(manifest: unknown): string | undefined {
   const m = manifest as Record<string, unknown>;
   const comps = Array.isArray(m.components) ? (m.components as Array<Record<string, unknown>>) : [];
   if (comps.length === 0) return undefined;
-  const label = (c: Record<string, unknown>): string => {
-    const id = String(c.identity ?? c.role ?? "?").trim() || "?";
-    const where = String(c.staged_path ?? "").trim();
-    return where ? `${id} — ${where}` : id;
+  const label = (c: Record<string, unknown>): string | undefined => {
+    const id = firstText(c.identity, c.name, c.id, c.role);
+    const where = firstText(c.staged_path, c.path);
+    if (id && where && id !== where) return `${id} — ${where}`;
+    return id || where;
   };
-  const inScope = comps.filter(isInScope).map(label);
-  const deps = comps.filter((c) => !isInScope(c)).map(label);
+  const inScope = comps.filter(isInScope).map(label).filter((s): s is string => Boolean(s));
+  const deps = comps.filter((c) => !isInScope(c)).map(label).filter((s): s is string => Boolean(s));
   if (inScope.length === 0) return undefined;
   const parts: string[] = [
     "This scope note is a FACTUAL restatement of what the prepare phase staged (deployment match + the project's own scope declaration). It is NOT a hint about any specific bug — find bugs blind within this boundary.",
@@ -47,4 +48,13 @@ export function deriveScopeNote(manifest: unknown): string | undefined {
   const basis = m.scope_declaration ?? m.scope_basis;
   if (typeof basis === "string" && basis.trim()) parts.push("Scope basis (how the in-scope set was determined): " + basis.trim());
   return parts.join("\n\n");
+}
+
+function firstText(...values: unknown[]): string | undefined {
+  for (const value of values) {
+    if (typeof value !== "string") continue;
+    const trimmed = value.trim();
+    if (trimmed && trimmed !== "?") return trimmed;
+  }
+  return undefined;
 }

@@ -1,6 +1,7 @@
 import { complete, getModel, getProviders, type KnownProvider } from "@earendil-works/pi-ai";
 import type { LlmClient } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
+import type { ThinkingLevel } from "../config.js";
 
 export class PiAiClient implements LlmClient {
   constructor(
@@ -14,7 +15,7 @@ export class PiAiClient implements LlmClient {
     user: string;
     model?: string;
     maxTokens?: number;
-    thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh";
+    thinkingLevel?: ThinkingLevel;
   }): Promise<string> {
     if (!input.model) throw new Error("model is required");
     const provider = normalizeProvider(this.provider);
@@ -23,7 +24,7 @@ export class PiAiClient implements LlmClient {
 
     const options: { maxTokens?: number; reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" } = {};
     if (input.maxTokens !== undefined) options.maxTokens = input.maxTokens;
-    if (input.thinkingLevel !== undefined) options.reasoning = input.thinkingLevel;
+    if (input.thinkingLevel !== undefined && input.thinkingLevel !== "off") options.reasoning = input.thinkingLevel;
 
     const response = await complete(
       model,

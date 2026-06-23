@@ -104,7 +104,7 @@ export function isAgentConfirmCommand(command: StructuredReproductionCommand): b
 
 /**
  * True for an allowlisted build / dependency-resolution command (cargo build,
- * npm install, go mod download, forge build, pip install, …). These are the
+ * cmake -S/-B/--build, ninja, npm install, go mod download, forge build, pip install, …). These are the
  * "prepare/build phase": they may need a package registry to fetch dependencies,
  * which is categorically different from the exploit/confirm run. They are NOT
  * confirmation-eligible — a build can never upgrade a finding (only isAgentConfirmCommand can).
@@ -276,13 +276,14 @@ function isAllowedLocalTestCommand(program: string, args: string[]): boolean {
   const name = program.toLowerCase();
   const first = args[0]?.toLowerCase();
   const second = args[1]?.toLowerCase();
-  if (name === "cargo") return first === "test";
+  if (name === "cargo") return cargoSubcommand(args) === "test";
   if (name === "go") return first === "test";
   if (name === "npm") return first === "test" || (first === "run" && second === "test");
   if (name === "pnpm" || name === "yarn" || name === "bun") return first === "test" || (first === "run" && second === "test");
   if (name === "node") return first === "--test";
   if (name === "python" || name === "python3") return first === "-m" && (second === "pytest" || second === "unittest");
   if (name === "pytest") return true;
+  if (name === "ctest") return true;
   if (name === "deno") return first === "test";
   if (name === "dotnet") return first === "test";
   if (name === "mvn") return first === "test" || first === "-q" && second === "test";
@@ -304,13 +305,16 @@ function isAllowedBuildCommand(program: string, args: string[]): boolean {
   const first = args[0]?.toLowerCase();
   const second = args[1]?.toLowerCase();
   const lower = args.map((arg) => arg.toLowerCase());
-  if (name === "cargo") return ["build", "fetch", "check", "generate-lockfile", "vendor", "update"].includes(first ?? "");
+  if (name === "cargo") return ["build", "fetch", "check", "generate-lockfile", "vendor", "update"].includes(cargoSubcommand(args) ?? "");
   if (name === "go") return first === "build" || first === "mod"; // go build / go mod download|tidy|vendor
   if (name === "npm") return ["install", "ci", "i"].includes(first ?? "");
   if (name === "pnpm" || name === "yarn" || name === "bun") return ["install", "i", "ci"].includes(first ?? "") || (name === "yarn" && args.length === 0);
   if (name === "pip" || name === "pip3") return first === "install";
   if (name === "python" || name === "python3") return first === "-m" && second === "pip" && (lower[2] === "install");
   if (name === "forge") return ["build", "install", "compile", "update"].includes(first ?? "");
+  if (name === "cmake") return isAllowedCmakeBuild(args);
+  if (name === "ninja") return true;
+  if (name === "make" || name === "gmake") return true;
   if (name === "dotnet") return first === "build" || first === "restore";
   if (name === "deno") return first === "cache";
   if (name === "mvn") return lower.some((arg) => ["compile", "package", "install", "dependency:resolve", "dependency:go-offline"].includes(arg));
@@ -319,17 +323,103 @@ function isAllowedBuildCommand(program: string, args: string[]): boolean {
   return false;
 }
 
+function cargoSubcommand(args: string[]): string | undefined {
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index]?.toLowerCase() ?? "";
+    if (!arg) continue;
+    if (/^\+[\w.-]+$/.test(arg)) continue;
+    if (arg === "--") return undefined;
+    if (arg === "-z" || arg === "--config" || arg === "-c" || arg === "--color" || arg === "--manifest-path") {
+      index += 1;
+      continue;
+    }
+    if (arg.startsWith("-z") || arg.startsWith("--config=") || arg.startsWith("--color=") || arg.startsWith("--manifest-path=")) {
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    return arg;
+  }
+  return undefined;
+}
+
 function isAllowedLocalInspectionCommand(program: string, args: string[]): boolean {
   const name = program.toLowerCase();
   if (name === "pwd") return args.length === 0;
+  if (name === "which") return args.length > 0 && args.every(isPlainToolName);
+  if (isAllowedVersionInspection(name, args)) return true;
+  if (isAllowedJsonToolInspection(name, args)) return true;
+  if (name === "test" || name === "[") return isAllowedFileTestInspection(name, args);
   if (name === "ls") return args.every((arg) => isSafeInspectionArg(name, arg));
   if (name === "find") return args.every((arg) => isSafeInspectionArg(name, arg));
-  if (name === "rg" || name === "grep") return args.every((arg) => isSafeInspectionArg(name, arg));
+  if (name === "rg" || name === "grep" || name === "jq") return args.every((arg) => isSafeInspectionArg(name, arg));
   if (name === "sed") return args.every((arg) => isSafeInspectionArg(name, arg));
   if (["cat", "head", "tail", "wc", "sort", "uniq", "cut"].includes(name)) {
     return args.every((arg) => isSafeInspectionArg(name, arg));
   }
   return false;
+}
+
+function isAllowedVersionInspection(program: string, args: string[]): boolean {
+  if (args.length !== 1) return false;
+  const flag = args[0]?.toLowerCase();
+  if (!flag || !["--version", "-v", "-version", "version"].includes(flag)) return false;
+  return new Set([
+    "anvil",
+    "bb",
+    "bun",
+    "cargo",
+    "cast",
+    "chisel",
+    "cmake",
+    "deno",
+    "dotnet",
+    "forge",
+    "git",
+    "go",
+    "gmake",
+    "gradle",
+    "gradlew",
+    "jq",
+    "make",
+    "mvn",
+    "nargo",
+    "ninja",
+    "node",
+    "noir",
+    "npm",
+    "pip",
+    "pip3",
+    "pnpm",
+    "python",
+    "python3",
+    "rustc",
+    "rustup",
+    "solc",
+    "yarn",
+  ]).has(program);
+}
+
+function isAllowedJsonToolInspection(program: string, args: string[]): boolean {
+  if (program !== "python" && program !== "python3") return false;
+  if (args[0] !== "-m" || args[1] !== "json.tool") return false;
+  const rest = args.slice(2);
+  const paths = rest.filter((arg) => !arg.startsWith("-"));
+  if (paths.length > 1) return false;
+  return rest.every((arg) => isSafeInspectionArg(program, arg));
+}
+
+function isAllowedFileTestInspection(program: string, args: string[]): boolean {
+  const tokens = program === "[" ? args.slice(0, -1) : args;
+  if (program === "[" && args.at(-1) !== "]") return false;
+  if (tokens.length !== 2) return false;
+  const [predicate, target] = tokens;
+  if (!predicate || !target) return false;
+  if (!new Set(["-e", "-f", "-d", "-s", "-r"]).has(predicate)) return false;
+  return isSafeInspectionArg(program, target);
+}
+
+function isPlainToolName(input: string): boolean {
+  return /^[A-Za-z0-9._+-]+$/.test(input);
 }
 
 function isSafeInspectionArg(program: string, arg: string): boolean {
@@ -338,6 +428,14 @@ function isSafeInspectionArg(program: string, arg: string): boolean {
   if (program === "sed" && (lowered === "-i" || lowered.startsWith("-i." ) || lowered === "--in-place" || lowered.startsWith("--in-place="))) return false;
   if (arg.includes("\0") || /[\r\n]/.test(arg)) return false;
   return true;
+}
+
+function isAllowedCmakeBuild(args: string[]): boolean {
+  const lower = args.map((arg) => arg.toLowerCase());
+  if (lower.includes("--build")) return true;
+  if (lower.includes("--install")) return false;
+  if (lower.includes("-p") || lower.includes("--script")) return false;
+  return lower.includes("-s") || lower.some((arg) => arg.startsWith("-s")) || lower.includes("-b") || lower.some((arg) => arg.startsWith("-b"));
 }
 
 function isRpcFlag(input: string): boolean {
@@ -384,5 +482,7 @@ function isLocalUrl(input: string): boolean {
 }
 
 function looksLikeRpcEnvReference(input: string): boolean {
-  return /(?:^|[${_%])(?:[A-Z0-9_]*(?:RPC|ALCHEMY|INFURA|QUICKNODE|MORALIS|ETHERSCAN|PRIVATE_KEY|MNEMONIC|TOKEN|SECRET)[A-Z0-9_]*)/i.test(input);
+  const envName = "[A-Z][A-Z0-9_]*(?:RPC|ALCHEMY|INFURA|QUICKNODE|MORALIS|ETHERSCAN|PRIVATE_KEY|MNEMONIC|TOKEN|SECRET)[A-Z0-9_]*";
+  const pattern = new RegExp(`^(?:\\$\\{?${envName}\\}?|%${envName}%|${envName})(?:=.*)?$`);
+  return pattern.test(input.trim());
 }

@@ -9,6 +9,7 @@ export * from "./agent/loop.js";
 export * from "./agent/memory.js";
 export * from "./agent/pi-session.js";
 export * from "./agent/prepare.js";
+export * from "./agent/report.js";
 export * from "./agent/prompts.js";
 export * from "./agent/tools.js";
 export * from "./config.js";

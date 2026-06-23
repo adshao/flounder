@@ -73,6 +73,89 @@ export async function runRefutation(input: {
   return out;
 }
 
+// Discharge challenge — the FALSE-NEGATIVE counterpart of runRefutation. The dig marks many
+// obligations DISCHARGED (judged satisfied) and moves on; a wrong discharge is a silent miss with
+// no guard, while a wrong confirmation gets the refutation skeptic above. This restores the
+// symmetry: an independent skeptic re-examines each discharge and tries to BREAK it; an UNSOUND
+// discharge is re-opened as a candidate. (This is what catches the "discharged a narrower
+// sub-property than the obligation required" trap — e.g. proving a value can't be forged but not
+// that the by-design path it enables is authorized.)
+export const CHALLENGE_DISCHARGE_SYSTEM = `You are an independent adversarial reviewer guarding against FALSE NEGATIVES. Another auditor judged a security OBLIGATION SATISFIED ("discharged") and moved on. You did NOT do their investigation; do not assume the discharge is correct.
+
+A discharge is UNSOUND when the cited enforcement clears only a NARROWER property than the obligation actually requires. The classic traps:
+- it proves a value cannot be FORGED, but not that the path that value enables is AUTHORIZED — a legitimately-reachable "by-design" / escape / emergency / admin / fallback path is itself a trust boundary; "intended to exist" and "its parameter cannot be forged" do NOT make the path safe;
+- it binds the value to an ADJACENT or internal referent, not the specific trusted source the obligation names;
+- it checks the value on the CANONICAL path while a sibling / edge / fallback path reaches the SAME sink unchecked;
+- it relies on "matches upstream / the spec / looks standard" — a reference can carry the same gap.
+
+From the actual code and first principles, try to BREAK the discharge: trace whether the obligation's real security property holds end-to-end — all the way to the value/authority SINK it protects, across every reachable path and CALLER, not just the one the auditor examined. Who can reach the protected effect, and is each input that decides it (recipient, amount, the caller, the proof/signature that authorizes it) bound to a legitimate authority?
+
+Respond with ONLY a JSON object (no prose, no fences): {"unsound": true|false, "gap": "<if unsound: the exact missed path/case, with file:line and the resulting attacker impact; else empty>", "reason": "<concise and specific>"}.
+- unsound=true: the discharge does NOT actually clear the obligation — name the missed path/case and the attacker impact (a candidate bug to re-open).
+- unsound=false: after genuine effort the obligation holds end-to-end — say why.
+Be skeptical but honest: default to challenging hard, but if the property genuinely holds, say unsound=false.`;
+
+export interface DischargeVerdict {
+  findingId: string;
+  unsound: boolean;
+  gap: string;
+  reason: string;
+}
+
+export async function runDischargeChallenge(input: {
+  findings: AgentFinding[];
+  source: Doc[];
+  cfg: AuditorConfig;
+  llm: LlmClient;
+  logger: RunLogger;
+  max: number;
+  onProgress?: (findingId: string) => void;
+}): Promise<DischargeVerdict[]> {
+  const out: DischargeVerdict[] = [];
+  for (const finding of input.findings.slice(0, Math.max(0, input.max))) {
+    input.onProgress?.(finding.id);
+    const user = buildChallengePrompt(finding, sourceForLocation(input.source, finding.location));
+    try {
+      const raw = await input.llm.complete({
+        tag: `challenge_${finding.id}`,
+        system: CHALLENGE_DISCHARGE_SYSTEM,
+        user,
+        model: input.cfg.auditModel,
+        maxTokens: input.cfg.maxTokens,
+        thinkingLevel: input.cfg.thinkingLevel,
+        agentic: true,
+      });
+      const parsed = extractJsonObject<{ unsound?: unknown; gap?: unknown; reason?: unknown }>(raw);
+      if (parsed && typeof parsed.unsound === "boolean") {
+        const verdict: DischargeVerdict = {
+          findingId: finding.id,
+          unsound: parsed.unsound,
+          gap: typeof parsed.gap === "string" ? parsed.gap.slice(0, 800) : "",
+          reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 800) : "",
+        };
+        out.push(verdict);
+        await input.logger.event("audit_discharge_challenge", { findingId: finding.id, unsound: verdict.unsound, gap: verdict.gap.slice(0, 160) });
+      }
+    } catch (error) {
+      await input.logger.event("audit_discharge_challenge_error", { findingId: finding.id, error: error instanceof Error ? error.message.slice(0, 300) : String(error) });
+    }
+  }
+  return out;
+}
+
+function buildChallengePrompt(finding: AgentFinding, sourceSlice: string): string {
+  return `Another auditor judged this security obligation SATISFIED (discharged) and moved on:
+- Obligation / title: ${finding.title}
+- Location: ${finding.location}
+- Their discharge reasoning: ${finding.description || "(none)"}
+- Evidence they cited: ${finding.evidence || "(none)"}
+
+Relevant source:
+${sourceSlice}
+
+Independently try to BREAK this discharge: does the cited enforcement clear the obligation's FULL security property end-to-end (to the sink/effect it protects, across every reachable path and caller), or only a narrower sub-property? Respond with the JSON verdict only.`;
+}
+
 function buildRefutationPrompt(finding: AgentFinding, sourceSlice: string, pocFiles: Array<{ path: string; content: string }>): string {
   const poc = pocFiles.length > 0
     ? pocFiles.map((file) => `----- ${file.path} -----\n${file.content.length > 6000 ? file.content.slice(0, 6000) + "\n…(truncated)" : file.content}`).join("\n\n")

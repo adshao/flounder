@@ -1,14 +1,15 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
-import type { AuditorConfig } from "../config.js";
+import { sandboxExecutionOptions, sandboxNetworkForPurpose, type AuditorConfig } from "../config.js";
 import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "../security/policy.js";
 import { prepareWorkspaceToolchain } from "./prepare.js";
 import {
   firstBlockedSandboxFile,
   matchSuccessPatterns,
+  listWorkspaceFiles,
   normalizeRelativePath,
   prepareSandboxWorkspace,
-  resolveWorkspacePath,
+  resolveWorkspacePathForRead,
   runSandboxCommand,
   type SandboxWorkspace,
   writeSandboxFiles,
@@ -16,6 +17,7 @@ import {
 import type { RunLogger } from "../trace/logger.js";
 import type { ConfirmationStatus, Doc, ReproductionCommand, ReproductionCommandResult, ReproductionFile, Severity } from "../types.js";
 import type { ProjectMemory } from "./memory.js";
+import { stagePackageSource } from "./package-source.js";
 
 // Pi-style capability surface for audit mode. The framework exposes generic
 // affordances and hard guarantees only: read material, write/edit a copied
@@ -55,11 +57,18 @@ export interface AgentFinding {
   appeal?: { attempted: boolean; upheld: boolean; reason: string };
   /** The map-phase scope this finding came from (when the map → dig flow produced it). */
   scopeId?: string;
+  /** Provenance for the VERIFY posture: the DB id of the pre-existing suspected finding this
+   * verdict resolves. Carried from the --verify input so the verdict UPDATES that original row
+   * (flips its status + attaches the PoC) instead of being recorded as a new finding. The link is
+   * known by construction (claim N is seeded from input finding N), never re-matched by content. */
+  originId?: number;
 }
 
 export interface CommandRunRecord {
   id: string;
   passed: boolean;
+  targetLinked?: boolean;
+  targetLinkReason?: string;
   command: string;
   /** Structured command, so the framework can re-run it for differential confirmation. */
   commandSpec: ReproductionCommand;
@@ -122,8 +131,28 @@ export interface AgentTool {
   run(args: Record<string, unknown>, ctx: ToolContext): Promise<ToolResult>;
 }
 
-export function buildTools(): AgentTool[] {
-  return [readTool, writeTool, editTool, bashTool];
+export function buildTools(options: { prepare?: boolean } = {}): AgentTool[] {
+  const tools = [readTool, writeTool, editTool, bashTool];
+  if (options.prepare) tools.push(stagePackageSourceTool);
+  return tools;
+}
+
+/** A one-line, human-readable summary of a tool call for the live activity feed: the actual
+ * command / file the agent acted on (not just the tool name) + whether it succeeded. Used by both
+ * session backends so the feed reads like a Codex transcript ("$ forge test …", "read Foo.sol:20-60")
+ * instead of "bash step 36". */
+export function describeAction(tool: string, args: Record<string, unknown>, observation?: string): { detail: string; ok: boolean; result: string } {
+  const s = (v: unknown): string => (v == null ? "" : String(v));
+  const safePath = (v: unknown): string => normalizeToolPath(v) ?? "[outside workspace]";
+  let detail = "";
+  if (tool === "bash") detail = s(args.cmd ?? args.command).replace(/\s+/g, " ").trim();
+  else if (tool === "read") detail = safePath(args.path) + (args.start ? ":" + s(args.start) + (args.end ? "-" + s(args.end) : "") : "");
+  else if (tool === "write" || tool === "edit") detail = safePath(args.path);
+  else if (tool === "stage_package_source") detail = `${s(args.registry)}:${s(args.package_name ?? args.package)}@${s(args.version)}`;
+  else { const k = Object.keys(args)[0]; detail = k ? k + "=" + s(args[k]).replace(/\s+/g, " ").slice(0, 48) : ""; }
+  const obs = s(observation).trim();
+  const firstLine = obs.split("\n").find((l) => l.trim()) ?? "";
+  return { detail: detail.slice(0, 200), ok: !/^(error|blocked)\b/i.test(obs), result: firstLine.slice(0, 100) };
 }
 
 /** Render the tool catalogue for the system prompt. */
@@ -187,7 +216,11 @@ export function ingestFindingsFromScratch(session: AgentSession): { parsed: numb
       exploitSketch: asString(record.exploit_sketch) ?? asString(record.exploitSketch) ?? "",
       fix: asString(record.fix) ?? "",
       confidence: clampFloat(record.confidence, 0, 1, 0.5),
-      confirmationStatus: confirmed ? "confirmed-executable" : "suspected",
+      // A model can record checked-and-satisfied obligations either as
+      // status:"discharged" (preferred schema) or with the legacy
+      // "DISCHARGED:" title prefix. Only a passed command_id can promote a
+      // claim to confirmed-executable.
+      confirmationStatus: confirmed ? "confirmed-executable" : declaredUnconfirmedStatus(record, title),
       ...(confirmed && citedRun ? { commandRunId: citedRun.id } : {}),
       ...(fixPatch ? { fixPatch } : {}),
       ...(asStringList(record.patched_success_patterns ?? record.patchedSuccessPatterns).length > 0
@@ -211,6 +244,7 @@ const readTool: AgentTool = {
   async run(args, ctx) {
     const target = asString(args.path);
     if (!target) return { observation: 'error: "path" is required' };
+    if (!normalizeToolPath(target)) return { observation: 'error: "path" must be a safe relative path.' };
     const readable = await findReadable(ctx, target);
     if (!readable) return { observation: `error: no loaded or sandbox file matches "${target}". Use bash with ls/find/rg to inspect the copied workspace.` };
     const allLines = readable.content.split(/\r?\n/);
@@ -239,7 +273,7 @@ const writeTool: AgentTool = {
     if (Buffer.byteLength(content, "utf8") > ctx.cfg.reproductionMaxFileBytes) return { observation: "error: content exceeds the configured file-size limit." };
 
     if (baselineProtected(ctx, normalized)) return { observation: baselineBlockMessage(normalized) };
-    if (!isReportFile(normalized)) {
+    if (!ctx.cfg.prepareMode && !isReportFile(normalized)) {
       const blockedFile = firstBlockedSandboxFile([{ path: normalized, content }]);
       if (blockedFile) return { observation: `blocked: ${blockedFile}` };
     }
@@ -260,6 +294,7 @@ const editTool: AgentTool = {
   async run(args, ctx) {
     const target = asString(args.path);
     if (!target) return { observation: 'error: "path" is required.' };
+    if (!normalizeToolPath(target)) return { observation: 'error: "path" must be a safe relative path.' };
     const oldText = typeof args.old === "string" ? args.old : undefined;
     const newText = typeof args.new === "string" ? args.new : undefined;
     if (oldText === undefined || newText === undefined || oldText.length === 0) return { observation: 'error: "old" and "new" strings are required, and "old" must be non-empty.' };
@@ -273,7 +308,7 @@ const editTool: AgentTool = {
 
     const next = asBool(args.replace_all, false) ? existing.content.split(oldText).join(newText) : existing.content.replace(oldText, newText);
     if (Buffer.byteLength(next, "utf8") > ctx.cfg.reproductionMaxFileBytes) return { observation: "error: edited file exceeds the configured file-size limit." };
-    if (!isReportFile(existing.path)) {
+    if (!ctx.cfg.prepareMode && !isReportFile(existing.path)) {
       const blockedFile = firstBlockedSandboxFile([{ path: existing.path, content: next }]);
       if (blockedFile) return { observation: `blocked: ${blockedFile}` };
     }
@@ -288,7 +323,7 @@ const editTool: AgentTool = {
 const bashTool: AgentTool = {
   name: "bash",
   description:
-    'Run one local command in the copied sandbox workspace. args: {"cmd": string, "purpose"?: "inspect"|"build"|"confirm" (default inspect), "cwd"?: relative, "expected_exit_code"?: int, "success_patterns"?: [string], "timeout_ms"?: int}. Shell control operators, remote networks, destructive commands, and paths outside the workspace are blocked. purpose=inspect is for exploration (ls/find/rg/cat/sed and reads) and never confirms anything. purpose=build is for dependency resolution and compilation (cargo build/fetch, npm install, go mod download, forge build, pip install, …) to make the workspace buildable; it has side effects but is NOT confirmation-eligible. purpose=confirm must be a real local test runner (cargo test, forge test, go test, node --test, pytest, …) with success_patterns; only a confirm command that exits as expected with every success_pattern present becomes confirmation-eligible and citable as command_id for confirmed-executable.',
+    'Run one local command in the copied sandbox workspace. args: {"cmd": string, "purpose"?: "inspect"|"build"|"confirm" (default inspect), "cwd"?: relative, "expected_exit_code"?: int, "success_patterns"?: [string], "timeout_ms"?: int}. Shell control operators, remote networks, destructive commands, and paths outside the workspace are blocked. purpose=inspect is for exploration (ls/find/rg/cat/sed/jq), tool availability checks (which nargo), and local JSON reads (python -m json.tool file); it never confirms anything. purpose=build is for dependency resolution and compilation (cargo build/fetch, cmake -S/-B/--build, ninja, make, npm install, go mod download, forge build, pip install, …) to make the workspace buildable; it has side effects but is NOT confirmation-eligible. For CMake, prefer generator-neutral `cmake -S <src> -B <build>` then `cmake --build <build> --parallel 2` on large targets; pass `-G Ninja` only after `ninja --version` succeeds, and keep parallelism bounded. purpose=confirm must be a real local test runner (cargo test, ctest, forge test, go test, node --test, pytest, …) with success_patterns; only a confirm command that exits as expected, observes every success_pattern, and executes a test linked to pristine target source becomes confirmation-eligible and citable as command_id for confirmed-executable.',
   async run(args, ctx) {
     const normalized = normalizeBashCommand(args, ctx.cfg);
     if ("error" in normalized) return { observation: normalized.error };
@@ -307,7 +342,19 @@ const bashTool: AgentTool = {
     if (isAgentConfirmCommand(normalized.command) || isAgentBuildCommand(normalized.command)) await ensurePrepared(ctx, workspace);
     ctx.session.counters.command += 1;
     const runId = `cmd${ctx.session.counters.command}`;
-    const result = await runSandboxCommand(normalized.command, workspace.absolute, ctx.cfg.reproductionMaxLogBytes, ctx.cfg.sourcePaths, ctx.session.buildCacheDir);
+    await ctx.logger.event("audit_command_start", {
+      runId,
+      purpose: normalized.purpose,
+      command: normalized.raw,
+    });
+    const result = await runSandboxCommand(
+      normalized.command,
+      workspace.absolute,
+      ctx.cfg.reproductionMaxLogBytes,
+      ctx.cfg.sourcePaths,
+      ctx.session.buildCacheDir,
+      sandboxExecutionOptions(ctx.cfg, sandboxNetworkForPurpose(ctx.cfg, normalized.purpose)),
+    );
     const exitMatched = result.exitCode === result.expectedExitCode && !result.timedOut;
     const isConfirm = normalized.purpose === "confirm";
     const eligibleByType = isAgentConfirmCommand(normalized.command);
@@ -315,11 +362,20 @@ const bashTool: AgentTool = {
     // the gate that keeps an inspection command (e.g. cat of a model-authored file)
     // from forging executable confirmation by echoing a success pattern.
     const patternCheck = isConfirm ? matchSuccessPatterns(normalized.successPatterns, [result]) : { matched: [], missing: [] };
+    const targetLink = isConfirm ? confirmCommandTargetLink(normalized.command, ctx.session) : { linked: false, reason: "not a confirm run" };
     const passed =
-      isConfirm && eligibleByType && exitMatched && normalized.successPatterns.length > 0 && patternCheck.missing.length === 0 && patternCheck.matched.length > 0;
+      isConfirm
+      && eligibleByType
+      && targetLink.linked
+      && exitMatched
+      && normalized.successPatterns.length > 0
+      && patternCheck.missing.length === 0
+      && patternCheck.matched.length > 0;
     const record: CommandRunRecord = {
       id: runId,
       passed,
+      targetLinked: targetLink.linked,
+      targetLinkReason: targetLink.reason,
       command: normalized.raw,
       commandSpec: normalized.command,
       successPatterns: normalized.successPatterns,
@@ -331,15 +387,19 @@ const bashTool: AgentTool = {
       workspace: workspace.relative,
     };
     ctx.session.commandRuns.push(record);
+    const output = commandOutputPreview(result);
+    const includeOutput = result.timedOut || !exitMatched || (isConfirm && !passed);
     await ctx.logger.event("audit_command_run", {
       runId,
       purpose: normalized.purpose,
+      ok: exitMatched,
       passed,
       exitCode: result.exitCode,
       expectedExitCode: result.expectedExitCode,
       timedOut: result.timedOut,
       matched: patternCheck.matched.length,
       missing: patternCheck.missing.length,
+      ...(includeOutput && output ? { output } : {}),
     });
 
     const tail = (text: string): string => (text.length > 1600 ? `...${text.slice(-1600)}` : text);
@@ -347,7 +407,7 @@ const bashTool: AgentTool = {
       ? `command ${runId} (${normalized.purpose}): exit=${result.exitCode}${result.timedOut ? " timedOut" : ""}.`
       : passed
         ? `command ${runId}: CONFIRMATION-ELIGIBLE PASS; cite command_id="${runId}" in findings.json for confirmed-executable.`
-        : `command ${runId}: not confirmation-eligible (${confirmFailureReason(eligibleByType, normalized, exitMatched, result, patternCheck)}).`;
+        : `command ${runId}: not confirmation-eligible (${confirmFailureReason(eligibleByType, targetLink, normalized, exitMatched, result, patternCheck)}).`;
     return {
       observation: `${verdict}\n--- stdout ---\n${tail(result.stdout) || "(empty)"}\n--- stderr ---\n${tail(result.stderr) || "(empty)"}`,
       meta: { runId, passed, purpose: normalized.purpose },
@@ -355,24 +415,163 @@ const bashTool: AgentTool = {
   },
 };
 
+const stagePackageSourceTool: AgentTool = {
+  name: "stage_package_source",
+  description:
+    'PREPARE ONLY. Fetch an official published source package and stage it in the workspace with verified provenance. args: {"registry":"crates.io","package_name": string, "version": string, "destination"?: "sources/..."}. For crates.io this downloads the .crate archive, verifies the registry sha256 checksum, safely extracts source under sources/, and writes metadata/crates.io/<package>-<version>.json. Use this instead of ad hoc curl/tar scripts when the target clue is a published Rust crate.',
+  async run(args, ctx) {
+    if (!ctx.cfg.prepareMode) return { observation: "blocked: stage_package_source is only available during prepare." };
+    const registry = asEnum(args.registry, ["crates.io"], "crates.io");
+    const packageName = asString(args.package_name) ?? asString(args.package);
+    const version = asString(args.version);
+    if (!packageName) return { observation: 'error: "package_name" is required.' };
+    if (!version) return { observation: 'error: "version" is required.' };
+    const workspace = await ensureWorkspace(ctx);
+    if (!workspace) return { observation: "error: stage_package_source needs a prepare workspace." };
+    try {
+      const destination = asString(args.destination);
+      const result = await stagePackageSource({
+        workspaceAbsolute: workspace.absolute,
+        registry,
+        packageName,
+        version,
+        ...(destination ? { destination } : {}),
+      });
+      await ctx.logger.event("audit_stage_package_source", {
+        registry: result.registry,
+        package: result.packageName,
+        version: result.version,
+        stagedPath: result.stagedPath,
+        files: result.fileCount,
+      });
+      const manifestHint = {
+        component: result.componentTemplate,
+        real_target_ground_truth: result.groundTruthTemplate,
+      };
+      return {
+        observation:
+          `staged ${result.registry} package ${result.packageName}@${result.version} at ${result.stagedPath} `
+          + `(${result.fileCount} files, ${result.extractedBytes} bytes). Verified sha256 ${result.sha256}. `
+          + `Provenance: ${result.provenancePath}.\nAdd this to prepare_manifest.json, adjusting role/in_scope/scope_basis if the package is a dependency rather than the target:\n${JSON.stringify(manifestHint, null, 2)}`,
+        meta: { stagedPath: result.stagedPath, provenancePath: result.provenancePath, sha256: result.sha256 },
+      };
+    } catch (error) {
+      return { observation: `error: stage_package_source failed: ${error instanceof Error ? error.message : String(error)}` };
+    }
+  },
+};
+
 function confirmFailureReason(
   eligibleByType: boolean,
+  targetLink: { linked: boolean; reason: string },
   normalized: { command: ReproductionCommand; successPatterns: string[] },
   exitMatched: boolean,
   result: ReproductionCommandResult,
   patternCheck: { matched: string[]; missing: string[] },
 ): string {
   if (!eligibleByType) {
-    return `purpose=confirm requires a local test/build runner (cargo test, forge test, go test, node --test, pytest, …); "${normalized.command.program}" is an inspection command, so it cannot confirm a finding`;
+    return `purpose=confirm requires a local test/build runner (cargo test, ctest, forge test, go test, node --test, pytest, …); "${normalized.command.program}" is an inspection command, so it cannot confirm a finding`;
   }
+  if (!targetLink.linked) return targetLink.reason;
   if (normalized.successPatterns.length === 0) return "purpose=confirm requires success_patterns describing the invariant break or patched regression";
   if (!exitMatched) return `exit=${result.exitCode} expected=${result.expectedExitCode} timedOut=${result.timedOut}`;
   return `missing success patterns: ${patternCheck.missing.join(" | ")}`;
 }
 
-/** Report files the framework reads back from the workspace (findings + the map's scope inventory). */
+function confirmCommandTargetLink(command: ReproductionCommand, session: AgentSession): { linked: boolean; reason: string } {
+  const baseline = session.baselineFiles;
+  if (!baseline || baseline.size === 0) return { linked: false, reason: "no pristine target-source baseline was captured for this workspace" };
+  const fileArgs = commandFileArgs(command, session);
+  if (fileArgs.length === 0) return { linked: true, reason: "project test runner did not target a standalone scratch file" };
+  for (const fileArg of fileArgs) {
+    if (baselineHasPathLike(baseline, fileArg)) return { linked: true, reason: `test target ${fileArg} is part of the pristine target source` };
+    const scratch = session.scratchFiles.get(fileArg);
+    if (scratch && scratchLinksToBaseline(fileArg, scratch, baseline)) {
+      return { linked: true, reason: `test target ${fileArg} imports pristine target source` };
+    }
+  }
+  return {
+    linked: false,
+    reason:
+      "purpose=confirm must execute the target code path; the command only targets model-written standalone file(s) that do not import pristine target source",
+  };
+}
+
+function commandFileArgs(command: ReproductionCommand, session: AgentSession): string[] {
+  const out: string[] = [];
+  const skipValueAfter = new Set(["--test-dir", "-C", "--config", "--manifest-path", "--package", "-p", "--match-test", "--match-path", "-R"]);
+  for (let idx = 0; idx < command.args.length; idx += 1) {
+    const arg = command.args[idx] ?? "";
+    if (skipValueAfter.has(arg)) {
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) continue;
+    const normalized = normalizeRelativePath(arg);
+    if (!normalized) continue;
+    if (session.scratchFiles.has(normalized) || session.baselineFiles?.has(normalized) || /\.[A-Za-z0-9]+$/.test(path.posix.basename(normalized))) {
+      out.push(normalized);
+    }
+  }
+  return out;
+}
+
+function scratchLinksToBaseline(filePath: string, content: string, baseline: Set<string>): boolean {
+  const dir = path.posix.dirname(filePath);
+  const specifiers = sourceSpecifiers(content);
+  for (const specifier of specifiers) {
+    if (specifier.startsWith("source/") && baselineHasPathLike(baseline, specifier)) return true;
+    if (specifier.startsWith("./") || specifier.startsWith("../")) {
+      const resolved = normalizeRelativePath(path.posix.join(dir, specifier));
+      if (resolved && baselineHasPathLike(baseline, resolved)) return true;
+    }
+  }
+  return false;
+}
+
+function sourceSpecifiers(content: string): string[] {
+  const out: string[] = [];
+  const patterns = [
+    /\bimport\s+(?:[^"'()]+?\s+from\s+)?["']([^"']+)["']/g,
+    /\bexport\s+[^"']+?\s+from\s+["']([^"']+)["']/g,
+    /\brequire\(\s*["']([^"']+)["']\s*\)/g,
+  ];
+  for (const pattern of patterns) {
+    for (const match of content.matchAll(pattern)) {
+      if (match[1]) out.push(match[1]);
+    }
+  }
+  return out;
+}
+
+function baselineHasPathLike(baseline: Set<string>, candidate: string): boolean {
+  const normalized = normalizeRelativePath(candidate);
+  if (!normalized) return false;
+  if (baseline.has(normalized)) return true;
+  const withoutExt = normalized.replace(/\.[^/.]+$/, "");
+  for (const existing of baseline) {
+    if (existing === withoutExt || existing.replace(/\.[^/.]+$/, "") === withoutExt) return true;
+    if (existing.startsWith(`${withoutExt}/index.`)) return true;
+  }
+  return false;
+}
+
+function commandOutputPreview(result: ReproductionCommandResult): string {
+  const tail = (text: string): string => (text.length > 1200 ? `...${text.slice(-1200)}` : text);
+  const sections = [
+    result.stderr.trim() ? `stderr:\n${tail(result.stderr.trim())}` : "",
+    result.stdout.trim() ? `stdout:\n${tail(result.stdout.trim())}` : "",
+  ].filter(Boolean);
+  return sections.join("\n---\n").slice(0, 2600);
+}
+
+/** Report files the framework reads back from the workspace. */
 export function isReportFile(normalizedPath: string): boolean {
-  return normalizedPath === "findings.json" || normalizedPath === "scopes.json";
+  return normalizedPath === "findings.json"
+    || normalizedPath === "scopes.json"
+    || normalizedPath === "prepare_manifest.json"
+    || normalizedPath === "confirm_decision.json"
+    || /^report_[a-z0-9_.-]+\.md$/.test(normalizedPath);
 }
 
 /** True when the path is part of the pristine target source the model may not modify. */
@@ -396,18 +595,20 @@ async function ensureWorkspace(ctx: ToolContext): Promise<SandboxWorkspace | und
   if (ctx.cfg.sourcePaths.length === 0) return undefined;
   const workspace = await prepareSandboxWorkspace(ctx.cfg.sourcePaths, ctx.logger.runDir, "audit/workspace");
   ctx.session.workspace = workspace;
+  ctx.session.baselineFiles = await listWorkspaceFiles(workspace.absolute);
   await ctx.logger.event("audit_workspace", { workspace: workspace.relative });
   return workspace;
 }
 
 async function findReadable(ctx: ToolContext, target: string): Promise<{ path: string; content: string; kind: string } | undefined> {
   const normalized = normalizeToolPath(target);
-  if (normalized && ctx.session.scratchFiles.has(normalized)) {
+  if (!normalized) return undefined;
+  if (ctx.session.scratchFiles.has(normalized)) {
     return { path: normalized, content: ctx.session.scratchFiles.get(normalized) as string, kind: "scratch" };
   }
-  const workspaceContent = await readWorkspaceCandidate(ctx, target);
+  const workspaceContent = await readWorkspaceCandidate(ctx, normalized);
   if (workspaceContent) return { ...workspaceContent, kind: "sandbox" };
-  const doc = findDoc(ctx, target);
+  const doc = findDoc(ctx, normalized);
   if (doc) return { path: doc.path, content: doc.content, kind: doc.kind };
   return undefined;
 }
@@ -418,7 +619,7 @@ async function readWorkspaceCandidate(ctx: ToolContext, target: string): Promise
   for (const candidate of workspacePathCandidates(ctx, target)) {
     if (ctx.session.scratchFiles.has(candidate)) return { path: candidate, content: ctx.session.scratchFiles.get(candidate) as string };
     try {
-      const content = await readFile(resolveWorkspacePath(workspace.absolute, candidate), "utf8");
+      const content = await readFile(await resolveWorkspacePathForRead(workspace.absolute, candidate), "utf8");
       return { path: candidate, content };
     } catch {
       // Try the next candidate.
@@ -440,11 +641,13 @@ function workspacePathCandidates(ctx: ToolContext, target: string): string[] {
 }
 
 function findDoc(ctx: ToolContext, target: string): Doc | undefined {
+  const normalized = normalizeToolPath(target);
+  if (!normalized) return undefined;
   const all = [...ctx.source, ...ctx.corpus];
   return (
-    all.find((doc) => doc.path === target) ??
-    all.find((doc) => doc.path.endsWith(`/${target}`) || doc.path.endsWith(target)) ??
-    all.find((doc) => doc.path.includes(target))
+    all.find((doc) => doc.path === normalized) ??
+    all.find((doc) => doc.path.endsWith(`/${normalized}`) || doc.path.endsWith(normalized)) ??
+    all.find((doc) => doc.path.includes(normalized))
   );
 }
 
@@ -534,7 +737,21 @@ export function readScratchScopes(session: AgentSession): AuditScope[] {
   return scopes.sort((a, b) => b.score - a.score);
 }
 
+// A satisfied-and-checked obligation; "DISCHARGED:" title -> discharged status (the model marks it).
+const DISCHARGE_TITLE = /^(obligation\s+)?discharged\b/i;
+const DISCHARGE_STATUS = /^(discharged|discharged[-_\s].*)$/i;
+
+function declaredUnconfirmedStatus(record: Record<string, unknown>, title: string): "suspected" | "discharged" {
+  const raw =
+    asString(record.confirmation_status) ??
+    asString(record.confirmationStatus) ??
+    asString(record.status);
+  if ((raw && DISCHARGE_STATUS.test(raw)) || DISCHARGE_TITLE.test(title)) return "discharged";
+  return "suspected";
+}
+
 const CONFIRMATION_RANK: Record<string, number> = {
+  discharged: -1, // below suspected: if dig samples disagree, a suspicion (possible bug) beats a discharge (safe)
   suspected: 0,
   "confirmed-source": 1,
   "confirmed-executable": 2,

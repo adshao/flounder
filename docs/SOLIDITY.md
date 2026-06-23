@@ -1,6 +1,6 @@
-# Solidity And EVM Contract Audits
+# Optional Solidity / EVM Notes
 
-`configs/solidity-contract-audit.default.json` provides optional context for authorized Solidity and EVM smart-contract audits.
+`configs/solidity-contract-audit.default.json` provides optional context for authorized Solidity and EVM smart-contract audits. This is an example of stack-specific context, not a separate Flounder product mode and not a default strategy.
 
 In audit mode, the profile is context, not a checklist. The agent still decides what to read, suspect, test, and report. Deterministic profiles, provenance facts, source indexes, and local seeders are planning aids only; findings must come from the agent and local evidence.
 
@@ -11,7 +11,7 @@ In audit mode, the profile is context, not a checklist. The agent still decides 
 - Solidity provenance facts for externally callable functions, external calls, delegatecall, state writes, auth guards, signatures, oracle reads, upgrade hooks, token transfers, governance paths, name-service paths, bridge fields, and unchecked arithmetic.
 - Foundry and Hardhat compatibility for local-only test execution under the shared command policy.
 
-## Recommended Audit
+## Example With The Optional Profile
 
 ```bash
 flounder run \
@@ -19,7 +19,7 @@ flounder run \
   --target protocol-contract-audit \
   --source <target>/src <target>/contracts \
   --corpus <target>/README.md <target>/docs <target>/specs \
-  --provider openai \
+  --provider openai-codex \
   --model gpt-5.5 \
   --thinking xhigh \
   --map-steps 60 --dig-steps 60
@@ -41,7 +41,7 @@ During `flounder run` the command policy blocks public-network broadcast, transf
 EVM is `flounder confirm`'s strongest path: a `forge test --fork-url <mainnet>` reproduces a finding against the **real deployed contract and its real configured components** at a chosen block. After a run, point confirm at it:
 
 ```bash
-flounder confirm ./runs/protocol-contract-audit-<timestamp> \
+flounder confirm ~/.flounder/protocol-contract-audit-<timestamp> \
   --source <target>/src --build-root <target> \
   --provider openai-codex
 ```

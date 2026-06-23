@@ -1,6 +1,6 @@
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import type { AuditorConfig } from "../config.js";
+import { sandboxExecutionOptions, type AuditorConfig } from "../config.js";
 import { runSandboxCommand, type SandboxWorkspace } from "../security/sandbox.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { ReproductionCommand } from "../types.js";
@@ -60,7 +60,14 @@ export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorks
         expectedExitCode: 0,
         ...(plan.cwd ? { cwd: plan.cwd } : {}),
       };
-      const run = await runSandboxCommand(command, input.workspace.absolute, input.cfg.reproductionMaxLogBytes, input.cfg.sourcePaths, input.cacheDir);
+      const run = await runSandboxCommand(
+        command,
+        input.workspace.absolute,
+        input.cfg.reproductionMaxLogBytes,
+        input.cfg.sourcePaths,
+        input.cacheDir,
+        sandboxExecutionOptions(input.cfg, input.cfg.sandboxPrepareNetwork),
+      );
       const ok = run.exitCode === 0 && !run.timedOut;
       const record: PrepareCommandResult = {
         toolchain: plan.toolchain,

@@ -4,6 +4,7 @@ runs/
 out/
 cache/
 .npm-cache/
+.gstack/
 .DS_Store
 *.log
 *.pdf

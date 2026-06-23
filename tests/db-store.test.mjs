@@ -17,6 +17,10 @@ async function tempDb() {
 test("store: project + run lifecycle is recorded and queryable", async () => {
   const db = await tempDb();
   const projectId = db.upsertProject({ name: "acme", sourcePaths: ["./src"], buildRoot: ".", config: { model: "gpt-5.5", thinking: "xhigh" } });
+  const project = db.getProject("acme");
+  assert.match(String(project.uuid), /^[0-9a-f-]{36}$/);
+  assert.equal(db.getProjectByRef(String(project.uuid)).id, projectId);
+  assert.equal(db.getProjectByRef("acme"), undefined); // public project refs are UUID-only
   const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/acme-1", provider: "openai-codex", model: "gpt-5.5" });
 
   let runs = db.listRuns(projectId);
@@ -32,7 +36,9 @@ test("store: project + run lifecycle is recorded and queryable", async () => {
   assert.ok(runs[0].ended_at);
 
   // upsertProject is idempotent by name (refreshes config, keeps the id)
+  const uuid = String(project.uuid);
   assert.equal(db.upsertProject({ name: "acme", config: { model: "opus" } }), projectId);
+  assert.equal(db.getProjectById(projectId).uuid, uuid);
   assert.equal(db.listProjects().length, 1);
   db.close();
 });
@@ -44,12 +50,37 @@ test("store: scope coverage tracks mapped vs audited", async () => {
     { scopeId: "s1", title: "decode", status: "audited" },
     { scopeId: "s2", title: "settle", status: "pending" },
     { scopeId: "s3", title: "withdraw", status: "pending" },
+    { scopeId: "s4", title: "execute", status: "auditing" },
   ]);
-  assert.deepEqual(db.scopeProgress(projectId), { total: 3, audited: 1, pending: 2, deferred: 0 });
+  assert.deepEqual(db.scopeProgress(projectId), { total: 4, audited: 1, pending: 3, deferred: 0 });
+  assert.equal(db.countScopesByStatus(projectId, "auditing"), 1);
 
   // re-mapping the same scope id updates it in place (one row per project+scope)
   db.upsertScopes(projectId, [{ scopeId: "s2", title: "settle", status: "audited" }]);
-  assert.deepEqual(db.scopeProgress(projectId), { total: 3, audited: 2, pending: 1, deferred: 0 });
+  assert.deepEqual(db.scopeProgress(projectId), { total: 4, audited: 2, pending: 2, deferred: 0 });
+  db.close();
+});
+
+test("store: stage timing preserves startedAt across updates", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/p-1" });
+
+  db.recordStage(runId, "synthesis", { status: "running", scopes: 12, pool: 4 });
+  const running = JSON.parse(String(db.listRuns(projectId)[0].stages_json)).synthesis;
+  assert.equal(running.status, "running");
+  assert.equal(running.scopes, 12);
+  assert.equal(running.pool, 4);
+  assert.ok(running.startedAt);
+
+  db.recordStage(runId, "synthesis", { status: "done", produced: 2 });
+  const done = JSON.parse(String(db.listRuns(projectId)[0].stages_json)).synthesis;
+  assert.equal(done.status, "done");
+  assert.equal(done.produced, 2);
+  assert.equal(done.scopes, 12);
+  assert.equal(done.pool, 4);
+  assert.equal(done.startedAt, running.startedAt);
+  assert.ok(done.at);
   db.close();
 });
 
@@ -147,11 +178,14 @@ test("store: setScopeStatus marks a scope deferred (skipped) and counts it", asy
 test("store: daemon tokens + job queue (claim is FIFO and one-shot; cancel is observable)", async () => {
   const db = await tempDb();
   const { token } = db.createDaemonToken("local");
+  const { token: otherToken } = db.createDaemonToken("remote");
   assert.ok(db.getDaemonByToken(token)); // valid token authenticates
   assert.equal(db.getDaemonByToken("nope"), undefined); // unknown token rejected
   const daemonId = Number(db.getDaemonByToken(token).id);
+  const otherDaemonId = Number(db.getDaemonByToken(otherToken).id);
 
   const j1 = db.enqueueJob("proj", { verb: "run" });
+  const pinned = db.enqueueJob("proj", { verb: "audit" }, otherDaemonId);
   const j2 = db.enqueueJob("proj", { verb: "map" });
   const claim1 = db.claimJob(daemonId);
   assert.equal(claim1.id, j1); // FIFO
@@ -159,11 +193,53 @@ test("store: daemon tokens + job queue (claim is FIFO and one-shot; cancel is ob
   assert.equal(db.getJob(j1).status, "dispatched");
   assert.equal(db.claimJob(daemonId).id, j2);
   assert.equal(db.claimJob(daemonId), undefined); // queue drained
+  assert.equal(db.claimJob(otherDaemonId).id, pinned); // pinned work waits for its selected daemon
 
   db.requestJobCancel(j1);
   assert.deepEqual(db.canceledJobIds(), [j1]); // a daemon polls this to abort
   db.setJobStatus(j1, "killed");
   assert.deepEqual(db.canceledJobIds(), []); // no longer running → not reported
+  assert.equal(db.cancelJob(pinned), true); // queued/dispatched/running jobs are operator-cancelable
+  assert.equal(db.getJob(pinned).status, "canceled");
+  db.close();
+});
+
+test("store: local auto-daemon token is stable across UI restarts", async () => {
+  const db = await tempDb();
+  const first = db.getOrCreateLocalDaemonToken();
+  assert.equal(first.reused, false);
+  const again = db.getOrCreateLocalDaemonToken();
+  assert.equal(again.reused, true);
+  assert.equal(again.id, first.id);
+  assert.equal(again.token, first.token);
+  db.close();
+});
+
+test("store: local auto-daemon reuse prefers the daemon selected by projects", async () => {
+  const db = await tempDb();
+  const selected = db.createDaemonToken("local-100");
+  const newer = db.createDaemonToken("local-200");
+  db.upsertProject({ name: "pinned", daemonId: selected.id });
+  const picked = db.getOrCreateLocalDaemonToken();
+  assert.equal(picked.id, selected.id);
+  assert.equal(picked.token, selected.token);
+  assert.notEqual(picked.id, newer.id);
+  db.close();
+});
+
+test("store: daemons list newest heartbeat first so UI defaults to an online executor", async () => {
+  const db = await tempDb();
+  const { token: staleToken } = db.createDaemonToken("stale-local");
+  const { token: currentToken } = db.createDaemonToken("current-local");
+  const staleId = Number(db.getDaemonByToken(staleToken).id);
+  const currentId = Number(db.getDaemonByToken(currentToken).id);
+  db.touchDaemon(staleId, { providers: [] }, "/tmp/stale");
+  await new Promise((resolve) => setTimeout(resolve, 5));
+  db.touchDaemon(currentId, { providers: [] }, "/tmp/current");
+
+  const daemons = db.listDaemons();
+  assert.equal(daemons[0].id, currentId);
+  assert.equal(daemons[1].id, staleId);
   db.close();
 });
 
@@ -179,5 +255,44 @@ test("store: confirm decisions are replaced per run, not duplicated", async () =
   // a re-run of confirm rewrites the sheet wholesale
   db.upsertConfirmDecisions(projectId, runId, [{ bug: "A", reproduced: "yes", recommendation: "submit-candidate" }]);
   assert.equal(db.listConfirmDecisions(projectId).length, 1);
+  db.close();
+});
+
+test("store: confirm decisions persist formal reports for linked findings", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const auditRun = db.startRun({ projectId, kind: "run", runDir: "/runs/p-audit-1" });
+  db.upsertFindings(projectId, auditRun, [
+    {
+      findingKey: "kabc123",
+      title: "Missing verifier binding",
+      severity: "high",
+      status: "confirmed-executable",
+      description: "The verifier accepts an unbound value.",
+    },
+  ]);
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/p-confirm-1" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [
+    {
+      bug: "Missing verifier binding",
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      members: ["kabc123"],
+      reproEvidence: "purpose=confirm command cmd_1 reproduced the real target effect",
+      reproCommandId: "cmd_1",
+      novelty: "novel",
+      humanGates: "venue scope still needs human review",
+      reportMarkdown: "# Missing verifier binding\n\n## Summary\nFormal report.",
+    },
+  ]);
+
+  const [finding] = db.listFindings(projectId);
+  assert.equal(finding.confirm_status, "reproduced");
+  assert.match(finding.report_markdown, /^# Missing verifier binding/);
+  const [decision] = db.listConfirmDecisionsForFinding(projectId, "kabc123");
+  assert.equal(decision.repro_evidence, "purpose=confirm command cmd_1 reproduced the real target effect");
+  assert.equal(decision.repro_command_id, "cmd_1");
+  assert.equal(decision.novelty, "novel");
+  assert.equal(decision.human_gates, "venue scope still needs human review");
   db.close();
 });

@@ -3,7 +3,7 @@ import { readFile } from "node:fs/promises";
 import { existsSync } from "node:fs";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { defaultConfig, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
+import { defaultConfig, defaultOutputDir, defaultWorkspaceDir, normalizeProjectContext, normalizeRoleModels, type AuditorConfig } from "./config.js";
 import { CLI_CONFIG_KEYS, configFilePath, getCliConfigValue, isCliConfigKey, loadCliConfig, setCliConfigValue, unsetCliConfigValue, type CliConfigKey } from "./config-file.js";
 import { launchViaApi, ran, resolveServer, fetchArtifact } from "./cli-client.js";
 import { deriveScopeNote } from "./scope-note.js";
@@ -12,6 +12,7 @@ import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/h
 import { MetadataStore } from "./db/store.js";
 import { startUiServer } from "./server/app.js";
 import { runDaemon } from "./server/daemon.js";
+import { knownRuntimeProviders, loginProvider, printProviderCheck, providerAuthStatus } from "./provider-auth.js";
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
@@ -25,8 +26,8 @@ async function main(argv: string[]): Promise<void> {
     return;
   }
 
-  if (cmd === "db") {
-    runDbCommand(rest);
+  if (cmd === "server") {
+    runServerCommand(rest);
     return;
   }
 
@@ -36,17 +37,21 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (cmd === "ui") {
+    if (rest[0] === "help" || rest.includes("--help") || rest.includes("-h")) {
+      printUiHelp();
+      return;
+    }
     // Control-plane web app: track/drive audits across projects. Keeps running (the server
     // holds the event loop open) until interrupted. Runs execute on a DAEMON, not here — so
-    // by default we also spawn a co-located local daemon (mint a token + `flounder daemon`). Pass
+    // by default we also spawn a co-located local daemon (mint a token + `flounder daemon start`). Pass
     // --no-daemon to run the control plane alone and connect your own daemon(s) elsewhere.
     const port = readIntFlag(rest, "--port") ?? 4500;
     const host = readFlag(rest, "--host") ?? "127.0.0.1";
     const out = resolveOut(rest);
-    const workspace = readFlag(rest, "--workspace") ?? "./workspace"; // where the co-located daemon finds project dirs
+    const workspace = readFlag(rest, "--workspace") ?? defaultWorkspaceDir(); // where the co-located daemon finds project dirs
     const server = startUiServer({ out, port, host });
     if (rest.includes("--no-daemon")) {
-      console.log("[flounder ui] --no-daemon: no executor started. Connect one with `flounder daemon --server <url> --token <token>`.");
+      console.log("[flounder ui] --no-daemon: no executor started. Connect one with `flounder daemon start --server <url> --token <token>`.");
     } else {
       const concurrency = readIntFlag(rest, "--concurrency");
       server.on("listening", () => spawnLocalDaemon({ out, url: `http://${host}:${port}`, workspace, ...(concurrency !== undefined ? { concurrency } : {}) }));
@@ -56,16 +61,32 @@ async function main(argv: string[]): Promise<void> {
   }
 
   if (cmd === "daemon") {
+    if (rest.length === 0 || rest[0] === "help" || rest[0] === "--help" || rest[0] === "-h") {
+      printDaemonHelp();
+      return;
+    }
+    if (rest[0] === "provider" || rest[0] === "providers") {
+      await runProviderCommand(rest.slice(1));
+      return;
+    }
+    if (rest[0] !== "start") {
+      throw new Error(`Unknown daemon command "${rest[0]}". Use: flounder daemon start --server <url> --token <token>, or flounder daemon provider ...`);
+    }
     // Execution plane: connect to a control-plane server, claim queued jobs, and run them
     // LOCALLY (code + provider keys stay here). May run on a different machine than the
     // server. Reports progress back over HTTP; never touches the server's DB directly.
-    const server = readFlag(rest, "--server");
-    const token = readFlag(rest, "--token");
-    if (!server || !token) throw new Error("flounder daemon needs --server <url> and --token <token> (mint one with `flounder ui`, or via the store)");
-    const out = resolveOut(rest);
-    const name = readFlag(rest, "--name");
-    const workspace = readFlag(rest, "--workspace");
-    const concurrency = readIntFlag(rest, "--concurrency");
+    const startArgs = rest.slice(1);
+    if (startArgs.length === 0 || startArgs[0] === "help" || startArgs.includes("--help") || startArgs.includes("-h")) {
+      printDaemonStartHelp();
+      return;
+    }
+    const server = readFlag(startArgs, "--server");
+    const token = readFlag(startArgs, "--token");
+    if (!server || !token) throw new Error("flounder daemon start needs --server <url> and --token <token> (create one with `flounder server daemon-token mint [name]`)");
+    const out = resolveOut(startArgs);
+    const name = readFlag(startArgs, "--name");
+    const workspace = readFlag(startArgs, "--workspace");
+    const concurrency = readIntFlag(startArgs, "--concurrency");
     await runDaemon({ server, token, out, ...(name ? { name } : {}), ...(workspace ? { workspace } : {}), ...(concurrency !== undefined ? { concurrency } : {}) });
     return; // runDaemon loops forever (until interrupted)
   }
@@ -113,7 +134,7 @@ async function main(argv: string[]): Promise<void> {
     // Name the staged project after the clue when --target wasn't given, so each prepare is its
     // own UI project rather than colliding on the default "target".
     if (cfg.targetName === "target") cfg.targetName = `prepare-${slugifyClue(clue)}`;
-    const spec: LaunchSpec = { verb: "prepare", target: cfg.targetName, sourcePaths: [], provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, clue, posture, matchDeployed, out: cfg.outputDir };
+    const spec: LaunchSpec = { verb: "prepare", target: cfg.targetName, sourcePaths: [], provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, clue, posture, matchDeployed, out: cfg.outputDir, ...sandboxSpec(cfg) };
     if (endpoint !== undefined) spec.endpoint = endpoint;
     if (maxSteps !== undefined) spec.maxSteps = maxSteps;
     const run = await launchViaApi(resolveServer(readFlag(rest, "--server")), spec);
@@ -134,7 +155,7 @@ async function main(argv: string[]): Promise<void> {
     // It auto-RESUMES a prior interrupted confirm of the same run dir (carries settled rows forward); --fresh ignores that.
     const maxSteps = readIntFlag(rest, "--max-steps");
     const fresh = rest.includes("--fresh");
-    const spec: LaunchSpec = { verb: "confirm", target: cfg.targetName, sourcePaths: cfg.sourcePaths, corpusPaths: cfg.corpusPaths, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, inputRunDir, out: cfg.outputDir };
+    const spec: LaunchSpec = { verb: "confirm", target: cfg.targetName, sourcePaths: cfg.sourcePaths, corpusPaths: cfg.corpusPaths, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, inputRunDir, out: cfg.outputDir, ...sandboxSpec(cfg) };
     if (cfg.buildRoot) spec.buildRoot = cfg.buildRoot;
     if (fresh) spec.fresh = true;
     if (maxSteps !== undefined) spec.maxSteps = maxSteps;
@@ -174,6 +195,18 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   cfg.auditModel = readFlag(args, "--audit-model") ?? readFlag(args, "--model") ?? cfg.auditModel;
   cfg.maxTokens = readIntFlag(args, "--max-tokens") ?? cfg.maxTokens;
   cfg.reproductionCommandTimeoutMs = readIntFlag(args, "--repro-timeout-ms") ?? cfg.reproductionCommandTimeoutMs;
+  const sandboxBackend = readFlag(args, "--sandbox-backend");
+  if (sandboxBackend === "auto" || sandboxBackend === "oci" || sandboxBackend === "host") cfg.sandboxBackend = sandboxBackend;
+  cfg.sandboxImage = readFlag(args, "--sandbox-image") ?? cfg.sandboxImage;
+  if (args.includes("--allow-host-execution")) cfg.sandboxAllowHostFallback = true;
+  const prepareNetwork = readFlag(args, "--prepare-network");
+  if (prepareNetwork === "none" || prepareNetwork === "enabled") cfg.sandboxPrepareNetwork = prepareNetwork;
+  const confirmNetwork = readFlag(args, "--confirm-network");
+  if (confirmNetwork === "none" || confirmNetwork === "enabled") cfg.sandboxConfirmNetwork = confirmNetwork;
+  const memoryMb = readIntFlag(args, "--sandbox-memory-mb");
+  if (memoryMb !== undefined) cfg.sandboxMemoryMb = memoryMb;
+  const cpus = readFloatFlag(args, "--sandbox-cpus");
+  if (cpus !== undefined) cfg.sandboxCpus = cpus;
   cfg.auditMaxSteps = readIntFlag(args, "--max-steps") ?? cfg.auditMaxSteps;
   const scopeNote = readFlag(args, "--scope-note");
   if (scopeNote !== undefined) cfg.auditScopeNote = scopeNote;
@@ -192,7 +225,7 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   if (args.includes("--remap")) cfg.auditRemap = true;
   if (args.includes("--dry-run")) cfg.dryRun = true;
   const thinking = readFlag(args, "--thinking");
-  if (thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh") {
+  if (thinking === "off" || thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh") {
     cfg.thinkingLevel = thinking;
   }
   return { cfg };
@@ -216,6 +249,20 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof rawReproductionCommandTimeoutMs === "number" && Number.isFinite(rawReproductionCommandTimeoutMs)) {
     cfg.reproductionCommandTimeoutMs = Math.max(1000, Math.floor(rawReproductionCommandTimeoutMs));
   }
+  const rawSandboxBackend = raw.sandboxBackend ?? raw.sandbox_backend;
+  if (rawSandboxBackend === "auto" || rawSandboxBackend === "oci" || rawSandboxBackend === "host") cfg.sandboxBackend = rawSandboxBackend;
+  const rawSandboxImage = raw.sandboxImage ?? raw.sandbox_image;
+  if (typeof rawSandboxImage === "string" && rawSandboxImage.trim()) cfg.sandboxImage = rawSandboxImage.trim();
+  const rawAllowHost = raw.sandboxAllowHostFallback ?? raw.sandbox_allow_host_fallback ?? raw.allowHostExecution ?? raw.allow_host_execution;
+  if (typeof rawAllowHost === "boolean") cfg.sandboxAllowHostFallback = rawAllowHost;
+  const rawPrepareNetwork = raw.sandboxPrepareNetwork ?? raw.sandbox_prepare_network;
+  if (rawPrepareNetwork === "none" || rawPrepareNetwork === "enabled") cfg.sandboxPrepareNetwork = rawPrepareNetwork;
+  const rawConfirmNetwork = raw.sandboxConfirmNetwork ?? raw.sandbox_confirm_network;
+  if (rawConfirmNetwork === "none" || rawConfirmNetwork === "enabled") cfg.sandboxConfirmNetwork = rawConfirmNetwork;
+  const rawSandboxMemoryMb = raw.sandboxMemoryMb ?? raw.sandbox_memory_mb;
+  if (typeof rawSandboxMemoryMb === "number" && Number.isFinite(rawSandboxMemoryMb)) cfg.sandboxMemoryMb = Math.max(64, Math.floor(rawSandboxMemoryMb));
+  const rawSandboxCpus = raw.sandboxCpus ?? raw.sandbox_cpus;
+  if (typeof rawSandboxCpus === "number" && Number.isFinite(rawSandboxCpus)) cfg.sandboxCpus = Math.max(0.1, rawSandboxCpus);
   const rawAuditMaxSteps = raw.auditMaxSteps ?? raw.audit_max_steps;
   if (typeof rawAuditMaxSteps === "number" && Number.isFinite(rawAuditMaxSteps)) cfg.auditMaxSteps = Math.max(1, Math.floor(rawAuditMaxSteps));
   const rawAuditScopeNote = raw.auditScopeNote ?? raw.audit_scope_note;
@@ -245,7 +292,7 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof rawDigSamples === "number" && Number.isFinite(rawDigSamples)) cfg.auditDigSamples = Math.max(1, Math.floor(rawDigSamples));
   const rawDigConcurrency = raw.auditDigConcurrency ?? raw.audit_dig_concurrency;
   if (typeof rawDigConcurrency === "number" && Number.isFinite(rawDigConcurrency)) cfg.auditDigConcurrency = Math.max(1, Math.floor(rawDigConcurrency));
-  if (raw.thinkingLevel === "minimal" || raw.thinkingLevel === "low" || raw.thinkingLevel === "medium" || raw.thinkingLevel === "high" || raw.thinkingLevel === "xhigh") {
+  if (raw.thinkingLevel === "off" || raw.thinkingLevel === "minimal" || raw.thinkingLevel === "low" || raw.thinkingLevel === "medium" || raw.thinkingLevel === "high" || raw.thinkingLevel === "xhigh") {
     cfg.thinkingLevel = raw.thinkingLevel;
   }
   const rawModels = normalizeRoleModels(raw.models);
@@ -256,16 +303,18 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof raw.dryRun === "boolean") cfg.dryRun = raw.dryRun;
 }
 
-// Spawn a co-located daemon for `flounder ui`: mint a fresh bearer token in the shared store,
-// then run `flounder daemon` as a child pointed at the just-started server. The child dies with
-// the parent. (A remote daemon is started the same way, by hand, on another machine.)
+// Spawn a co-located daemon for `flounder ui`: reuse the local auto-daemon token from
+// the shared store, then run `flounder daemon start` as a child pointed at the
+// just-started server. Reusing the token keeps the daemon id stable across UI restarts,
+// so projects pinned to the local executor keep claiming their queued jobs.
 function spawnLocalDaemon(opts: { out: string; url: string; workspace?: string; concurrency?: number }): void {
   const store = MetadataStore.openForOutput(opts.out);
-  const { token } = store.createDaemonToken(`local-${process.pid}`);
+  const { id, token, reused } = store.getOrCreateLocalDaemonToken();
   store.close();
-  const args = [fileURLToPath(import.meta.url), "daemon", "--server", opts.url, "--token", token, "--out", opts.out];
+  const args = [fileURLToPath(import.meta.url), "daemon", "start", "--server", opts.url, "--token", token, "--out", opts.out, "--name", "local"];
   if (opts.workspace) args.push("--workspace", opts.workspace);
   if (opts.concurrency !== undefined) args.push("--concurrency", String(opts.concurrency));
+  console.log(`[flounder ui] ${reused ? "reusing" : "created"} local daemon #${id}`);
   const child = spawn(process.execPath, args, { stdio: "inherit" });
   child.on("error", (error) => console.error(`[flounder ui] could not start local daemon: ${error.message}`));
   child.on("exit", (code) => console.log(`[flounder ui] local daemon exited (code ${code ?? "?"})`));
@@ -288,10 +337,145 @@ function spawnLocalDaemon(opts: { out: string; url: string; workspace?: string; 
   }
 }
 
-/** Resolve --out: flag > persisted config `out` > "runs". Keeps the tracking-store location
+/** Resolve --out: flag > persisted config `out` > ~/.flounder. Keeps the tracking-store location
  * consistent across the CLI, the control plane, and the daemon when set once via config. */
 function resolveOut(args: string[]): string {
-  return readFlag(args, "--out") ?? loadCliConfig().values.out ?? "runs";
+  return readFlag(args, "--out") ?? loadCliConfig().values.out ?? defaultOutputDir();
+}
+
+async function runProviderCommand(args: string[]): Promise<void> {
+  const subcommand = args[0] ?? "list";
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    printDaemonProviderHelp();
+    return;
+  }
+  const positional = (i = 0): string | undefined => args.filter((token) => !token.startsWith("--")).slice(1)[i];
+  const provider = positional() ?? readFlag(args, "--provider") ?? loadCliConfig().values.provider ?? defaultConfig().provider;
+
+  if (subcommand === "list") {
+    const rows = await Promise.all(knownRuntimeProviders().map(async (name) => providerAuthStatus(name)));
+    for (const row of rows) {
+      const auth = !row.required ? "local" : row.configured ? `ok:${row.source ?? "configured"}` : row.oauthLogin ? "login-needed" : "env-needed";
+      console.log(`${namePad(row.provider)} ${auth}`);
+    }
+    return;
+  }
+
+  if (subcommand === "check") {
+    const ok = await printProviderCheck(provider);
+    if (!ok) process.exitCode = 1;
+    return;
+  }
+
+  if (subcommand === "login") {
+    await loginProvider(provider);
+    return;
+  }
+
+  throw new Error(`Unknown daemon provider command "${subcommand}". Use: flounder daemon provider list | check [provider] | login [provider]`);
+}
+
+function printDaemonHelp(): void {
+  console.log(`flounder daemon — execution-plane worker.
+
+Usage:
+  flounder daemon start --server <url> --token <token> [--workspace <dir>] [--out <dir>] [--name <name>] [--concurrency <n>]
+  flounder daemon provider [list | check [provider] | login [provider]]
+
+The daemon runs audits locally: target source, sandbox execution, and provider
+credentials stay on this machine. The control-plane server only queues jobs and
+stores status.
+
+Defaults:
+  --out        ~/.flounder
+  --workspace  ~/.flounder/workspace
+
+Setup:
+  flounder server daemon-token mint my-daemon
+  flounder daemon provider login openai-codex
+  flounder daemon provider check openai-codex
+  flounder daemon start --server http://127.0.0.1:4500 --token <token>
+`);
+}
+
+function printDaemonStartHelp(): void {
+  console.log(`flounder daemon start — connect this machine as an executor.
+
+Usage:
+  flounder daemon start --server <url> --token <token> [--workspace <dir>] [--out <dir>] [--name <name>] [--concurrency <n>]
+
+Required:
+  --server      Control-plane URL, for example http://127.0.0.1:4500
+  --token       Daemon connection token minted by flounder server daemon-token mint
+
+Defaults:
+  --out         ~/.flounder
+  --workspace  ~/.flounder/workspace
+
+Before starting real work, authenticate provider profiles on this daemon machine:
+  flounder daemon provider login openai-codex
+  flounder daemon provider check openai-codex
+`);
+}
+
+function printDaemonProviderHelp(): void {
+  console.log(`flounder daemon provider — provider auth on this daemon machine.
+
+Usage:
+  flounder daemon provider list
+  flounder daemon provider check [provider]
+  flounder daemon provider login [provider]
+
+Provider credentials are never stored on the server. OAuth/subscription providers
+write daemon-local auth under ~/.flounder/agent/auth.json unless
+FLOUNDER_AGENT_DIR is set. Existing pi auth for the same provider can be imported
+from ~/.pi/agent/auth.json. API-key providers can be supplied through the daemon
+process environment.
+`);
+}
+
+function runMintTokenCommand(args: string[]): void {
+  const out = resolveOut(args);
+  const positional = args.find((token) => !token.startsWith("--"));
+  const name = readFlag(args, "--name") ?? positional ?? "daemon";
+  const server = readFlag(args, "--server") ?? "http://<this-server-host>:4500";
+  const db = MetadataStore.openForOutput(out);
+  try {
+    const { id, token } = db.createDaemonToken(name);
+    console.log(`[daemon ${id}] ${name}`);
+    console.log(`token: ${token}`);
+    console.log(`run on the executor machine:\n  flounder daemon start --server ${server} --token ${token}`);
+  } finally {
+    db.close();
+  }
+}
+
+function runDaemonTokenCommand(args: string[]): void {
+  const [subcommand = "mint", ...rest] = args;
+  if (subcommand === "mint" || subcommand === "create") {
+    runMintTokenCommand(rest);
+    return;
+  }
+  throw new Error("Unknown server daemon-token command. Use: flounder server daemon-token mint [name]");
+}
+
+function runDaemonListCommand(args: string[]): void {
+  const out = resolveOut(args);
+  const db = MetadataStore.openForOutput(out);
+  try {
+    const daemons = db.listDaemons();
+    if (daemons.length === 0) {
+      console.log("(no daemons registered — create a connection token with `flounder server daemon-token mint [name]`, then run `flounder daemon start --server <url> --token <token>`)");
+      return;
+    }
+    for (const d of daemons) console.log(`• [${d.id}] ${d.name}  last_seen=${d.last_seen_at ?? "never"}`);
+  } finally {
+    db.close();
+  }
+}
+
+function namePad(value: string): string {
+  return value.padEnd(28);
 }
 
 /** Build the launch spec for a sealed audit verb (run/map/audit). Materials come from cfg
@@ -307,6 +491,7 @@ function buildAuditSpec(cmd: "run" | "map" | "audit", rest: string[], cfg: Audit
     model: cfg.auditModel,
     thinking: cfg.thinkingLevel,
     out: cfg.outputDir,
+    ...sandboxSpec(cfg),
   };
   if (cfg.buildRoot) spec.buildRoot = cfg.buildRoot;
   if (cfg.auditScopeNote && cfg.auditScopeNote.trim()) spec.scopeNote = cfg.auditScopeNote.trim(); // --scope-note, or the pipeline's prepare-derived focus
@@ -330,6 +515,18 @@ function buildAuditSpec(cmd: "run" | "map" | "audit", rest: string[], cfg: Audit
   cap("--dig-samples", (n) => (spec.digSamples = n));
   cap("--dig-concurrency", (n) => (spec.digConcurrency = n));
   return spec;
+}
+
+function sandboxSpec(cfg: AuditorConfig): Pick<LaunchSpec, "sandboxBackend" | "sandboxImage" | "sandboxAllowHostFallback" | "sandboxPrepareNetwork" | "sandboxConfirmNetwork" | "sandboxMemoryMb" | "sandboxCpus"> {
+  return {
+    sandboxBackend: cfg.sandboxBackend,
+    sandboxImage: cfg.sandboxImage,
+    sandboxAllowHostFallback: cfg.sandboxAllowHostFallback,
+    sandboxPrepareNetwork: cfg.sandboxPrepareNetwork,
+    sandboxConfirmNetwork: cfg.sandboxConfirmNetwork,
+    ...(cfg.sandboxMemoryMb !== undefined ? { sandboxMemoryMb: cfg.sandboxMemoryMb } : {}),
+    ...(cfg.sandboxCpus !== undefined ? { sandboxCpus: cfg.sandboxCpus } : {}),
+  };
 }
 
 /** A short, filesystem/UI-safe slug from a prepare clue (tx / address / url), for the project name. */
@@ -360,7 +557,7 @@ async function runPipeline(rest: string[], cfg: AuditorConfig, clue: string): Pr
 
   // Phase 1 — prepare (open-world acquisition + deployment match) stages the source.
   console.log("\n── phase 1 · prepare (acquire the target) ──");
-  const prepSpec: LaunchSpec = { verb: "prepare", target, sourcePaths: [], provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, clue, posture, matchDeployed, out: cfg.outputDir };
+  const prepSpec: LaunchSpec = { verb: "prepare", target, sourcePaths: [], provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, clue, posture, matchDeployed, out: cfg.outputDir, ...sandboxSpec(cfg) };
   if (endpoint !== undefined) prepSpec.endpoint = endpoint;
   const prep = await launchViaApi(server, prepSpec);
   if (!ran(prep)) { console.error("[pipeline] prepare did not finish — stopping."); process.exitCode = 1; return; }
@@ -392,7 +589,7 @@ async function runPipeline(rest: string[], cfg: AuditorConfig, clue: string): Pr
   else if (findings <= 0) console.log("\n[pipeline] the dig surfaced no findings — nothing to reproduce.");
   else {
     console.log("\n── phase 3 · confirm (reproduce on the real target) ──");
-    const confSpec: LaunchSpec = { verb: "confirm", target, sourcePaths: [staged], inputRunDir: String(audit!.run_dir), provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, out: cfg.outputDir };
+    const confSpec: LaunchSpec = { verb: "confirm", target, sourcePaths: [staged], inputRunDir: String(audit!.run_dir), provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, out: cfg.outputDir, ...sandboxSpec(cfg) };
     if (!ran(await launchViaApi(server, confSpec))) process.exitCode = 1;
   }
   console.log(`\n=== pipeline done · UI project "${target}" has the full prepare → dig${noConfirm ? "" : " → confirm"} trail ===`);
@@ -409,6 +606,13 @@ function readIntFlag(args: string[], name: string): number | undefined {
   const value = readFlag(args, name);
   if (!value) return undefined;
   const parsed = Number.parseInt(value, 10);
+  return Number.isFinite(parsed) ? parsed : undefined;
+}
+
+function readFloatFlag(args: string[], name: string): number | undefined {
+  const value = readFlag(args, name);
+  if (!value) return undefined;
+  const parsed = Number.parseFloat(value);
   return Number.isFinite(parsed) ? parsed : undefined;
 }
 
@@ -438,16 +642,46 @@ async function runHistoryCommand(args: string[]): Promise<void> {
   console.log(`[history] runs=${manifest.aggregate.totalRuns} materials=${manifest.aggregate.materialsTotal} findings=${manifest.aggregate.findingsTotal}`);
 }
 
-// Read view over the SQLite tracking store (the UI's future backend; usable from the CLI
-// today). `flounder db projects` | `runs [<target>]` | `findings <target>`.
-function runDbCommand(args: string[]): void {
-  const [subcommand = "projects", ...rest] = args;
+// Read/write views over the control-plane server state. These are product resources, not
+// database commands: project inventory, global run history, global findings, daemon registry,
+// and daemon connection tokens.
+function runServerCommand(args: string[]): void {
+  const [resource, ...rest] = args;
+  if (!resource || resource === "help" || resource === "--help" || resource === "-h") {
+    printServerHelp();
+    return;
+  }
+  if (resource === "project") {
+    runProjectCommand(rest);
+    return;
+  }
+  if (resource === "run") {
+    runServerRunCommand(rest);
+    return;
+  }
+  if (resource === "finding") {
+    runFindingCommand(rest);
+    return;
+  }
+  if (resource === "daemon") {
+    const [subcommand = "list", ...daemonRest] = rest;
+    if (subcommand !== "list") throw new Error(`Unknown server daemon command "${subcommand}". Use: flounder server daemon list`);
+    runDaemonListCommand(daemonRest);
+    return;
+  }
+  if (resource === "daemon-token") {
+    runDaemonTokenCommand(rest);
+    return;
+  }
+  throw new Error(`Unknown server resource "${resource}". Use: flounder server project|run|finding|daemon|daemon-token`);
+}
+
+function runProjectCommand(args: string[]): void {
+  const [subcommand = "list"] = args;
   const out = resolveOut(args);
-  const positional = rest.find((token) => !token.startsWith("--"));
-  const target = readFlag(args, "--target") ?? positional;
   const db = MetadataStore.openForOutput(out);
   try {
-    if (subcommand === "projects") {
+    if (subcommand === "list") {
       const projects = db.listProjects();
       if (projects.length === 0) {
         console.log("(no projects tracked yet — run `flounder run` first, or check --out)");
@@ -466,43 +700,82 @@ function runDbCommand(args: string[]): void {
       }
       return;
     }
-    if (subcommand === "daemons") {
-      const daemons = db.listDaemons();
-      if (daemons.length === 0) {
-        console.log("(no daemons registered — mint a token with `flounder db mint-token [name]`, then run `flounder daemon`)");
-        return;
-      }
-      for (const d of daemons) console.log(`• [${d.id}] ${d.name}  last_seen=${d.last_seen_at ?? "never"}`);
-      return;
-    }
-    if (subcommand === "mint-token") {
-      // Mint a bearer token for a (remote) daemon. Must run on the SERVER machine — the
-      // server owns this DB; the daemon authenticates with the printed token over HTTP.
-      const name = readFlag(args, "--name") ?? positional ?? "daemon";
-      const { id, token } = db.createDaemonToken(name);
-      console.log(`[daemon ${id}] ${name}`);
-      console.log(`token: ${token}`);
-      console.log(`run on the executor machine:\n  flounder daemon --server http://<this-server-host>:4500 --token ${token}`);
-      return;
-    }
-    const projectId = resolveProjectId(db, target);
-    if (subcommand === "runs") {
-      for (const run of db.listRuns(projectId)) {
-        console.log(`${run.started_at}  ${run.kind} [${run.status}]  scopes ${run.scopes_audited ?? "-"}/${run.scopes_total ?? "-"}  findings ${run.findings_total ?? "-"}  ${run.run_dir ?? ""}`);
-      }
-      return;
-    }
-    if (subcommand === "findings") {
-      for (const finding of db.listFindings(projectId)) {
-        const timeline = db.findingTimeline(Number(finding.id)).map((event) => event.to_status).join(" → ");
-        console.log(`[${finding.status}] ${finding.title} (${finding.location ?? "?"})  ${timeline}`);
-      }
-      return;
-    }
-    throw new Error(`Unknown db command "${subcommand}". Use: flounder db projects | runs [--target <name>] | findings --target <name> | daemons | mint-token [name]`);
+    throw new Error(`Unknown server project command "${subcommand}". Use: flounder server project list`);
   } finally {
     db.close();
   }
+}
+
+function runServerRunCommand(args: string[]): void {
+  const [subcommand = "list", ...rest] = args;
+  if (subcommand !== "list") throw new Error(`Unknown server run command "${subcommand}". Use: flounder server run list [--project <name>]`);
+  const out = resolveOut(args);
+  const positional = rest.find((token) => !token.startsWith("--"));
+  const target = readFlag(args, "--project") ?? readFlag(args, "--target") ?? positional;
+  const db = MetadataStore.openForOutput(out);
+  try {
+    const projectId = target ? resolveProjectId(db, target) : undefined;
+    const projects = db.listProjects();
+    const projectNameById = new Map(projects.map((project) => [Number(project.id), String(project.name)]));
+    const runs = db.listRuns(projectId);
+    if (runs.length === 0) {
+      console.log(target ? `(no runs tracked for ${target})` : "(no runs tracked yet)");
+      return;
+    }
+    for (const run of runs) {
+      const projectName = projectNameById.get(Number(run.project_id)) ?? "unknown-project";
+      console.log(`${run.started_at}  ${projectName}  ${run.kind} [${run.status}]  scopes ${run.scopes_audited ?? "-"}/${run.scopes_total ?? "-"}  findings ${run.findings_total ?? "-"}  ${run.run_dir ?? ""}`);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+function runFindingCommand(args: string[]): void {
+  const [subcommand = "list", ...rest] = args;
+  if (subcommand !== "list") throw new Error(`Unknown server finding command "${subcommand}". Use: flounder server finding list [--project <name>]`);
+  const out = resolveOut(args);
+  const positional = rest.find((token) => !token.startsWith("--"));
+  const target = readFlag(args, "--project") ?? readFlag(args, "--target") ?? positional;
+  const status = readFlag(args, "--status");
+  const tracking = readFlag(args, "--tracking");
+  const db = MetadataStore.openForOutput(out);
+  try {
+    const findings = target
+      ? db.listFindings(resolveProjectId(db, target)).filter((finding) => matchesFindingFilters(finding, status, tracking))
+      : db.listGlobalFindings({ status, tracking });
+    if (findings.length === 0) {
+      console.log(target ? `(no findings tracked for ${target})` : "(no findings tracked yet)");
+      return;
+    }
+    for (const finding of findings) {
+      const project = finding.project_name ? `${finding.project_name}  ` : "";
+      const timeline = db.findingTimeline(Number(finding.id)).map((event) => event.to_status).join(" → ");
+      console.log(`${project}[${finding.status}] ${finding.title} (${finding.location ?? "?"})  ${timeline}`);
+    }
+  } finally {
+    db.close();
+  }
+}
+
+function matchesFindingFilters(finding: Record<string, unknown>, status: string | undefined, tracking: string | undefined): boolean {
+  if (status && finding.status !== status) return false;
+  if (tracking && String(finding.tracking_status ?? "open") !== tracking) return false;
+  return true;
+}
+
+function printServerHelp(): void {
+  console.log(`flounder server — control-plane resources.
+
+Usage:
+  flounder server project list
+  flounder server run list [--project <name>]
+  flounder server finding list [--project <name>] [--status <s>] [--tracking <s>]
+  flounder server daemon list
+  flounder server daemon-token mint [name] [--server <url>]
+
+These commands read or write the server/control-plane state. Daemon-machine local
+operations stay under "flounder daemon ...", for example "flounder daemon provider login".`);
 }
 
 function resolveProjectId(db: MetadataStore, target: string | undefined): number {
@@ -598,17 +871,37 @@ Usage:
   flounder audit   [<region> | --scope <id,...> | --verify <file>] --source ...   deep-audit a region, inventory scopes, or given claims
   flounder confirm <run-dir> --source <paths...>                                  open-world: reproduce a run's findings on the real target
   flounder history import-run --target <name> --run <dir>
-  flounder db      [projects | runs [<target>] | findings <target> | daemons | mint-token [name]]   read the tracking store; mint/list daemon tokens
+  flounder server project list                                                   list tracked projects
+  flounder server run list [--project <name>]                                    list run history globally or for one project
+  flounder server finding list [--project <name>] [--status <s>] [--tracking <s>] list findings globally or for one project
+  flounder server daemon list                                                    list registered execution daemons
+  flounder server daemon-token mint [name] [--server <url>]                      create a daemon connection token
   flounder config  [list | get <key> | set <key> <value> | unset <key> | path] [--global|--local]   persisted CLI defaults (server, provider, model, thinking, out, posture)
-  flounder ui      [--port <n>] [--host <h>] [--out <dir>] [--no-daemon]           control-plane web dashboard + a co-located executor daemon (localhost)
-  flounder daemon  --server <url> --token <token> [--out <dir>] [--concurrency <n>]   execution plane: claim + run queued jobs (may be a different machine)
+  flounder daemon provider [list | check [provider] | login [provider]]          manage provider auth on this daemon machine
+  flounder ui      [--port <n>] [--host <h>] [--out <dir>] [--workspace <dir>] [--concurrency <n>] [--no-daemon]   control-plane web dashboard + a co-located executor daemon (localhost)
+  flounder daemon start --server <url> --token <token> [--out <dir>] [--workspace <dir>] [--concurrency <n>]   execution plane: claim + run queued jobs (may be a different machine)
+
+CLI layout:
+  Workflow verbs stay top-level. Control-plane resource operations live under
+  "flounder server ...". Daemon-machine local operations live under "flounder daemon ...".
+  In practice:
+    flounder server project list        reads the project collection
+    flounder server run list            reads global run history without colliding with "flounder run"
+    flounder server finding list        reads the global finding index, optionally filtered by project
+    flounder server daemon-token mint   creates a daemon connection token on the control-plane side
+    flounder daemon start --server ... --token ...    runs the executor on the daemon machine
+    flounder daemon provider ...   logs in/checks provider auth on the daemon machine
 
 Control plane vs execution plane:
   flounder ui starts the CONTROL PLANE (the dashboard, REST API, SQLite store, and job queue) and,
   unless --no-daemon, a co-located DAEMON to execute jobs. The daemon is what actually runs the
-  audit — so code and provider keys stay on the daemon's machine. Run "flounder daemon" on another
+  audit — so code and provider keys stay on the daemon's machine. Run "flounder daemon start" on another
   host (with a token minted by the server operator) to execute remotely; the server owns the DB
   and the daemon only reports progress back over HTTP.
+
+  Provider auth is local to each daemon machine. Use "flounder daemon provider login openai-codex" for
+  subscription/OAuth providers, or set the provider's API-key environment variables before
+  running "flounder daemon start". Use "flounder daemon provider check <provider>" to verify the daemon host.
 
 How CLI runs execute (the API is the single entry point):
   run / map / audit / confirm / prepare are thin clients of the control plane: the CLI builds a
@@ -636,15 +929,23 @@ Shared options:
   --build-root <path>     directory copied into the sandbox so it is buildable (e.g. a workspace root); defaults to --source
   --target <name>         run/artifact name and durable-memory key
   --config <file>         JSON config with project context, models, and paths
-  --provider <name>       pi-ai provider (default openai-codex); codex-cli/claude-code are CLI fallbacks
+  --provider <name>       Flounder provider id (default openai-codex); codex-cli/claude-code are explicit local fallbacks
   --model <name>          set the audit model
-  --thinking <level>      minimal|low|medium|high|xhigh
-  --out <dir>             artifact output directory (default runs)
+  --thinking <level>      off|minimal|low|medium|high|xhigh
+  --out <dir>             artifact output directory and local tracking store (default ~/.flounder)
   --history-dir <dir>     project history directory, default <out>/history
+  --workspace <dir>       daemon project workspace root, default ~/.flounder/workspace
   --scope-note <text>     one-line authorized-scope hint for the agent
   --max-steps <n>         cap agent turns for a breadth pass / pinned audit (default: UNBOUNDED — the model stops when done)
   --no-prepare            skip the toolchain warm-up (deps fetch/build)
   --prepare-timeout-ms <n>  per-command timeout for the warm-up, default 600000
+  --sandbox-backend <b>   auto|oci|host; default auto uses the OCI sandbox and refuses implicit host fallback
+  --sandbox-image <img>   OCI image for sandboxed commands (default flounder-sandbox:latest; build with npm run sandbox:build)
+  --allow-host-execution  trusted-local opt-in only: let auto fall back to host execution when no OCI sandbox is available
+  --prepare-network <m>   none|enabled; dependency warm-up/build commands default to enabled
+  --confirm-network <m>   none|enabled; open-world prepare/confirm bash commands default to enabled
+  --sandbox-memory-mb <n> memory limit for OCI sandbox commands
+  --sandbox-cpus <n>      CPU limit for OCI sandbox commands
   --no-refute / --no-appeal  skip the independent-refutation / one-appeal passes on confirmed findings
   --server <url>          control plane the CLI drives (default --server > FLOUNDER_SERVER > config 'server' > http://127.0.0.1:4500)
   --mock-llm              run with the deterministic mock model (no provider needed); the daemon executes it like any run
@@ -655,7 +956,7 @@ run / map / audit deep-phase options:
   --dig-steps <n>         cap each scope's dig (default: UNBOUNDED; the dig stops when its obligations are discharged)
   --dig-samples <n>       independent dig passes per scope, findings unioned (raises recall), default 1
   --dig-concurrency <n>   scopes deep-audited in parallel (isolated workspaces), default 1
-  --max-scopes <n>        un-audited scopes the dig audits per run, default 10
+  --max-scopes <n>        one-run cap for un-audited scopes; UI Standard defaults to auditing until 30 project scopes are done
   --remap                 re-enumerate scopes from scratch (default resumes the persisted inventory)
 
 flounder audit selectors (choose one; default digs the existing inventory):
@@ -666,6 +967,24 @@ flounder audit selectors (choose one; default digs the existing inventory):
 flounder confirm: unbounded by default (ends when the model finishes); --max-steps caps it. Auto-resumes an
 interrupted prior confirm of the same run dir (carries already-settled rows forward); --fresh ignores it.
 `);
+}
+
+function printUiHelp(): void {
+  console.log(`flounder ui — start the control-plane dashboard.
+
+Usage:
+  flounder ui [--port <n>] [--host <h>] [--out <dir>] [--workspace <dir>] [--concurrency <n>] [--no-daemon]
+
+Options:
+  --port              Dashboard/API port, default 4500
+  --host              Bind host, default 127.0.0.1
+  --out               Flounder product home/output dir, default ~/.flounder
+  --workspace         Co-located daemon workspace, default ~/.flounder/workspace
+  --concurrency       Co-located daemon jobs in parallel, default 2
+  --no-daemon         Start only the control plane; connect executors with flounder daemon start
+
+flounder ui starts the REST API, SQLite tracking store, dashboard, and by default a local
+execution daemon. Target code and provider credentials stay on the daemon machine.`);
 }
 
 main(process.argv.slice(2)).catch((error: unknown) => {

@@ -16,6 +16,8 @@ cfg.targetName = "mock-audit";
 cfg.sourcePaths = [path.join(repo, "fixtures")];
 cfg.outputDir = "runs";
 cfg.auditMaxSteps = 10;
+cfg.sandboxBackend = "host";
+cfg.sandboxAllowHostFallback = true;
 // `run --quick` = a single breadth pass: auditDeep stays false (no map → dig).
 
 const result = await runAudit(cfg, { kind: "run", llm: new MockAuditLlmClient() });

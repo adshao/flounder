@@ -3,7 +3,7 @@ import test from "node:test";
 import extension, { applyFsaRunBudgets } from "../dist/pi/extension.js";
 import { defaultConfig } from "../dist/config.js";
 
-test("pi extension registers agentic audit tool", async () => {
+test("pi extension registers workflow tools", async () => {
   const tools = new Map();
   const handlers = new Map();
   const commands = new Map();
@@ -20,14 +20,26 @@ test("pi extension registers agentic audit tool", async () => {
   };
   extension(fakePi);
 
-  assert.ok(tools.has("flounder_run"));
-  assert.ok(tools.has("flounder_confirm"));
+  assert.deepEqual([...tools.keys()].sort(), [
+    "flounder_audit",
+    "flounder_confirm",
+    "flounder_map",
+    "flounder_prepare",
+    "flounder_run",
+  ]);
   assert.ok(commands.has("flounder"));
   assert.ok(handlers.has("tool_call"));
   assert.ok(handlers.has("user_bash"));
 
-  // flounder_confirm mirrors the `flounder confirm` CLI surface: it needs the prior run dir + the
-  // target code to reproduce against.
+  // flounder_run mirrors the current CLI: clue-only starts prepare -> run -> confirm,
+  // sourcePaths starts the sealed source audit. Only target is structurally required.
+  const runParams = tools.get("flounder_run").parameters;
+  assert.ok(runParams.required.includes("target"));
+  assert.ok(!runParams.required.includes("sourcePaths"));
+  assert.ok(runParams.properties.clue);
+  assert.ok(runParams.properties.sourcePaths);
+
+  // flounder_confirm mirrors `flounder confirm`: prior run dir + target source.
   const confirmParams = tools.get("flounder_confirm").parameters;
   assert.ok(confirmParams.required.includes("runDir"));
   assert.ok(confirmParams.required.includes("sourcePaths"));
@@ -68,13 +80,14 @@ test("pi extension blocks live-network exploit-like bash commands", async () => 
   assert.equal(userResult.result.exitCode, 2);
 });
 
-// The `flounder_run` pi tool must default to the SAME unbounded budgets as the `flounder run` CLI
-// (cli.ts:33-35). Earlier it set only auditMaxSteps and left map/dig at the finite config
-// defaults (20/30), silently truncating a pi-tool-driven map→dig audit. Pin the fix.
+// The sealed workflow pi tools must default to the SAME unbounded budgets as the CLI. Earlier
+// flounder_run set only auditMaxSteps and left map/dig at finite config defaults, silently
+// truncating a pi-tool-driven map/dig audit. Pin the helper used by the tools.
 test("flounder_run defaults to UNBOUNDED map/dig/breadth budgets (matches the `flounder run` CLI)", () => {
   const base = defaultConfig();
-  // the base config is deliberately finite and small; the unbounded default is layered on top
-  assert.ok(Number.isFinite(base.auditMapSteps) && Number.isFinite(base.auditDigSteps));
+  assert.equal(base.auditMaxSteps, Number.POSITIVE_INFINITY);
+  assert.equal(base.auditMapSteps, Number.POSITIVE_INFINITY);
+  assert.equal(base.auditDigSteps, Number.POSITIVE_INFINITY);
 
   const cfg = defaultConfig();
   applyFsaRunBudgets(cfg, undefined);

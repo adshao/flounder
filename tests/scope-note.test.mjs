@@ -51,6 +51,22 @@ test("deriveScopeNote: falls back to role/platform when `in_scope` is absent (ol
   assert.match(note.slice(note.indexOf("DEPENDENCIES")), /solmate/);
 });
 
+test("deriveScopeNote: labels current prepare components without placeholder question marks", () => {
+  const current = {
+    components: [
+      { id: "rollup", name: "Rollup", path: "source/l1-contracts/src/Rollup.sol", in_scope: true },
+      { path: "source/aztec-packages", in_scope: true },
+      { identity: "?", role: "?", staged_path: "docs/specs", in_scope: false },
+      { in_scope: true },
+    ],
+  };
+  const note = deriveScopeNote(current);
+  assert.match(note, /Rollup — source\/l1-contracts\/src\/Rollup\.sol/);
+  assert.match(note, /- source\/aztec-packages/);
+  assert.match(note, /- docs\/specs/);
+  assert.doesNotMatch(note, /- \?/);
+});
+
 test("deriveScopeNote: explicit in_scope overrides the role/platform heuristic", () => {
   // A deployed component the project explicitly excludes from scope must come out as a boundary.
   const c = { role: "target", identity: "OutOfScopeButDeployed", platform: "ethereum", in_scope: false };

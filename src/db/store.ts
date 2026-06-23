@@ -1,9 +1,9 @@
 // SQLite metadata store — the system of record for run TRACKING.
 //
 // flounder writes here on every run (project, run lifecycle, scope coverage, findings, and
-// their status transitions, confirm decisions). The big evidentiary content stays on
-// disk (transcripts, PoCs, provenance, the JSON artifacts); the DB stores PATHS to it
-// plus the denormalized metadata a UI needs to list/filter/track across all projects.
+// their status transitions, confirm decisions). User-facing structured content and final
+// reports live in the DB; large raw evidentiary artifacts stay on disk (transcripts, PoCs,
+// provenance, JSON artifacts) with paths recorded for provenance/debugging.
 //
 // This is NOT a derived/rebuildable projection — it is written live alongside the run.
 // node:sqlite is used so the package stays dependency-free. WAL + a busy timeout let one
@@ -11,7 +11,7 @@
 
 import "./sqlite-quiet.js"; // must run before node:sqlite loads — filters its experimental warning
 import { createRequire } from "node:module";
-import { randomBytes } from "node:crypto";
+import { randomBytes, randomUUID } from "node:crypto";
 import { mkdirSync } from "node:fs";
 import path from "node:path";
 
@@ -20,10 +20,10 @@ import path from "node:path";
 // module evaluation (after the static sqlite-quiet import has run) lets the filter catch it.
 const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof import("node:sqlite");
 
-export type RunKind = "run" | "map" | "audit" | "verify" | "confirm" | "prepare";
+export type RunKind = "run" | "map" | "audit" | "verify" | "confirm" | "prepare" | "report";
 export type RunStatus = "running" | "done" | "error" | "killed";
 export type ScopeStatus = "pending" | "audited" | "deferred" | "auditing";
-export type FindingStatus = "suspected" | "confirmed-executable" | "confirmed-differential" | "refuted";
+export type FindingStatus = "suspected" | "discharged" | "confirmed-executable" | "confirmed-differential" | "refuted";
 
 export interface ProjectInput {
   name: string;
@@ -32,6 +32,7 @@ export interface ProjectInput {
   corpusPaths?: string[] | undefined; // relative to the project dir
   config?: unknown; // budgets/max_scopes snapshot the UI can edit (provider/model/thinking now live on the provider profile)
   providerId?: number | undefined; // selected provider profile
+  daemonId?: number | undefined; // selected executor daemon; jobs for this project are pinned to it
   dir?: string | undefined; // project subdir under the daemon workspace (default = name)
 }
 
@@ -63,7 +64,19 @@ export interface FindingRow {
   severity?: string | undefined;
   status: FindingStatus;
   reportPath?: string | undefined;
+  reportMarkdown?: string | undefined;
   scopeId?: string | undefined;
+  // The rich content the kernel produces (previously only in the run dir's audit_hypotheses /
+  // audit_findings artifacts). Persisted so findings are self-contained in the DB — the UI shows
+  // full detail and the verify/confirm pipeline feeds on them without scraping run dirs.
+  description?: string | undefined;
+  evidence?: string | undefined;
+  exploitSketch?: string | undefined;
+  fix?: string | undefined;
+  confidence?: number | undefined;
+  // VERIFY: the DB id of the original suspected finding this row's verdict resolves. When set,
+  // upsertFindings UPDATES that existing row in place (cross-run) instead of inserting a new one.
+  originId?: number | undefined;
 }
 
 export interface ConfirmRow {
@@ -72,6 +85,14 @@ export interface ConfirmRow {
   recommendation?: string | undefined;
   members?: string[] | undefined;
   decisionPath?: string | undefined;
+  distinctFix?: string | undefined;
+  reproEvidence?: string | undefined;
+  corroboration?: string | undefined;
+  novelty?: string | undefined;
+  humanGates?: string | undefined;
+  mergedFrom?: string[] | undefined;
+  reproCommandId?: string | undefined;
+  reportMarkdown?: string | undefined;
 }
 
 export interface Coverage {
@@ -126,12 +147,14 @@ CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
 
 CREATE TABLE IF NOT EXISTS project(
   id INTEGER PRIMARY KEY,
+  uuid TEXT NOT NULL,
   name TEXT UNIQUE NOT NULL,
   source_paths TEXT,              -- now RELATIVE to the project dir (was absolute)
   build_root TEXT,                -- relative to the project dir
   corpus_paths TEXT,              -- relative to the project dir
   config_json TEXT,               -- budgets only now (provider/model/thinking moved to provider profiles)
   provider_id INTEGER,            -- selected provider profile (plain ref; nulled if the profile is deleted)
+  daemon_id INTEGER REFERENCES daemon(id), -- selected executor daemon; null = legacy/unpinned
   dir TEXT,                       -- project subdir relative to the daemon's workspace root (default = name)
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -148,6 +171,7 @@ CREATE TABLE IF NOT EXISTS run(
   model TEXT,
   thinking TEXT,
   budgets_json TEXT,
+  stages_json TEXT,               -- post-dig stage outcomes (synthesis / differential / refutation / discharge-challenge) for the funnel view
   scopes_total INTEGER,
   scopes_audited INTEGER,
   scopes_pending INTEGER,
@@ -186,7 +210,13 @@ CREATE TABLE IF NOT EXISTS finding(
   status TEXT NOT NULL,
   confirm_status TEXT,            -- per-finding real-target confirm state: NULL=not confirmed yet | confirming | reproduced | not-reproduced
   report_path TEXT,
+  report_markdown TEXT,           -- user-facing per-finding report markdown; local artifacts are only provenance/debug fallback
   scope_id TEXT,
+  description TEXT,               -- the kernel's rich finding content (was only in run-dir artifacts)
+  evidence TEXT,
+  exploit_sketch TEXT,
+  fix TEXT,
+  confidence REAL,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL,
   UNIQUE(run_id, finding_key)
@@ -212,6 +242,13 @@ CREATE TABLE IF NOT EXISTS confirm_decision(
   reproduced TEXT,
   recommendation TEXT,
   members_json TEXT,
+  distinct_fix TEXT,
+  repro_evidence TEXT,
+  corroboration TEXT,
+  novelty TEXT,
+  human_gates TEXT,
+  merged_from_json TEXT,
+  repro_command_id TEXT,
   decision_path TEXT,
   created_at TEXT NOT NULL
 );
@@ -242,8 +279,8 @@ CREATE TABLE IF NOT EXISTS job(
 CREATE INDEX IF NOT EXISTS idx_job_status ON job(status);
 
 -- A reusable "model strategy" profile a project selects (provider + model + thinking,
--- with optional per-phase overrides for map/dig/refute). No secrets: API keys stay on the
--- daemon (pi /login); this is just the model-selection part of the config, lifted out.
+-- with optional per-phase overrides for map/dig/refute). No secrets: credentials stay on the
+-- daemon via Flounder daemon-local auth; this is just the model-selection part of the config.
 CREATE TABLE IF NOT EXISTS provider(
   id INTEGER PRIMARY KEY,
   name TEXT UNIQUE NOT NULL,
@@ -258,6 +295,23 @@ CREATE TABLE IF NOT EXISTS provider(
 
 function now(): string {
   return new Date().toISOString();
+}
+
+function confirmMemberKeys(member: string): string[] {
+  const cleaned = member.trim();
+  const keys = new Set<string>();
+  const add = (value: string): void => {
+    const key = value.trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    if (/^k[0-9a-z]+$/.test(key)) keys.add(key);
+  };
+  add(cleaned);
+  const first = cleaned.split(/\s+/)[0] ?? "";
+  add(first);
+  const bracketed = cleaned.match(/^\[(k[0-9a-z]+)\]/i)?.[1];
+  if (bracketed) add(bracketed);
+  const embedded = cleaned.match(/\b(k[0-9a-z]+)\b/i)?.[1];
+  if (embedded) add(embedded);
+  return [...keys];
 }
 
 export class MetadataStore {
@@ -276,7 +330,9 @@ export class MetadataStore {
     // won't add them). Each is a no-op if the column is already present.
     for (const alter of [
       "ALTER TABLE project ADD COLUMN provider_id INTEGER",
+      "ALTER TABLE project ADD COLUMN daemon_id INTEGER",
       "ALTER TABLE project ADD COLUMN dir TEXT",
+      "ALTER TABLE project ADD COLUMN uuid TEXT",
       "ALTER TABLE daemon ADD COLUMN workspace TEXT",
       "ALTER TABLE run ADD COLUMN run_scopes_target INTEGER",
       "ALTER TABLE run ADD COLUMN run_scopes_done INTEGER",
@@ -285,6 +341,20 @@ export class MetadataStore {
       "ALTER TABLE scope ADD COLUMN priority INTEGER DEFAULT 0", // manual dig-queue ordering, separate from score
       "ALTER TABLE finding ADD COLUMN tracking_status TEXT", // submission tracking: open|triaging|submitted|accepted|fixed|duplicate|rejected
       "ALTER TABLE finding ADD COLUMN confirm_status TEXT", // per-finding real-target confirm state
+      "ALTER TABLE finding ADD COLUMN report_markdown TEXT", // user-facing per-finding report markdown
+      "ALTER TABLE finding ADD COLUMN description TEXT", // rich finding content, previously only in run-dir artifacts
+      "ALTER TABLE finding ADD COLUMN evidence TEXT",
+      "ALTER TABLE finding ADD COLUMN exploit_sketch TEXT",
+      "ALTER TABLE finding ADD COLUMN fix TEXT",
+      "ALTER TABLE finding ADD COLUMN confidence REAL",
+      "ALTER TABLE run ADD COLUMN stages_json TEXT", // funnel: post-dig stage outcomes
+      "ALTER TABLE confirm_decision ADD COLUMN distinct_fix TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN repro_evidence TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN corroboration TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN novelty TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN human_gates TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN merged_from_json TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN repro_command_id TEXT",
     ]) {
       try {
         this.db.exec(alter);
@@ -292,7 +362,33 @@ export class MetadataStore {
         // column already exists
       }
     }
+    this.ensureProjectUuids();
+    this.reconcileConfirmStatuses();
     this.db.prepare("INSERT INTO meta(key, value) VALUES ('schema_version', ?) ON CONFLICT(key) DO NOTHING").run(String(SCHEMA_VERSION));
+  }
+
+  private ensureProjectUuids(): void {
+    const rows = this.db.prepare("SELECT id FROM project WHERE uuid IS NULL OR uuid = ''").all() as Array<{ id: number }>;
+    const update = this.db.prepare("UPDATE project SET uuid = ? WHERE id = ?");
+    for (const row of rows) update.run(randomUUID(), row.id);
+    this.db.exec("CREATE UNIQUE INDEX IF NOT EXISTS idx_project_uuid ON project(uuid)");
+  }
+
+  private reconcileConfirmStatuses(): void {
+    const rows = this.db
+      .prepare("SELECT project_id, reproduced, members_json FROM confirm_decision WHERE reproduced IN ('yes','no') AND members_json IS NOT NULL")
+      .all() as Array<{ project_id: number; reproduced: string; members_json: string }>;
+    if (rows.length === 0) return;
+    const update = this.db.prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND finding_key = ? AND confirm_status IS NULL");
+    for (const row of rows) {
+      const members = jsonParseOrNull(row.members_json);
+      if (!Array.isArray(members)) continue;
+      const outcome = row.reproduced === "yes" ? "reproduced" : "not-reproduced";
+      for (const member of members) {
+        if (typeof member !== "string") continue;
+        for (const key of confirmMemberKeys(member)) update.run(outcome, row.project_id, key);
+      }
+    }
   }
 
   /** Open the store for a config's output root (DB lives at <outputDir>/flounder.db). */
@@ -311,26 +407,29 @@ export class MetadataStore {
     const ts = now();
     this.db
       .prepare(
-        `INSERT INTO project(name, source_paths, build_root, corpus_paths, config_json, provider_id, dir, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+        `INSERT INTO project(uuid, name, source_paths, build_root, corpus_paths, config_json, provider_id, daemon_id, dir, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
          ON CONFLICT(name) DO UPDATE SET
            source_paths = excluded.source_paths,
            build_root   = excluded.build_root,
            corpus_paths = excluded.corpus_paths,
            config_json  = excluded.config_json,
-           -- provider_id / dir are COALESCE-preserved: a run (which upserts with only name+config)
+           -- provider_id / daemon_id / dir are COALESCE-preserved: a run (which upserts with only name+config)
            -- must not wipe the selection the UI made.
            provider_id  = COALESCE(excluded.provider_id, project.provider_id),
+           daemon_id    = COALESCE(excluded.daemon_id, project.daemon_id),
            dir          = COALESCE(excluded.dir, project.dir),
            updated_at   = excluded.updated_at`,
       )
       .run(
+        randomUUID(),
         input.name,
         jsonOrNull(input.sourcePaths),
         input.buildRoot ?? null,
         jsonOrNull(input.corpusPaths),
         jsonOrNull(input.config),
         input.providerId ?? null,
+        input.daemonId ?? null,
         input.dir ?? null,
         ts,
         ts,
@@ -347,10 +446,23 @@ export class MetadataStore {
     return this.db.prepare("SELECT * FROM project WHERE name = ?").get(name) as Record<string, unknown> | undefined;
   }
 
+  getProjectById(id: number): Record<string, unknown> | undefined {
+    return this.db.prepare("SELECT * FROM project WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  }
+
+  getProjectByUuid(uuid: string): Record<string, unknown> | undefined {
+    return this.db.prepare("SELECT * FROM project WHERE uuid = ?").get(uuid) as Record<string, unknown> | undefined;
+  }
+
+  /** Resolve public UI/API project refs. Project URLs are UUID-only; names are display text. */
+  getProjectByRef(ref: string): Record<string, unknown> | undefined {
+    return this.getProjectByUuid(ref);
+  }
+
   /** Delete a project and everything under it (runs, scopes, findings + their status
    * events, confirm decisions). Returns true if a project was removed. */
-  deleteProject(name: string): boolean {
-    const project = this.getProject(name);
+  deleteProject(ref: string): boolean {
+    const project = this.getProjectByRef(ref);
     if (!project) return false;
     const id = Number(project.id);
     this.transaction(() => {
@@ -392,7 +504,7 @@ export class MetadataStore {
     this.db
       .prepare(
         `UPDATE run SET status = ?, ended_at = ?, scopes_total = ?, scopes_audited = ?, scopes_pending = ?, findings_total = ?
-         WHERE id = ?`,
+         WHERE id = ? AND status = 'running'`,
       )
       .run(
         status,
@@ -426,6 +538,13 @@ export class MetadataStore {
     return Number(info.changes);
   }
 
+  reconcileTerminalRun(id: number, status: RunStatus): number {
+    const info = this.db
+      .prepare("UPDATE run SET status = ?, ended_at = COALESCE(ended_at, ?) WHERE id = ? AND status != 'running'")
+      .run(status, now(), id);
+    return Number(info.changes);
+  }
+
   /** Live coverage update mid-run (so a UI shows mapped/audited progress as digs land). */
   updateRunCoverage(runId: number, coverage: Coverage): void {
     this.db
@@ -441,6 +560,24 @@ export class MetadataStore {
     this.db
       .prepare("UPDATE run SET run_scopes_done = ?, run_scopes_target = ?, dig_started_at = COALESCE(dig_started_at, ?) WHERE id = ?")
       .run(done, target, now(), runId);
+  }
+
+  updateRunScopesTarget(runId: number, target: number): void {
+    this.db.prepare("UPDATE run SET run_scopes_target = ? WHERE id = ?").run(target, runId);
+  }
+
+  /** Record one post-dig STAGE's outcome on the run (synthesis / differential / refutation /
+   * discharge-challenge), merged into stages_json keyed by stage name, for the funnel view. */
+  recordStage(runId: number, name: string, info: Record<string, unknown>): void {
+    const row = this.db.prepare("SELECT stages_json FROM run WHERE id = ?").get(runId) as { stages_json?: string } | undefined;
+    let stages: Record<string, unknown> = {};
+    try { if (row?.stages_json) stages = JSON.parse(row.stages_json) as Record<string, unknown>; } catch { /* reset on corruption */ }
+    const ts = now();
+    const previous = stages[name] && typeof stages[name] === "object" ? (stages[name] as Record<string, unknown>) : {};
+    const previousStartedAt = typeof previous.startedAt === "string" ? previous.startedAt : undefined;
+    const startedAt = previousStartedAt ?? (info.status === "running" ? ts : undefined);
+    stages[name] = { ...previous, ...info, ...(startedAt ? { startedAt } : {}), at: ts };
+    this.db.prepare("UPDATE run SET stages_json = ? WHERE id = ?").run(JSON.stringify(stages), runId);
   }
 
   listRuns(projectId?: number, limit?: number): Array<Record<string, unknown>> {
@@ -462,6 +599,20 @@ export class MetadataStore {
 
   getRun(id: number): Record<string, unknown> | undefined {
     return this.db.prepare("SELECT * FROM run WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  }
+
+  latestPrepareAfterRun(projectId: number, runId: number): Record<string, unknown> | undefined {
+    return this.db
+      .prepare(
+        `SELECT newer.* FROM run newer
+         JOIN run source ON source.id = ?
+         WHERE newer.project_id = ?
+           AND newer.kind = 'prepare'
+           AND newer.started_at > source.started_at
+         ORDER BY newer.started_at DESC
+         LIMIT 1`,
+      )
+      .get(runId, projectId) as Record<string, unknown> | undefined;
   }
 
   /** Delete a run and its run-scoped children (findings + their status events, confirm
@@ -505,9 +656,54 @@ export class MetadataStore {
     });
   }
 
+  /** Replace the active project inventory with a complete scope snapshot.
+   * Map/dig checkpoints report the full current inventory, not a partial diff; replacing
+   * prevents obsolete scopes from older maps from leaking into current coverage. */
+  replaceScopes(projectId: number, scopes: ScopeRow[]): void {
+    const upsert = this.db.prepare(
+      `INSERT INTO scope(project_id, scope_id, title, location, score, priority, status, dig_seconds, updated_at)
+       VALUES (?, ?, ?, ?, ?, COALESCE(?, 0), ?, ?, ?)
+       ON CONFLICT(project_id, scope_id) DO UPDATE SET
+         title = excluded.title, location = excluded.location, score = excluded.score,
+         status = excluded.status,
+         priority = COALESCE(excluded.priority, scope.priority),
+         dig_seconds = COALESCE(excluded.dig_seconds, scope.dig_seconds),
+         updated_at = CASE WHEN scope.status != excluded.status THEN excluded.updated_at ELSE scope.updated_at END`,
+    );
+    const ts = now();
+    this.transaction(() => {
+      if (scopes.length === 0) {
+        this.db.prepare("DELETE FROM scope WHERE project_id = ?").run(projectId);
+        return;
+      }
+      for (const s of scopes) {
+        upsert.run(projectId, s.scopeId, s.title ?? null, s.location ?? null, s.score ?? null, s.priority ?? null, s.status, s.digSeconds ?? null, ts);
+      }
+      const ids = scopes.map((scope) => scope.scopeId);
+      const placeholders = ids.map(() => "?").join(", ");
+      this.db.prepare(`DELETE FROM scope WHERE project_id = ? AND scope_id NOT IN (${placeholders})`).run(projectId, ...ids);
+    });
+  }
+
   listScopes(projectId: number): Array<Record<string, unknown>> {
     // dig order: manual priority first, then score (status groups the display).
     return this.db.prepare("SELECT * FROM scope WHERE project_id = ? ORDER BY status, priority DESC, score DESC").all(projectId) as Array<Record<string, unknown>>;
+  }
+
+  countScopes(projectId: number): number {
+    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM scope WHERE project_id = ?").get(projectId) as { n: number }).n);
+  }
+
+  countScopesByStatus(projectId: number, status: string): number {
+    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM scope WHERE project_id = ? AND status = ?").get(projectId, status) as { n: number }).n);
+  }
+
+  queryScopes(projectId: number, opts: { limit?: number; offset?: number } = {}): Array<Record<string, unknown>> {
+    const limit = Math.max(1, Math.floor(opts.limit ?? 50));
+    const offset = Math.max(0, Math.floor(opts.offset ?? 0));
+    return this.db
+      .prepare("SELECT * FROM scope WHERE project_id = ? ORDER BY status, priority DESC, score DESC LIMIT ? OFFSET ?")
+      .all(projectId, limit, offset) as Array<Record<string, unknown>>;
   }
 
   scopeProgress(projectId: number): Coverage {
@@ -533,6 +729,21 @@ export class MetadataStore {
     return Number(info.changes);
   }
 
+  /** Clear the current scope projection when project materials are refreshed. Run artifacts keep
+   * the historical inventory; this table represents the active material snapshot only. */
+  clearScopes(projectId: number): number {
+    const info = this.db.prepare("DELETE FROM scope WHERE project_id = ?").run(projectId);
+    return Number(info.changes);
+  }
+
+  /** Recover scopes left in-flight by a killed daemon or interrupted server process. */
+  resetAuditingScopes(projectId: number): number {
+    const info = this.db
+      .prepare("UPDATE scope SET status = 'pending', updated_at = ? WHERE project_id = ? AND status = 'auditing'")
+      .run(now(), projectId);
+    return Number(info.changes);
+  }
+
   /** Hand-order the dig queue: bump a scope's PRIORITY one above the project's current max so the
    * dig (which orders by priority then score) audits it next. Leaves the map's score untouched —
    * priority is a separate manual-ordering axis. Returns true if the scope exists. */
@@ -552,24 +763,53 @@ export class MetadataStore {
   upsertFindings(projectId: number, runId: number, findings: FindingRow[], reason?: string): void {
     this.transaction(() => {
       for (const f of findings) {
+        const ts = now();
+        // VERIFY verdict: flip the ORIGINAL suspected finding in place (cross-run). The link is
+        // carried (originId = that finding's DB id), so a verify session that renamed the title still
+        // updates the right row — status + the PoC writeup — instead of inserting a duplicate.
+        if (f.originId != null) {
+          const orig = this.db.prepare("SELECT id, status FROM finding WHERE id = ?").get(f.originId) as { id: number; status: string } | undefined;
+          if (orig) {
+            this.db
+              .prepare(
+                `UPDATE finding SET status = ?, report_path = COALESCE(?, report_path),
+                   report_markdown = COALESCE(NULLIF(?, ''), report_markdown),
+                   description = COALESCE(NULLIF(?, ''), description), evidence = COALESCE(NULLIF(?, ''), evidence),
+                   exploit_sketch = COALESCE(NULLIF(?, ''), exploit_sketch), fix = COALESCE(NULLIF(?, ''), fix),
+                   confidence = COALESCE(?, confidence), updated_at = ? WHERE id = ?`,
+              )
+              .run(f.status, f.reportPath ?? null, f.reportMarkdown ?? null, f.description ?? null, f.evidence ?? null, f.exploitSketch ?? null, f.fix ?? null, f.confidence ?? null, ts, orig.id);
+            if (orig.status !== f.status) this.recordStatusEvent(orig.id, orig.status, f.status, reason, runId, ts);
+            continue;
+          }
+          // stale origin id (the row was deleted) -> fall through and capture the verdict as its own row
+        }
         const existing = this.db
           .prepare("SELECT id, status FROM finding WHERE run_id = ? AND finding_key = ?")
           .get(runId, f.findingKey) as { id: number; status: string } | undefined;
-        const ts = now();
         if (!existing) {
           const info = this.db
             .prepare(
-              `INSERT INTO finding(project_id, run_id, finding_key, title, location, severity, status, report_path, scope_id, created_at, updated_at)
-               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+              `INSERT INTO finding(project_id, run_id, finding_key, title, location, severity, status, report_path, report_markdown, scope_id, description, evidence, exploit_sketch, fix, confidence, created_at, updated_at)
+               VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
             )
-            .run(projectId, runId, f.findingKey, f.title ?? null, f.location ?? null, f.severity ?? null, f.status, f.reportPath ?? null, f.scopeId ?? null, ts, ts);
+            .run(projectId, runId, f.findingKey, f.title ?? null, f.location ?? null, f.severity ?? null, f.status, f.reportPath ?? null, f.reportMarkdown ?? null, f.scopeId ?? null, f.description ?? null, f.evidence ?? null, f.exploitSketch ?? null, f.fix ?? null, f.confidence ?? null, ts, ts);
           this.recordStatusEvent(Number(info.lastInsertRowid), null, f.status, reason, runId, ts);
         } else {
+          // COALESCE(NULLIF(?, ''), col): keep the stored content when a later re-persist (a status
+          // flip through differential / refutation / appeal) carries an empty value, so detail is
+          // never wiped — mirrors the dig_seconds keep-on-omit rule.
           this.db
             .prepare(
-              `UPDATE finding SET title = ?, location = ?, severity = ?, status = ?, report_path = ?, scope_id = ?, updated_at = ? WHERE id = ?`,
+              `UPDATE finding SET title = ?, location = ?, severity = ?, status = ?, report_path = ?, report_markdown = COALESCE(NULLIF(?, ''), report_markdown), scope_id = ?,
+                 description = COALESCE(NULLIF(?, ''), description),
+                 evidence = COALESCE(NULLIF(?, ''), evidence),
+                 exploit_sketch = COALESCE(NULLIF(?, ''), exploit_sketch),
+                 fix = COALESCE(NULLIF(?, ''), fix),
+                 confidence = COALESCE(?, confidence),
+                 updated_at = ? WHERE id = ?`,
             )
-            .run(f.title ?? null, f.location ?? null, f.severity ?? null, f.status, f.reportPath ?? null, f.scopeId ?? null, ts, existing.id);
+            .run(f.title ?? null, f.location ?? null, f.severity ?? null, f.status, f.reportPath ?? null, f.reportMarkdown ?? null, f.scopeId ?? null, f.description ?? null, f.evidence ?? null, f.exploitSketch ?? null, f.fix ?? null, f.confidence ?? null, ts, existing.id);
           if (existing.status !== f.status) {
             this.recordStatusEvent(existing.id, existing.status, f.status, reason, runId, ts);
           }
@@ -588,6 +828,10 @@ export class MetadataStore {
     return this.db.prepare("SELECT * FROM finding WHERE project_id = ? ORDER BY updated_at DESC").all(projectId) as Array<Record<string, unknown>>;
   }
 
+  getFinding(id: number): Record<string, unknown> | undefined {
+    return this.db.prepare("SELECT f.*, p.name AS project_name, p.uuid AS project_uuid FROM finding f JOIN project p ON p.id = f.project_id WHERE f.id = ?").get(id) as Record<string, unknown> | undefined;
+  }
+
   // --- global (cross-project) bug view -------------------------------------
 
   /** Findings across ALL projects (joined with the project name), newest first, optionally
@@ -600,7 +844,7 @@ export class MetadataStore {
     const limit = Math.max(1, Math.floor(opts.limit ?? 200));
     const offset = Math.max(0, Math.floor(opts.offset ?? 0));
     return this.db
-      .prepare("SELECT f.*, p.name AS project_name FROM finding f JOIN project p ON p.id = f.project_id " + where + " ORDER BY f.updated_at DESC LIMIT ? OFFSET ?")
+      .prepare("SELECT f.*, p.name AS project_name, p.uuid AS project_uuid FROM finding f JOIN project p ON p.id = f.project_id " + where + " ORDER BY f.updated_at DESC LIMIT ? OFFSET ?")
       .all(...params, limit, offset) as Array<Record<string, unknown>>;
   }
 
@@ -621,28 +865,39 @@ export class MetadataStore {
     return this.db.prepare("UPDATE finding SET tracking_status = ? WHERE id = ?").run(status || null, id).changes > 0;
   }
 
+  /** Persist a user-facing formal report for one finding. The project id guard preserves
+   * server/daemon separation: a daemon can only update findings for the run's project. */
+  setFindingReport(projectId: number, findingId: number, markdown: string): boolean {
+    return this.db.prepare("UPDATE finding SET report_markdown = ?, updated_at = ? WHERE project_id = ? AND id = ?").run(markdown, now(), projectId, findingId).changes > 0;
+  }
+
   // --- per-finding confirm (real-target reproduction) -----------------------
 
   /** The project's findings that are confirmed by the audit (source-level) but NOT yet decided on
    * the real target — the work list for a project-level confirm. Joins the source run dir so the
    * confirm can load each finding's full PoC/fix data. confirm_status NULL = pending. */
-  pendingConfirmable(projectId: number): Array<{ finding_key: string; title: string; run_dir: string | null }> {
+  pendingConfirmable(projectId: number): Array<{ finding_key: string; title: string; run_id: number | null; run_dir: string | null }> {
     return this.db
       .prepare(
-        `SELECT f.finding_key, f.title, r.run_dir
+        `SELECT f.finding_key, f.title, f.run_id, r.run_dir
            FROM finding f LEFT JOIN run r ON r.id = f.run_id
           WHERE f.project_id = ? AND f.confirm_status IS NULL
             AND f.status IN ('confirmed-differential','confirmed-executable','confirmed-source')
           ORDER BY f.status, f.id`,
       )
-      .all(projectId) as Array<{ finding_key: string; title: string; run_dir: string | null }>;
+      .all(projectId) as Array<{ finding_key: string; title: string; run_id: number | null; run_dir: string | null }>;
   }
 
-  /** One confirmable finding by id (for a finding-level confirm) — its key + source run dir. */
-  getConfirmable(findingId: number): { finding_key: string; title: string; run_dir: string | null } | undefined {
+  /** One pending confirmable finding by project + id (for finding-level confirm). */
+  getConfirmable(projectId: number, findingId: number): { finding_key: string; title: string; run_id: number | null; run_dir: string | null } | undefined {
     return this.db
-      .prepare("SELECT f.finding_key, f.title, r.run_dir FROM finding f LEFT JOIN run r ON r.id = f.run_id WHERE f.id = ?")
-      .get(findingId) as { finding_key: string; title: string; run_dir: string | null } | undefined;
+      .prepare(
+        `SELECT f.finding_key, f.title, f.run_id, r.run_dir
+           FROM finding f LEFT JOIN run r ON r.id = f.run_id
+          WHERE f.project_id = ? AND f.id = ? AND f.confirm_status IS NULL
+            AND f.status IN ('confirmed-differential','confirmed-executable','confirmed-source')`,
+      )
+      .get(projectId, findingId) as { finding_key: string; title: string; run_id: number | null; run_dir: string | null } | undefined;
   }
 
   /** Set a finding's real-target confirm state, addressed by its content key within a project
@@ -688,8 +943,10 @@ export class MetadataStore {
       // a confirm run's decision sheet is rewritten wholesale, so replace its rows
       this.db.prepare("DELETE FROM confirm_decision WHERE run_id = ?").run(runId);
       const stmt = this.db.prepare(
-        `INSERT INTO confirm_decision(project_id, run_id, bug, reproduced, recommendation, members_json, decision_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        `INSERT INTO confirm_decision(project_id, run_id, bug, reproduced, recommendation, members_json,
+          distinct_fix, repro_evidence, corroboration, novelty, human_gates, merged_from_json,
+          repro_command_id, decision_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const ts = now();
       // The confirm work-list ids ARE finding content keys, so a decision's members map straight
@@ -697,16 +954,46 @@ export class MetadataStore {
       // confirm_status (reproduced -> reproduced, settled-but-not -> not-reproduced). This is what
       // makes confirm finding-grained + resumable (a later confirm skips non-NULL confirm_status).
       const setConfirm = this.db.prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND finding_key = ?");
+      const setReport = this.db.prepare("UPDATE finding SET report_markdown = COALESCE(NULLIF(?, ''), report_markdown) WHERE project_id = ? AND finding_key = ?");
       for (const r of rows) {
-        stmt.run(projectId, runId, r.bug, r.reproduced ?? null, r.recommendation ?? null, jsonOrNull(r.members), r.decisionPath ?? decisionPath ?? null, ts);
+        stmt.run(
+          projectId,
+          runId,
+          r.bug,
+          r.reproduced ?? null,
+          r.recommendation ?? null,
+          jsonOrNull(r.members),
+          r.distinctFix ?? null,
+          r.reproEvidence ?? null,
+          r.corroboration ?? null,
+          r.novelty ?? null,
+          r.humanGates ?? null,
+          jsonOrNull(r.mergedFrom),
+          r.reproCommandId ?? null,
+          r.decisionPath ?? decisionPath ?? null,
+          ts,
+        );
         const outcome = r.reproduced === "yes" ? "reproduced" : r.reproduced === "no" ? "not-reproduced" : null;
-        if (outcome) for (const key of r.members ?? []) setConfirm.run(outcome, projectId, key);
+        for (const member of r.members ?? []) {
+          for (const key of confirmMemberKeys(member)) {
+            if (outcome) setConfirm.run(outcome, projectId, key);
+            if (r.reportMarkdown) setReport.run(r.reportMarkdown, projectId, key);
+          }
+        }
       }
     });
   }
 
   listConfirmDecisions(projectId: number): Array<Record<string, unknown>> {
     return this.db.prepare("SELECT * FROM confirm_decision WHERE project_id = ? ORDER BY created_at DESC").all(projectId) as Array<Record<string, unknown>>;
+  }
+
+  listConfirmDecisionsForFinding(projectId: number, findingKey: string): Array<Record<string, unknown>> {
+    const key = findingKey.toLowerCase();
+    return this.listConfirmDecisions(projectId).filter((row) => {
+      const members = parseJsonArray(row.members_json);
+      return members.some((member) => confirmMemberKeys(String(member)).some((candidate) => candidate.toLowerCase() === key));
+    });
   }
 
   /** Count bugs that actually reproduced on the real target (confirm's real output). */
@@ -723,6 +1010,29 @@ export class MetadataStore {
     return { id: Number(info.lastInsertRowid), token };
   }
 
+  /** Reuse the local auto-daemon identity across `flounder ui` restarts.
+   * Prefer a local daemon already selected by a project so queued/pinned work remains claimable. */
+  getOrCreateLocalDaemonToken(): { id: number; token: string; reused: boolean } {
+    const row = this.db
+      .prepare(
+        `SELECT id, token FROM daemon
+         WHERE name = 'local' OR name LIKE 'local-%'
+         ORDER BY
+           CASE WHEN id IN (SELECT daemon_id FROM project WHERE daemon_id IS NOT NULL) THEN 0 ELSE 1 END,
+           COALESCE(last_seen_at, created_at) DESC,
+           id DESC
+         LIMIT 1`,
+      )
+      .get() as { id: number; token: string } | undefined;
+    if (row) return { id: Number(row.id), token: String(row.token), reused: true };
+    const created = this.createDaemonToken("local");
+    return { ...created, reused: false };
+  }
+
+  getDaemon(id: number): Record<string, unknown> | undefined {
+    return this.db.prepare("SELECT id, name, capabilities, workspace, last_seen_at, created_at FROM daemon WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  }
+
   getDaemonByToken(token: string): Record<string, unknown> | undefined {
     return this.db.prepare("SELECT * FROM daemon WHERE token = ?").get(token) as Record<string, unknown> | undefined;
   }
@@ -734,7 +1044,9 @@ export class MetadataStore {
   }
 
   listDaemons(): Array<Record<string, unknown>> {
-    return this.db.prepare("SELECT id, name, capabilities, workspace, last_seen_at, created_at FROM daemon ORDER BY created_at").all() as Array<Record<string, unknown>>;
+    return this.db
+      .prepare("SELECT id, name, capabilities, workspace, last_seen_at, created_at FROM daemon ORDER BY COALESCE(last_seen_at, created_at) DESC, id DESC")
+      .all() as Array<Record<string, unknown>>;
   }
 
   /** Rename a registered daemon (operator-facing; the token is unchanged). */
@@ -748,14 +1060,17 @@ export class MetadataStore {
     let removed = false;
     this.transaction(() => {
       this.db.prepare("UPDATE job SET daemon_id = NULL WHERE daemon_id = ?").run(id);
+      this.db.prepare("UPDATE project SET daemon_id = NULL WHERE daemon_id = ?").run(id);
       removed = this.db.prepare("DELETE FROM daemon WHERE id = ?").run(id).changes > 0;
     });
     return removed;
   }
 
-  enqueueJob(project: string, spec: unknown): number {
+  enqueueJob(project: string, spec: unknown, daemonId?: number): number {
     const ts = now();
-    const info = this.db.prepare("INSERT INTO job(project, spec_json, status, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?)").run(project, JSON.stringify(spec), ts, ts);
+    const info = this.db
+      .prepare("INSERT INTO job(project, spec_json, status, daemon_id, created_at, updated_at) VALUES (?, ?, 'queued', ?, ?, ?)")
+      .run(project, JSON.stringify(spec), daemonId ?? null, ts, ts);
     return Number(info.lastInsertRowid);
   }
 
@@ -763,7 +1078,7 @@ export class MetadataStore {
   claimJob(daemonId: number): { id: number; project: string; spec: unknown } | undefined {
     let claimed: { id: number; project: string; spec_json: string } | undefined;
     this.transaction(() => {
-      const row = this.db.prepare("SELECT id, project, spec_json FROM job WHERE status = 'queued' ORDER BY created_at LIMIT 1").get() as
+      const row = this.db.prepare("SELECT id, project, spec_json FROM job WHERE status = 'queued' AND (daemon_id IS NULL OR daemon_id = ?) ORDER BY created_at LIMIT 1").get(daemonId) as
         | { id: number; project: string; spec_json: string }
         | undefined;
       if (!row) return;
@@ -781,6 +1096,20 @@ export class MetadataStore {
     this.db.prepare("UPDATE job SET status = ?, error = ?, updated_at = ? WHERE id = ?").run(status, error ?? null, now(), jobId);
   }
 
+  cancelRunJob(jobId: number, error = "canceled by operator"): boolean {
+    const info = this.db
+      .prepare("UPDATE job SET status = 'canceled', cancel = 1, error = ?, updated_at = ? WHERE id = ? AND status IN ('queued','dispatched','running')")
+      .run(error, now(), jobId);
+    return Number(info.changes) > 0;
+  }
+
+  cancelJob(jobId: number, error = "canceled by operator"): boolean {
+    const info = this.db
+      .prepare("UPDATE job SET status = 'canceled', cancel = 1, error = ?, updated_at = ? WHERE id = ? AND status IN ('queued','dispatched','running')")
+      .run(error, now(), jobId);
+    return Number(info.changes) > 0;
+  }
+
   requestJobCancel(jobId: number): void {
     this.db.prepare("UPDATE job SET cancel = 1, updated_at = ? WHERE id = ?").run(now(), jobId);
   }
@@ -791,6 +1120,10 @@ export class MetadataStore {
 
   getJobByRun(runId: number): Record<string, unknown> | undefined {
     return this.db.prepare("SELECT * FROM job WHERE run_id = ?").get(runId) as Record<string, unknown> | undefined;
+  }
+
+  touchJobByRun(runId: number): void {
+    this.db.prepare("UPDATE job SET updated_at = ? WHERE run_id = ? AND status IN ('dispatched','running')").run(now(), runId);
   }
 
   /** Job ids flagged for cancel that a daemon is still working — daemons poll this to abort. */
@@ -902,6 +1235,13 @@ function jsonParseOrNull(value: string): unknown {
   } catch {
     return null;
   }
+}
+
+function parseJsonArray(value: unknown): unknown[] {
+  if (Array.isArray(value)) return value;
+  if (typeof value !== "string" || !value.trim()) return [];
+  const parsed = jsonParseOrNull(value);
+  return Array.isArray(parsed) ? parsed : [];
 }
 
 function toProviderProfile(row: Record<string, unknown>): ProviderProfile {

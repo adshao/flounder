@@ -4,6 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import type { LlmClient } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
+import type { ThinkingLevel } from "../config.js";
 
 export class CodexCliClient implements LlmClient {
   constructor(private readonly logger?: RunLogger) {}
@@ -14,7 +15,7 @@ export class CodexCliClient implements LlmClient {
     user: string;
     model?: string;
     maxTokens?: number;
-    thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh";
+    thinkingLevel?: ThinkingLevel;
     agentic?: boolean;
   }): Promise<string> {
     if (!input.model) throw new Error("model is required");
@@ -26,7 +27,7 @@ export class CodexCliClient implements LlmClient {
       model: input.model,
       workdir: tmp,
       outputFile,
-      ...(input.thinkingLevel ? { thinkingLevel: input.thinkingLevel } : {}),
+      ...(input.thinkingLevel && input.thinkingLevel !== "off" ? { thinkingLevel: input.thinkingLevel } : {}),
       ...(webSearch ? { webSearch } : {}),
     });
     let eventChain = Promise.resolve();
@@ -100,7 +101,7 @@ export function buildCodexExecArgs(input: {
   model: string;
   workdir: string;
   outputFile: string;
-  thinkingLevel?: "minimal" | "low" | "medium" | "high" | "xhigh";
+  thinkingLevel?: Exclude<ThinkingLevel, "off">;
   webSearch?: "live" | "cached" | "disabled";
 }): string[] {
   const args = [

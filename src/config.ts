@@ -1,4 +1,7 @@
+import os from "node:os";
+import path from "node:path";
 import type { ProjectContext } from "./types.js";
+import type { SandboxBackend, SandboxExecutionOptions, SandboxNetworkMode } from "./security/sandbox.js";
 
 export interface AuditorConfig {
   targetName: string;
@@ -14,12 +17,22 @@ export interface AuditorConfig {
   provider: string;
   auditModel: string;
   maxTokens: number;
-  thinkingLevel: "minimal" | "low" | "medium" | "high" | "xhigh";
+  thinkingLevel: ThinkingLevel;
   projectContext: ProjectContext;
   // Sandbox limits shared with the bash tool and warm-up.
   reproductionCommandTimeoutMs: number;
   reproductionMaxFileBytes: number;
   reproductionMaxLogBytes: number;
+  // Execution isolation for build/test/confirm commands. `auto` uses an OCI
+  // container when available and refuses to fall back to host execution unless
+  // explicitly allowed (tests/mock runs may opt in).
+  sandboxBackend: SandboxBackend;
+  sandboxImage: string;
+  sandboxAllowHostFallback: boolean;
+  sandboxPrepareNetwork: SandboxNetworkMode;
+  sandboxConfirmNetwork: SandboxNetworkMode;
+  sandboxMemoryMb?: number;
+  sandboxCpus?: number;
   // Audit controls.
   auditMaxSteps: number;
   auditScopeNote?: string;
@@ -49,6 +62,14 @@ export interface AuditorConfig {
   // Re-enumerate the scope inventory from scratch instead of resuming the
   // persisted one (which would otherwise continue with the next un-audited scopes).
   auditRemap: boolean;
+  // After the per-scope dig, run one cross-scope SYNTHESIS pass (sink-driven composition) to find
+  // bugs that only exist in the COMPOSITION of components. Default on for map→dig; set false to skip.
+  auditSynthesize?: boolean;
+  // Challenge DISCHARGED obligations with an independent skeptic (the false-negative guard,
+  // symmetric to refutation); an unsound discharge is re-opened as a candidate. Default on.
+  auditChallengeDischarges?: boolean;
+  // Cap on how many discharges the challenge reviews per run (highest-severity first).
+  auditChallengeMax?: number;
   // `flounder map`: run only the MAP phase (enumerate + persist the scope inventory) and
   // stop — no dig. The resumable `flounder audit` then digs from the persisted inventory.
   auditMapOnly: boolean;
@@ -89,7 +110,20 @@ export interface RoleModel {
   thinking: AuditorConfig["thinkingLevel"];
 }
 
-const THINKING_LEVELS = ["minimal", "low", "medium", "high", "xhigh"] as const;
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+
+export function flounderHomeDir(): string {
+  return path.join(os.homedir(), ".flounder");
+}
+
+export function defaultOutputDir(): string {
+  return flounderHomeDir();
+}
+
+export function defaultWorkspaceDir(): string {
+  return path.join(flounderHomeDir(), "workspace");
+}
 
 /** Resolve the effective model for a phase: role entry → `default` entry → top-level config. */
 export function resolveRole(cfg: AuditorConfig, role: AuditRole): RoleModel {
@@ -132,7 +166,7 @@ export function defaultConfig(): AuditorConfig {
     targetName: "target",
     sourcePaths: [],
     corpusPaths: [],
-    outputDir: "runs",
+    outputDir: defaultOutputDir(),
     provider: "openai-codex",
     auditModel: "gpt-5.5",
     maxTokens: 8000,
@@ -141,15 +175,20 @@ export function defaultConfig(): AuditorConfig {
     reproductionCommandTimeoutMs: 120_000,
     reproductionMaxFileBytes: 200_000,
     reproductionMaxLogBytes: 40_000,
-    auditMaxSteps: 40,
+    sandboxBackend: readSandboxBackend(process.env.FLOUNDER_SANDBOX_BACKEND) ?? "auto",
+    sandboxImage: process.env.FLOUNDER_SANDBOX_IMAGE || "flounder-sandbox:latest",
+    sandboxAllowHostFallback: process.env.FLOUNDER_ALLOW_HOST_EXECUTION === "1",
+    sandboxPrepareNetwork: readSandboxNetwork(process.env.FLOUNDER_PREPARE_NETWORK) ?? "enabled",
+    sandboxConfirmNetwork: readSandboxNetwork(process.env.FLOUNDER_CONFIRM_NETWORK) ?? "enabled",
+    auditMaxSteps: Number.POSITIVE_INFINITY,
     auditPrepare: true,
     auditPrepareTimeoutMs: 600_000,
     auditRefute: true,
     auditAppeal: true,
     auditDeep: false,
-    auditMapSteps: 20,
-    auditDigSteps: 30,
-    auditMaxScopes: 10,
+    auditMapSteps: Number.POSITIVE_INFINITY,
+    auditDigSteps: Number.POSITIVE_INFINITY,
+    auditMaxScopes: 30,
     auditDigSamples: 1,
     auditDigConcurrency: 1,
     auditRemap: false,
@@ -159,6 +198,31 @@ export function defaultConfig(): AuditorConfig {
     prepareMode: false,
     dryRun: false,
   };
+}
+
+export function sandboxExecutionOptions(cfg: AuditorConfig, network: SandboxNetworkMode): SandboxExecutionOptions {
+  return {
+    backend: cfg.sandboxBackend,
+    image: cfg.sandboxImage,
+    allowHostFallback: cfg.sandboxAllowHostFallback,
+    network,
+    ...(cfg.sandboxMemoryMb !== undefined ? { memoryMb: cfg.sandboxMemoryMb } : {}),
+    ...(cfg.sandboxCpus !== undefined ? { cpus: cfg.sandboxCpus } : {}),
+  };
+}
+
+export function sandboxNetworkForPurpose(cfg: AuditorConfig, purpose: "inspect" | "build" | "confirm"): SandboxNetworkMode {
+  if (cfg.prepareMode || cfg.confirmMode) return cfg.sandboxConfirmNetwork;
+  if (purpose === "build") return cfg.sandboxPrepareNetwork;
+  return "none";
+}
+
+function readSandboxBackend(value: unknown): SandboxBackend | undefined {
+  return value === "auto" || value === "oci" || value === "host" ? value : undefined;
+}
+
+function readSandboxNetwork(value: unknown): SandboxNetworkMode | undefined {
+  return value === "none" || value === "enabled" ? value : undefined;
 }
 
 const MAX_CONTEXT_LIST_ITEMS = 24;

@@ -1,6 +1,6 @@
-# Cairo And Starknet Audits
+# Optional Cairo / Starknet Notes
 
-`configs/cairo-starknet-audit.default.json` provides optional context for authorized Cairo and Starknet audits, including Starknet OS, Cairo contracts, and StarkGate-style bridge components.
+`configs/cairo-starknet-audit.default.json` provides optional context for authorized Cairo and Starknet audits, including Starknet OS, Cairo contracts, and StarkGate-style bridge components. This is an example of stack-specific context, not a separate Flounder product mode and not a default strategy.
 
 In audit mode, the profile is context, not a checklist. The agent still decides what to read, suspect, test, and report. Deterministic profiles, provenance facts, source indexes, and local seeders are planning aids only; findings must come from the agent and local evidence.
 
@@ -10,7 +10,7 @@ In audit mode, the profile is context, not a checklist. The agent still decides 
 - Optional domain hints for entrypoint authority, L1/L2 bridge binding, state transition integrity, OS output commitment, syscall context binding, class-hash binding, and resource accounting.
 - Cairo/Starknet provenance facts for entrypoints, syscalls, storage reads and writes, dict/state update flows, L1/L2 messages, class-hash binding, resource accounting, block context, and OS output commitments.
 
-## Recommended Audit
+## Example With The Optional Profile
 
 ```bash
 flounder run \
@@ -18,7 +18,7 @@ flounder run \
   --target starknet-target-audit \
   --source <target>/src <target>/crates <target>/packages \
   --corpus <target>/README.md <target>/docs <target>/specs \
-  --provider openai \
+  --provider openai-codex \
   --model gpt-5.5 \
   --thinking xhigh \
   --map-steps 60 --dig-steps 60

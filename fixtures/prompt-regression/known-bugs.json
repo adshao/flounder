@@ -1,0 +1,298 @@
+{
+  "version": 2,
+  "description": "Known-bug prompt regression registry. Fixtures are minimized public-safe targets; local reports and run artifacts are evidence sources, not prompt input.",
+  "promptContract": {
+    "requiredNeedles": [
+      {
+        "needle": "what MUST this equal",
+        "capability": "trusted value binding"
+      },
+      {
+        "needle": "DESIGN INTENT",
+        "capability": "derive obligations from design material"
+      },
+      {
+        "needle": "wrong referent",
+        "capability": "do not accept a constraint to the wrong source value"
+      },
+      {
+        "needle": "canonical/range-checked",
+        "capability": "check canonical decoding and ranges at serialization boundaries"
+      },
+      {
+        "needle": "silent normalization",
+        "capability": "catch decoders that change the checked statement"
+      },
+      {
+        "needle": "ACTUAL vulnerable code path",
+        "capability": "execution confirmation must exercise the real path"
+      },
+      {
+        "needle": "only capabilities a real attacker actually has",
+        "capability": "attacker-real PoC construction"
+      },
+      {
+        "needle": "LEGITIMATE authority",
+        "capability": "trace effect sinks back to legitimate authority"
+      },
+      {
+        "needle": "count/length/index",
+        "capability": "trace effect cardinality back to the same authority or statement"
+      }
+    ],
+    "forbiddenDefaultPromptNeedles": [
+      "Orchard_Security_Bugv2",
+      "Zcash",
+      "halo2_gadgets",
+      "numRealTransactions",
+      "RollupProcessorV3",
+      "0x074ec9317d8336db37e8c348fbdd7515573ff4088239c77ab429f522509aeeb1",
+      "0xff1f2b4adb9df6fc8eafecdcbf96a2b351680455",
+      "TurboVerifier",
+      "recursive_P1",
+      "recursive_P2",
+      "Bn254Crypto",
+      "r_mod",
+      "p_mod",
+      "0x48cb7ba00d087541dc8e2b3738f80fdd1fee8ce8",
+      "0x737901bea3eeb88459df9ef1be8ff3ae1b42a2ba"
+    ]
+  },
+  "sharedControlFixtures": [
+    {
+      "path": "fixtures/prompt-regression/attacker_capability_control_untrusted_verifier.sol",
+      "purpose": "PoC-realism control: forged proofs pass only after a legitimate owner installs an untrusted verifier.",
+      "mustNotConfirm": [
+        "unprivileged attacker can forge proofs",
+        "owner-only verifier replacement is an attacker-real exploit"
+      ]
+    }
+  ],
+  "cases": [
+    {
+      "id": "zcash-orchard-halo2-missing-constraint",
+      "caseVersion": 1,
+      "label": "Zcash Orchard / Halo2 missing constraint",
+      "bugClass": "trusted witness value is not constrained to the required source cell",
+      "requiredFixtures": [
+        "fixtures/halo2_missing_constraint.rs",
+        "fixtures/halo2_scalar_mul_binding.rs"
+      ],
+      "positiveFixtures": [
+        "fixtures/halo2_missing_constraint.rs",
+        "fixtures/halo2_scalar_mul_binding.rs"
+      ],
+      "negativeFixtures": [
+        {
+          "path": "fixtures/prompt-regression/halo2_bound_advice_negative.rs",
+          "rationale": "Advice cells are assigned and then immediately equality-constrained to the trusted source cells."
+        }
+      ],
+      "expectedArtifacts": {
+        "pass": [
+          "fixtures/prompt-regression/expected-artifacts/zcash-orchard-halo2-missing-constraint-pass.md"
+        ],
+        "fail": [
+          "fixtures/prompt-regression/expected-artifacts/zcash-orchard-halo2-missing-constraint-fail.md"
+        ]
+      },
+      "localEvidenceSummary": "Local Orchard PDF and prior focused runs showed a missing binding between assigned advice cells and the trusted source/base value. The public fixture keeps only the generic Halo2 assignment/binding shape.",
+      "mustDetect": [
+        "assigned or witnessed cells whose later meaning depends on a trusted source value",
+        "missing equality/copy edge from the trusted source to the consumed advice cell",
+        "wrong-referent constraints that constrain a value but not the value the design requires"
+      ],
+      "mustNotAssume": [
+        "the code is safe because the surrounding library looks canonical",
+        "a nearby copy or equality edge binds the exact consumed cell without tracing the referent",
+        "the positive fixture's historical target name or report title"
+      ],
+      "acceptableFalsePositiveBoundary": "A safe assignment pattern with immediate equality to the trusted source should be discharged, not reported.",
+      "expectedLiveEvalSignals": [
+        "derive an obligation from design intent rather than code appearance",
+        "ask what assigned or witnessed cells must equal",
+        "treat an absent or wrong-referent constraint as a finding",
+        "avoid clearing the code because it is canonical or upstream"
+      ],
+      "artifactSignalGroups": [
+        {
+          "name": "assignment binding",
+          "anyOf": ["assign_advice", "assigned advice", "witnessed cell"]
+        },
+        {
+          "name": "trusted source referent",
+          "anyOf": ["trusted source", "required source", "base_x", "base value"]
+        },
+        {
+          "name": "missing or wrong constraint",
+          "anyOf": ["missing constraint", "wrong referent", "unconstrained", "not constrained"]
+        }
+      ],
+      "forbiddenArtifactSignals": [
+        "no missing constraint",
+        "safe because upstream",
+        "looks standard"
+      ],
+      "doNotInjectIntoPrompt": [
+        "Orchard_Security_Bugv2",
+        "Zcash",
+        "halo2_gadgets"
+      ]
+    },
+    {
+      "id": "aztec-2026-06-14-unbound-settlement-count",
+      "caseVersion": 1,
+      "label": "Aztec June 14 unbound settlement count",
+      "bugClass": "post-proof settlement count drives asset effects without being bound to the verified statement",
+      "requiredFixtures": [
+        "fixtures/prompt-regression/aztec_unbound_settlement_count.sol"
+      ],
+      "positiveFixtures": [
+        "fixtures/prompt-regression/aztec_unbound_settlement_count.sol"
+      ],
+      "negativeFixtures": [
+        {
+          "path": "fixtures/prompt-regression/aztec_bound_settlement_count_negative.sol",
+          "rationale": "The count that drives settlement is inside the header committed by the proof statement."
+        }
+      ],
+      "controlFixtures": [
+        {
+          "path": "fixtures/prompt-regression/attacker_capability_control_untrusted_verifier.sol",
+          "rationale": "A verifier substitution PoC is not attacker-real unless the legitimate owner is in scope."
+        }
+      ],
+      "expectedArtifacts": {
+        "pass": [
+          "fixtures/prompt-regression/expected-artifacts/aztec-2026-06-14-unbound-settlement-count-pass.md"
+        ],
+        "fail": [
+          "fixtures/prompt-regression/expected-artifacts/aztec-2026-06-14-unbound-settlement-count-fail.md"
+        ]
+      },
+      "localEvidenceSummary": "The local incident write-up reconstructs a count that drives settlement but is not part of the verified proof commitment. The minimized fixture keeps only the commitment/settlement split.",
+      "mustDetect": [
+        "count or length values that decide how many asset-effect records are processed",
+        "a verifier statement or proof commitment that omits the count used by settlement",
+        "deposit/withdrawal consequences caused by committed data being skipped or extra data being processed"
+      ],
+      "mustNotAssume": [
+        "a verifier mock that accepts arbitrary statements is a faithful proof",
+        "owner-only verifier replacement is an attacker capability",
+        "the incident transaction hash, contract name, or target address"
+      ],
+      "acceptableFalsePositiveBoundary": "A count included in the verified statement or derived from a verified field should be discharged unless another binding gap is shown.",
+      "expectedLiveEvalSignals": [
+        "map value and asset-flow sinks before deep audit",
+        "trace every count or length that drives settlement back to the proof commitment",
+        "connect a committed-but-unsettled deposit to a later withdrawal sink",
+        "confirm with an attacker-real local PoC, not a verifier stub that accepts arbitrary statements"
+      ],
+      "artifactSignalGroups": [
+        {
+          "name": "count drives settlement",
+          "anyOf": ["settlementCount", "numRealTransactions", "count that drives settlement", "settlement loop"]
+        },
+        {
+          "name": "count not bound to proof statement",
+          "anyOf": ["publicInputsHash", "proof commitment", "verified statement", "not part of the hash"]
+        },
+        {
+          "name": "asset-flow sink impact",
+          "anyOf": ["deposit", "withdrawal", "processDepositsAndWithdrawals", "mint"]
+        }
+      ],
+      "forbiddenArtifactSignals": [
+        "accept-anything verifier",
+        "no-code verifier",
+        "trusted owner",
+        "onlyOwner",
+        "does not exercise the actual vulnerable code path"
+      ],
+      "doNotInjectIntoPrompt": [
+        "numRealTransactions",
+        "RollupProcessorV3",
+        "0x074ec9317d8336db37e8c348fbdd7515573ff4088239c77ab429f522509aeeb1"
+      ]
+    },
+    {
+      "id": "aztec-2026-06-17-recursive-verifier-boundary",
+      "caseVersion": 1,
+      "label": "Aztec June 17 recursive verifier boundary",
+      "bugClass": "recursive verifier boundary silently changes the public-input statement or accumulator relation",
+      "requiredFixtures": [
+        "fixtures/prompt-regression/aztec_recursive_verifier_boundary.sol"
+      ],
+      "positiveFixtures": [
+        "fixtures/prompt-regression/aztec_recursive_verifier_boundary.sol"
+      ],
+      "negativeFixtures": [
+        {
+          "path": "fixtures/prompt-regression/aztec_recursive_verifier_boundary_negative.sol",
+          "rationale": "Public-input limbs are canonical/range checked and the accumulator is combined on the intended sides."
+        }
+      ],
+      "controlFixtures": [
+        {
+          "path": "fixtures/prompt-regression/attacker_capability_control_untrusted_verifier.sol",
+          "rationale": "An internal verifier harness with attacker-chosen verification material is not the real deployed verifier path."
+        }
+      ],
+      "expectedArtifacts": {
+        "pass": [
+          "fixtures/prompt-regression/expected-artifacts/aztec-2026-06-17-recursive-verifier-boundary-pass.md"
+        ],
+        "fail": [
+          "fixtures/prompt-regression/expected-artifacts/aztec-2026-06-17-recursive-verifier-boundary-fail.md"
+        ]
+      },
+      "localEvidenceSummary": "Local aztec-0617 run artifacts showed recursive verifier findings around accumulator pairing composition and canonical public-input decoding. The minimized fixture keeps only those generic verifier-boundary obligations.",
+      "mustDetect": [
+        "public-input limb decoding that reduces or normalizes before canonical/range checks",
+        "base-field coordinates decoded with a scalar-field modulus or the wrong domain",
+        "recursive accumulator points combined into the final pairing relation on the wrong side or sign"
+      ],
+      "mustNotAssume": [
+        "an attacker can choose verification keys, transcript challenges, or trusted verifier constants",
+        "an internal helper harness is equivalent to the deployed verifier path",
+        "target-specific names or addresses are necessary to find the bug class"
+      ],
+      "acceptableFalsePositiveBoundary": "A verifier that range-checks limbs, decodes canonical base-field coordinates, and combines accumulator points on the intended sides should be discharged.",
+      "expectedLiveEvalSignals": [
+        "derive the recursive accumulator obligation before trusting group arithmetic",
+        "check whether decoded coordinates are canonical field elements in the expected domain",
+        "notice silent modular normalization across field domains",
+        "compare the implemented pairing composition against the documented relation without relying on target names"
+      ],
+      "artifactSignalGroups": [
+        {
+          "name": "recursive accumulator obligation",
+          "anyOf": ["recursive", "accumulator", "pairing relation", "performPairing"]
+        },
+        {
+          "name": "canonical decoding and range",
+          "anyOf": ["canonical", "range", "limb", "public input"]
+        },
+        {
+          "name": "domain or modulus mismatch",
+          "anyOf": ["modulus", "field", "silent normalization", "scalar", "base"]
+        }
+      ],
+      "forbiddenArtifactSignals": [
+        "attacker-chosen VK",
+        "arbitrary challenges",
+        "not the deployed verifier path",
+        "counterfactual",
+        "internal harness"
+      ],
+      "doNotInjectIntoPrompt": [
+        "TurboVerifier",
+        "recursive_P1",
+        "recursive_P2",
+        "Bn254Crypto",
+        "r_mod",
+        "p_mod"
+      ]
+    }
+  ]
+}

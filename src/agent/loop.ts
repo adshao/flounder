@@ -2,8 +2,8 @@ import type { AuditorConfig } from "../config.js";
 import type { LlmClient } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
 import { extractJsonArray, extractJsonObject } from "../util/json.js";
-import { buildConfirmKickoff, buildDeepKickoff, buildAuditKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_SYSTEM, renderTranscript, type TranscriptStep } from "./prompts.js";
-import type { AgentTool, ToolContext } from "./tools.js";
+import { buildConfirmKickoff, buildDeepKickoff, buildAuditKickoff, buildMapKickoff, buildSynthesisKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYNTHESIS_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_SYSTEM, renderTranscript, type TranscriptStep } from "./prompts.js";
+import { describeAction, type AgentTool, type ToolContext } from "./tools.js";
 
 // Provider-agnostic ReAct driver. It runs on top of the plain text-in/text-out
 // LlmClient.complete, so it works identically for pi-ai, the CLI fallbacks, and
@@ -33,6 +33,8 @@ export async function runAuditLoop(input: {
   map?: boolean;
   /** Verify posture: confirm-or-refute ONE specific suspected finding (the claim text). */
   verify?: string;
+  /** Synthesis mode: compose per-scope deep-audit output into cross-component findings. */
+  synthesize?: string;
   /** Confirm mode: open-world reproduce/consolidate/decide over a prior run's findings (the seed text). */
   confirm?: string;
   /** Base backoff for transient-throttle retries; overridable for tests. */
@@ -42,8 +44,9 @@ export async function runAuditLoop(input: {
   // An unbounded budget (the sealed verbs' default) is capped to a large finite ceiling
   // here so this legacy/mock loop cannot spin forever if a model never emits done; the
   // continuous pi-session driver (used for real runs) handles non-finite budgets natively.
-  const maxSteps = Number.isFinite(input.maxSteps) ? input.maxSteps : 100000;
-  const systemPrompt = input.confirm ? AUDIT_CONFIRM_SYSTEM : input.verify ? AUDIT_VERIFY_SYSTEM : input.map ? MAP_SYSTEM : input.deep ? AUDIT_DEEP_SYSTEM : AUDIT_SYSTEM;
+  const unboundedSteps = !Number.isFinite(input.maxSteps);
+  const maxSteps = unboundedSteps ? 100000 : input.maxSteps;
+  const systemPrompt = input.confirm ? AUDIT_CONFIRM_SYSTEM : input.synthesize ? AUDIT_SYNTHESIS_SYSTEM : input.verify ? AUDIT_VERIFY_SYSTEM : input.map ? MAP_SYSTEM : input.deep ? AUDIT_DEEP_SYSTEM : AUDIT_SYSTEM;
   const toolsByName = new Map(input.tools.map((tool) => [tool.name, tool]));
   const kickoffCommon = {
     target: input.cfg.targetName,
@@ -55,7 +58,9 @@ export async function runAuditLoop(input: {
   };
   const kickoff = input.confirm
     ? buildConfirmKickoff({ ...kickoffCommon, confirm: input.confirm })
-    : input.verify
+    : input.synthesize
+      ? buildSynthesisKickoff({ ...kickoffCommon, synthesize: input.synthesize })
+      : input.verify
       ? buildVerifyKickoff({ ...kickoffCommon, verify: input.verify })
       : input.map
         ? buildMapKickoff(kickoffCommon)
@@ -65,7 +70,7 @@ export async function runAuditLoop(input: {
   const steps: TranscriptStep[] = [];
   let consecutiveParseErrors = 0;
 
-  const finalizeThreshold = Math.max(4, Math.floor(maxSteps * 0.35));
+  const finalizeThreshold = unboundedSteps ? 0 : Math.max(4, Math.floor(maxSteps * 0.35));
 
   // Framework guarantee: a run must not end empty. If the model never wrote
   // findings.json (it tends to keep investigating "one more lead" until cut off),
@@ -79,7 +84,7 @@ export async function runAuditLoop(input: {
     try {
       const raw = await input.llm.complete({
         tag: "audit_finalize",
-        system: AUDIT_SYSTEM,
+        system: systemPrompt,
         user: `${kickoff}\n\n===== TRANSCRIPT SO FAR =====\n${renderTranscript(steps)}\n\n===== FINALIZE =====\n${ask}`,
         model: input.cfg.auditModel,
         maxTokens: input.cfg.maxTokens,
@@ -106,7 +111,9 @@ export async function runAuditLoop(input: {
     // is cut off and records nothing. Tell it the budget every turn, and near the
     // end force it to write findings.json (findings + best hypotheses) so a deep
     // investigation always produces something.
-    const budgetLine = `You are on step ${n} of ${maxSteps} (${remaining} action${remaining === 1 ? "" : "s"} left).`;
+    const budgetLine = unboundedSteps
+      ? `You are on step ${n}. There is no fixed action cap; continue until the phase is genuinely complete, then emit done.`
+      : `You are on step ${n} of ${maxSteps} (${remaining} action${remaining === 1 ? "" : "s"} left).`;
     // Deep mode keeps checking obligations to the end — it must NOT be told to
     // stop investigating; it is told to keep findings.json current. Breadth mode
     // is told to stop opening new leads and write out its hypotheses.
@@ -203,7 +210,8 @@ export async function runAuditLoop(input: {
       observation = `error: tool "${action.tool}" failed: ${error instanceof Error ? error.message : String(error)}`;
     }
     steps.push({ n, thought: action.thought, tool: action.tool, args: action.args, observation });
-    await input.logger.event("audit_step", { step: n, tool: action.tool });
+    const a = describeAction(action.tool, action.args, observation);
+    await input.logger.event("audit_action", { step: n, tool: action.tool, detail: a.detail, ok: a.ok, result: a.result });
 
     if (input.ctx.session.finished) {
       await finalizeFindings();

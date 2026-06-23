@@ -1,5 +1,5 @@
 import { execFileSync } from "node:child_process";
-import { readdir, readFile, stat } from "node:fs/promises";
+import { lstat, readdir, readFile, stat } from "node:fs/promises";
 import path from "node:path";
 import type { Doc } from "../types.js";
 import { publicPath } from "../util/paths.js";
@@ -212,14 +212,16 @@ async function isDirectoryPath(fullPath: string): Promise<boolean> {
 async function walkOne(fullPath: string, exts: Set<string>, kind: Doc["kind"], out: Doc[], root: WalkRoot): Promise<void> {
   let info;
   try {
-    info = await stat(fullPath);
+    info = await lstat(fullPath);
   } catch {
     return;
   }
+  if (info.isSymbolicLink()) return;
 
   if (info.isDirectory()) {
     const entries = await readdir(fullPath, { withFileTypes: true });
     for (const entry of entries) {
+      if (entry.isSymbolicLink()) continue;
       if (entry.isDirectory() && SKIP_DIRS.has(entry.name)) continue;
       await walkOne(path.join(fullPath, entry.name), exts, kind, out, root);
     }

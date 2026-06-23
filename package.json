@@ -1,9 +1,17 @@
 {
-  "name": "flounder-scanner",
+  "name": "flounders",
   "version": "0.1.0",
-  "description": "Flounder — find vulnerabilities beneath the surface. A white-hat agentic security auditor built on pi-mono primitives.",
+  "description": "Autonomous white-hat security auditor for AI-driven code review, exploit construction, and execution-grounded verification.",
   "type": "module",
-  "license": "MIT",
+  "license": "AGPL-3.0-only",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/adshao/flounder.git"
+  },
+  "bugs": {
+    "url": "https://github.com/adshao/flounder/issues"
+  },
+  "homepage": "https://github.com/adshao/flounder#readme",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -21,14 +29,23 @@
     "flounder": "./dist/cli.js"
   },
   "engines": {
-    "node": ">=22"
+    "node": ">=22.20 <23"
   },
   "scripts": {
-    "build": "node scripts/clean-dist.mjs && tsc -p tsconfig.json && node scripts/copy-assets.mjs",
-    "check": "tsc -p tsconfig.json --noEmit",
+    "build": "node scripts/clean-dist.mjs && npm run build:server && npm run build:ui",
+    "build:server": "tsc -p tsconfig.json",
+    "build:ui": "npm run check:ui && vite build --config src/server/ui/vite.config.ts",
+    "check": "tsc -p tsconfig.json --noEmit && npm run check:ui",
+    "check:ui": "tsc -p src/server/ui/tsconfig.json --noEmit",
+    "dev:ui": "vite --config src/server/ui/vite.config.ts",
     "test": "npm run build && node --test tests/*.test.mjs",
+    "check:api-catalog": "npm run build && npm run check:api-catalog:dist",
+    "check:api-catalog:dist": "node scripts/check-api-catalog.mjs",
     "check:public": "node scripts/check-public-surface.mjs",
-    "verify": "npm run check && npm test && npm run mock-audit && npm run check:public",
+    "check:public:commit": "node scripts/check-public-surface.mjs --head-only",
+    "hooks:install": "git config core.hooksPath .githooks",
+    "verify": "npm run check && npm test && npm run check:api-catalog:dist && npm run mock-audit && npm run check:public",
+    "sandbox:build": "docker build -f docker/flounder-sandbox.Dockerfile -t flounder-sandbox:latest .",
     "prepack": "npm run build",
     "start": "node ./dist/cli.js",
     "mock-audit": "node scripts/mock-audit.mjs"
@@ -36,14 +53,19 @@
   "keywords": [
     "pi-package",
     "security-audit",
-    "whitehat",
+    "white-hat",
     "agent",
+    "ai-agent",
+    "autonomous-audit",
+    "vulnerability-research",
+    "code-audit",
     "solidity",
     "smart-contract",
-    "evm",
-    "defi",
     "zk",
-    "crypto"
+    "zero-knowledge",
+    "sandbox",
+    "codex",
+    "claude-code"
   ],
   "files": [
     "dist/agent/**",
@@ -66,6 +88,7 @@
     "skills/**",
     "prompts/**",
     "configs/**",
+    "docker/**",
     "docs/**",
     "fixtures/**",
     "scripts/**",
@@ -94,8 +117,16 @@
   "devDependencies": {
     "@earendil-works/pi-ai": "0.78.1",
     "@earendil-works/pi-coding-agent": "0.78.1",
-    "@types/node": "^24.0.0",
+    "@types/node": "^22.20.0",
+    "@types/react": "^19.2.17",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^6.0.2",
     "typebox": "1.2.0",
-    "typescript": "^5.9.0"
+    "typescript": "^5.9.0",
+    "vite": "^8.0.16"
+  },
+  "dependencies": {
+    "react": "^19.2.7",
+    "react-dom": "^19.2.7"
   }
 }

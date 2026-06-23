@@ -1,9 +1,10 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdtemp, stat } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { startUiServer } from "../dist/server/app.js";
+import { ensureDaemonDirectories } from "../dist/server/daemon.js";
 import { MetadataStore } from "../dist/db/store.js";
 
 // Execution is decoupled: the server owns the DB + a job queue and never runs an audit;
@@ -13,17 +14,28 @@ import { MetadataStore } from "../dist/db/store.js";
 
 async function withServerAndToken(fn) {
   const out = await mkdtemp(path.join(os.tmpdir(), "flounder-daemon-"));
-  // Mint a daemon token directly in the store (the server has no token-minting endpoint;
-  // `flounder ui` mints one for its co-located daemon, an operator mints them for remote ones).
+  // Simulate `flounder server daemon-token mint` without going through the CLI.
+  // The UI server and remote daemons both use these control-plane tokens.
   const minting = MetadataStore.openForOutput(out);
   const { token } = minting.createDaemonToken("test-daemon");
   minting.close();
 
   const server = startUiServer({ port: 0, out, host: "127.0.0.1" });
-  await new Promise((resolve) => server.once("listening", resolve));
+  if (!server.listening) await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
     await fn({ base, token, out });
+  } finally {
+    await new Promise((resolve) => server.close(resolve));
+  }
+}
+
+async function withServer(out, fn) {
+  const server = startUiServer({ port: 0, out, host: "127.0.0.1" });
+  if (!server.listening) await new Promise((resolve) => server.once("listening", resolve));
+  const base = `http://127.0.0.1:${server.address().port}`;
+  try {
+    await fn(base);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
@@ -33,6 +45,17 @@ const j = (r) => r.json();
 const ui = (base, method, p, body) => fetch(base + p, { method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}) });
 const asDaemon = (base, token, method, p, body) =>
   fetch(base + p, { method, headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+
+test("daemon: startup creates the reported product home and workspace directories", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "flounder-daemon-dirs-"));
+  const out = path.join(root, "home");
+  const workspace = path.join(root, "home", "workspace");
+
+  await ensureDaemonDirectories(out, workspace);
+
+  assert.equal((await stat(out)).isDirectory(), true);
+  assert.equal((await stat(workspace)).isDirectory(), true);
+});
 
 test("daemon: register requires a valid bearer token", async () => {
   await withServerAndToken(async ({ base, token }) => {
@@ -46,13 +69,102 @@ test("daemon: register requires a valid bearer token", async () => {
   });
 });
 
+test("daemon: remote executor restart reuses token identity and claims pinned backlog", async () => {
+  await withServerAndToken(async ({ base, token }) => {
+    const reg = await j(await asDaemon(base, token, "POST", "/api/daemon/register", { name: "remote-1" }));
+    const daemonId = reg.daemonId;
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "remote-pinned", daemonId, sourcePaths: ["."], buildRoot: "." }));
+
+    // A project pinned to an offline daemon fails loudly by default instead of creating
+    // a queued job that no connected daemon can claim.
+    const offline = await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true });
+    assert.equal(offline.status, 409);
+
+    const launched = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true, allowOfflineQueue: true }));
+    assert.equal(launched.daemonId, daemonId);
+    assert.equal(launched.daemons, 0);
+
+    // Restarting the daemon with the SAME token keeps the same daemon row/id and drains
+    // the backlog pinned to that id.
+    const regAgain = await j(await asDaemon(base, token, "POST", "/api/daemon/register", { name: "remote-1-restarted" }));
+    assert.equal(regAgain.daemonId, daemonId);
+    const claim = await j(await asDaemon(base, token, "POST", "/api/daemon/claim"));
+    assert.equal(claim.job.id, launched.jobId);
+    assert.equal(claim.job.project, "remote-pinned");
+  });
+});
+
+test("daemon: split server restart preserves remote daemon backlog", async () => {
+  const out = await mkdtemp(path.join(os.tmpdir(), "flounder-split-restart-"));
+  const minting = MetadataStore.openForOutput(out);
+  const { token } = minting.createDaemonToken("split-daemon");
+  minting.close();
+
+  let daemonId;
+  let jobId;
+  await withServer(out, async (base) => {
+    const reg = await j(await asDaemon(base, token, "POST", "/api/daemon/register", { name: "split-remote-1" }));
+    daemonId = reg.daemonId;
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "split-pinned", daemonId, sourcePaths: ["."], buildRoot: "." }));
+    const launch = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true, allowOfflineQueue: true }));
+    assert.equal(launch.daemonId, daemonId);
+    jobId = launch.jobId;
+  });
+
+  // The control-plane process is back with the same DB, but the executor is a
+  // separate process. Re-registering with the same minted token must keep the
+  // daemon id and make pre-restart queued work claimable.
+  await withServer(out, async (base) => {
+    const regAgain = await j(await asDaemon(base, token, "POST", "/api/daemon/register", { name: "split-remote-1-reconnected" }));
+    assert.equal(regAgain.daemonId, daemonId);
+    const claim = await j(await asDaemon(base, token, "POST", "/api/daemon/claim"));
+    assert.equal(claim.job.id, jobId);
+    assert.equal(claim.job.project, "split-pinned");
+  });
+});
+
+test("daemon: local auto-executor identity survives same-machine UI restart", async () => {
+  const out = await mkdtemp(path.join(os.tmpdir(), "flounder-local-restart-"));
+  const store = MetadataStore.openForOutput(out);
+  const local = store.getOrCreateLocalDaemonToken();
+  store.close();
+
+  let jobId;
+  await withServer(out, async (base) => {
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "local-pinned", daemonId: local.id, sourcePaths: ["."], buildRoot: "." }));
+    const rejected = await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true });
+    assert.equal(rejected.status, 409);
+    const launch = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true, allowOfflineQueue: true }));
+    assert.equal(launch.daemonId, local.id);
+    assert.equal(launch.daemons, 0);
+    jobId = launch.jobId;
+  });
+
+  // This is what `flounder ui` does on the same machine before spawning its child
+  // daemon. It must pick the same local daemon id/token, not mint local-${pid}.
+  const afterRestartStore = MetadataStore.openForOutput(out);
+  const localAgain = afterRestartStore.getOrCreateLocalDaemonToken();
+  afterRestartStore.close();
+  assert.equal(localAgain.id, local.id);
+  assert.equal(localAgain.token, local.token);
+
+  await withServer(out, async (base) => {
+    const reg = await j(await asDaemon(base, localAgain.token, "POST", "/api/daemon/register", { name: "local-restarted" }));
+    assert.equal(reg.daemonId, local.id);
+    const claim = await j(await asDaemon(base, localAgain.token, "POST", "/api/daemon/claim"));
+    assert.equal(claim.job.id, jobId);
+    assert.equal(claim.job.project, "local-pinned");
+  });
+});
+
 test("daemon: full job handoff — enqueue → claim → run start → ingest → finish", async () => {
   await withServerAndToken(async ({ base, token }) => {
     await asDaemon(base, token, "POST", "/api/daemon/register", { name: "d1" });
 
     // UI creates a project and queues a run.
-    await ui(base, "POST", "/api/projects", { name: "acme", sourcePaths: ["./src"], config: { model: "m" } });
-    const launch = await j(await ui(base, "POST", "/api/projects/acme/runs", { verb: "run", mockLlm: true }));
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "acme", sourcePaths: ["./src"], config: { model: "m" } }));
+    const projectPath = "/api/projects/" + created.uuid;
+    const launch = await j(await ui(base, "POST", projectPath + "/runs", { verb: "run", mockLlm: true }));
     assert.equal(launch.queued, true);
     assert.equal(typeof launch.jobId, "number");
 
@@ -71,7 +183,7 @@ test("daemon: full job handoff — enqueue → claim → run start → ingest �
 
     // Daemon reports the scope inventory; the run's live coverage updates.
     await asDaemon(base, token, "PATCH", `/api/daemon/runs/${runId}`, { scopes: [{ scopeId: "s1", title: "decode", status: "audited" }, { scopeId: "s2", title: "settle", status: "pending" }] });
-    const afterScopes = await j(await ui(base, "GET", "/api/projects/acme"));
+    const afterScopes = await j(await ui(base, "GET", projectPath));
     assert.deepEqual(afterScopes.progress, { total: 2, audited: 1, pending: 1, deferred: 0 });
 
     // Daemon reports findings (with a status reason for the timeline) and a confirm decision.
@@ -79,12 +191,14 @@ test("daemon: full job handoff — enqueue → claim → run start → ingest �
     await asDaemon(base, token, "PATCH", `/api/daemon/runs/${runId}`, { findings: [{ findingKey: "f1", title: "unbound input", location: "src/x:10", status: "confirmed-differential" }], reason: "differential passed" });
     await asDaemon(base, token, "PATCH", `/api/daemon/runs/${runId}`, { confirmDecisions: [{ bug: "unbound input", reproduced: "yes", recommendation: "submit-candidate" }], decisionPath: "/tmp/acme-run-1/confirm_report.md" });
 
-    const findings = await j(await ui(base, "GET", "/api/projects/acme/findings"));
+    const findings = await j(await ui(base, "GET", projectPath + "/findings"));
     assert.equal(findings.findings.length, 1);
     assert.equal(findings.findings[0].status, "confirmed-differential");
     assert.deepEqual(findings.findings[0].timeline.map((e) => e.to_status), ["suspected", "confirmed-differential"]);
-    const detail = await j(await ui(base, "GET", "/api/projects/acme"));
-    assert.equal(detail.confirmedBugs, 1); // reproduced=yes surfaced as a confirmed bug
+    const detail = await j(await ui(base, "GET", projectPath));
+    assert.equal(detail.auditConfirmedFindings, 1);
+    assert.equal(detail.reproducedBugs, 1);
+    assert.equal(detail.confirmedBugs, 1); // legacy alias for reproduced=yes
 
     // Daemon finishes the run; status + final coverage/finding-count persist.
     await asDaemon(base, token, "POST", `/api/daemon/jobs/${launch.jobId}/status`, { status: "done" });
@@ -98,8 +212,8 @@ test("daemon: full job handoff — enqueue → claim → run start → ingest �
 test("daemon: activity POSTs surface on the run's live SSE log", async () => {
   await withServerAndToken(async ({ base, token }) => {
     await asDaemon(base, token, "POST", "/api/daemon/register", { name: "d1" });
-    await ui(base, "POST", "/api/projects", { name: "p" });
-    const { jobId } = await j(await ui(base, "POST", "/api/projects/p/runs", { verb: "run", mockLlm: true }));
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "p", sourcePaths: ["./src"] }));
+    const { jobId } = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true }));
     await asDaemon(base, token, "POST", "/api/daemon/claim");
     const { runId } = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId, project: "p", kind: "run", runDir: "/tmp/p-1", budgets: {} }));
 
@@ -111,30 +225,100 @@ test("daemon: activity POSTs surface on the run's live SSE log", async () => {
     assert.ok(ev, "expected an activity event on the SSE log");
     assert.equal(ev.kind, "thinking_delta");
     assert.equal(ev.delta, "weighing the invariant");
+
+    const active = await j(await ui(base, "GET", "/api/active"));
+    const row = active.active.find((item) => item.jobId === jobId);
+    assert.equal(row.runId, runId);
+    assert.match(row.lastActivityAt, /^\d{4}-\d{2}-\d{2}T/);
+    assert.equal(row.updatedAt >= row.lastActivityAt, true);
   });
 });
 
-test("daemon: stopping a run flags its job for cancel and reconciles on the daemon's report", async () => {
-  await withServerAndToken(async ({ base, token, out }) => {
+test("daemon: active job counts connected daemon identities, not stream connections", async () => {
+  await withServerAndToken(async ({ base, token }) => {
+    const reg = await j(await asDaemon(base, token, "POST", "/api/daemon/register", { name: "d1" }));
+    const first = new AbortController();
+    const second = new AbortController();
+    const openStream = (signal) => fetch(base + "/api/daemon/stream", { headers: { authorization: `Bearer ${token}` }, signal });
+    const streams = await Promise.all([openStream(first.signal), openStream(second.signal)]);
+    try {
+      assert.equal(streams.every((res) => res.ok), true);
+      await new Promise((resolve) => setTimeout(resolve, 50));
+      const created = await j(await ui(base, "POST", "/api/projects", { name: "deduped-daemon", daemonId: reg.daemonId, sourcePaths: ["./src"] }));
+      const { jobId } = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true }));
+      const active = await j(await ui(base, "GET", "/api/active"));
+      const row = active.active.find((item) => item.jobId === jobId);
+      assert.ok(row);
+      assert.equal(row.onlineDaemons, 1);
+      assert.equal(Array.isArray(active.daemons?.[0]?.capabilities?.providers), false);
+      assert.equal(typeof active.daemons?.[0]?.capabilities?.providerCount, "number");
+    } finally {
+      first.abort();
+      second.abort();
+      await Promise.allSettled(streams.map((res) => res.body?.cancel()));
+    }
+  });
+});
+
+test("daemon: JSON run log compacts token deltas for history views", async () => {
+  await withServerAndToken(async ({ base, token }) => {
     await asDaemon(base, token, "POST", "/api/daemon/register", { name: "d1" });
-    await ui(base, "POST", "/api/projects", { name: "p" });
-    const { jobId } = await j(await ui(base, "POST", "/api/projects/p/runs", { verb: "run", mockLlm: true }));
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "p", sourcePaths: ["./src"] }));
+    const { jobId } = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true }));
     await asDaemon(base, token, "POST", "/api/daemon/claim");
     const { runId } = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId, project: "p", kind: "run", runDir: "/tmp/p-1", budgets: {} }));
 
-    // UI stops the run → the job is flagged for cancel (a connected daemon would get an SSE nudge).
+    await asDaemon(base, token, "POST", `/api/daemon/runs/${runId}/activity`, {
+      events: [
+        { kind: "thinking_delta", delta: "checking " },
+        { kind: "thinking_delta", delta: "the invariant" },
+        { kind: "text_delta", delta: "Confirmed " },
+        { kind: "text_delta", delta: "candidate" },
+        { kind: "step", tool: "bash", step: 1 },
+      ],
+    });
+
+    const body = await j(await ui(base, "GET", `/api/runs/${runId}/log?tail=50&format=json`));
+    assert.equal(body.events.some((ev) => ev.kind === "thinking_delta" || ev.kind === "text_delta"), false);
+    assert.equal(body.events.find((ev) => ev.kind === "audit_thinking")?.detail, "checking the invariant");
+    assert.equal(body.events.find((ev) => ev.kind === "audit_text")?.detail, "Confirmed candidate");
+    assert.ok(body.events.find((ev) => ev.kind === "step"));
+  });
+});
+
+test("daemon: stopping a run immediately kills it and ignores stale daemon completion", async () => {
+  await withServerAndToken(async ({ base, token, out }) => {
+    await asDaemon(base, token, "POST", "/api/daemon/register", { name: "d1" });
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "p", sourcePaths: ["./src"] }));
+    const { jobId } = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true }));
+    await asDaemon(base, token, "POST", "/api/daemon/claim");
+    const { runId } = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId, project: "p", kind: "run", runDir: "/tmp/p-1", budgets: {} }));
+
+    // UI stops the run. The server must make the dashboard terminal immediately; a daemon
+    // may be stuck inside a provider call and never report back.
     const stop = await j(await ui(base, "POST", `/api/runs/${runId}/stop`));
     assert.equal(stop.stopped, true);
+    assert.equal((await j(await ui(base, "GET", `/api/runs/${runId}`))).run.status, "killed");
     const store = MetadataStore.openForOutput(out);
     try {
-      assert.deepEqual(store.canceledJobIds(), [jobId]); // the daemon polls/streams this to abort
+      assert.equal(store.getJob(jobId).status, "canceled");
     } finally {
       store.close();
     }
 
-    // Daemon reports the job canceled; the still-running run is reconciled to killed.
-    await asDaemon(base, token, "POST", `/api/daemon/jobs/${jobId}/status`, { status: "canceled" });
+    const staleUpdate = await j(await asDaemon(base, token, "PATCH", `/api/daemon/runs/${runId}`, { finish: { status: "done" } }));
+    assert.equal(staleUpdate.stale, true);
     assert.equal((await j(await ui(base, "GET", `/api/runs/${runId}`))).run.status, "killed");
+
+    // A late daemon "done" report must not revive a stopped run or active job.
+    await asDaemon(base, token, "POST", `/api/daemon/jobs/${jobId}/status`, { status: "done" });
+    assert.equal((await j(await ui(base, "GET", `/api/runs/${runId}`))).run.status, "killed");
+    const after = MetadataStore.openForOutput(out);
+    try {
+      assert.equal(after.getJob(jobId).status, "canceled");
+    } finally {
+      after.close();
+    }
   });
 });
 

@@ -5,13 +5,14 @@
 // the daemon (src/server/daemon.ts); this module holds no run state.
 
 import path from "node:path";
-import { defaultConfig, type AuditorConfig } from "../config.js";
+import { defaultConfig, defaultOutputDir, THINKING_LEVELS, type AuditorConfig } from "../config.js";
 import type { RunKind, ProviderRoles } from "../db/store.js";
+import type { SandboxBackend, SandboxNetworkMode } from "../security/sandbox.js";
 
-const DEFAULT_OUT = "runs";
-const THINKING = new Set(["minimal", "low", "medium", "high", "xhigh"]);
+const DEFAULT_OUT = defaultOutputDir();
+const THINKING = new Set<string>(THINKING_LEVELS);
 
-export type Activity = { kind: string; delta?: string; tool?: string; step?: number };
+export type Activity = { kind: string; delta?: string; tool?: string; step?: number; ts?: string };
 
 // In-memory per-run feed of the model's streaming activity (token-level thinking/output +
 // tool calls), for live UI streaming without per-token disk writes. Keeps a recent ring
@@ -20,11 +21,12 @@ export class ActivityBus {
   private readonly buffer: Activity[] = [];
   private readonly listeners = new Set<(ev: Activity) => void>();
   push(ev: Activity): void {
-    this.buffer.push(ev);
+    const item = ev.ts ? ev : { ...ev, ts: new Date().toISOString() };
+    this.buffer.push(item);
     if (this.buffer.length > 2000) this.buffer.shift();
     for (const listener of this.listeners) {
       try {
-        listener(ev);
+        listener(item);
       } catch {
         // a broken listener must not stop the run
       }
@@ -35,10 +37,14 @@ export class ActivityBus {
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }
+  snapshot(limit = 200): Activity[] {
+    const n = Math.max(0, Math.min(Math.floor(limit), this.buffer.length));
+    return this.buffer.slice(this.buffer.length - n);
+  }
 }
 
 export interface LaunchSpec {
-  verb: RunKind; // run | map | audit | confirm (verify is an audit selector)
+  verb: RunKind; // run | map | audit | confirm | report (verify is an audit selector)
   target: string;
   sourcePaths: string[];
   buildRoot?: string | undefined;
@@ -46,6 +52,8 @@ export interface LaunchSpec {
   provider?: string | undefined;
   model?: string | undefined;
   thinking?: string | undefined;
+  coverageMode?: string | undefined;
+  coverageTarget?: number | undefined;
   maxScopes?: number | undefined;
   mapSteps?: number | undefined;
   digSteps?: number | undefined;
@@ -57,6 +65,7 @@ export interface LaunchSpec {
   inputRunDir?: string | undefined; // confirm: the finished run dir to reproduce
   inputRunDirs?: string[] | undefined; // confirm (aggregate): several run dirs whose confirmed findings are unioned + reproduced together
   confirmKeys?: string[] | undefined; // confirm: restrict the work list to these finding content keys (the pending/target set the control plane resolved from finding status)
+  reportFindings?: ReportFindingSpec[] | undefined; // report: confirmed/reproduced bugs to package as formal Markdown reports
   region?: string | undefined; // audit: a pinned region
   scope?: string | undefined; // audit: scope id[,id...]
   verifyFindings?: unknown; // audit: inline suspected finding(s) to confirm-or-refute (the --verify file's contents, carried inline so a remote daemon needs no local file)
@@ -69,7 +78,31 @@ export interface LaunchSpec {
   dir?: string | undefined; // project subdir under the daemon workspace; materials resolve under it
   models?: ProviderRoles | undefined; // per-phase provider/model/thinking overrides (from the selected profile)
   scopeNote?: string | undefined; // map/audit: the "authorized scope note" prior — focuses map on the in-scope target (the pipeline auto-derives it from prepare's manifest; --scope-note also sets it)
+  sandboxBackend?: SandboxBackend | undefined;
+  sandboxImage?: string | undefined;
+  sandboxAllowHostFallback?: boolean | undefined;
+  sandboxPrepareNetwork?: SandboxNetworkMode | undefined;
+  sandboxConfirmNetwork?: SandboxNetworkMode | undefined;
+  sandboxMemoryMb?: number | undefined;
+  sandboxCpus?: number | undefined;
   out?: string | undefined;
+}
+
+export interface ReportFindingSpec {
+  findingId: number;
+  findingKey: string;
+  title: string;
+  evidenceMode?: "real-target-reproduced" | "source-only-local-confirmed" | undefined;
+  location?: string | undefined;
+  severity?: string | undefined;
+  status?: string | undefined;
+  confirmStatus?: string | undefined;
+  description?: string | undefined;
+  evidence?: string | undefined;
+  exploitSketch?: string | undefined;
+  fix?: string | undefined;
+  confidence?: number | undefined;
+  decisions?: Array<Record<string, unknown>> | undefined;
 }
 
 // Translate a launch spec into an AuditorConfig — the daemon's equivalent of the CLI's
@@ -79,8 +112,8 @@ export interface LaunchSpec {
 export function specToConfig(spec: LaunchSpec, out: string, workspace?: string): AuditorConfig {
   const cfg = defaultConfig();
   cfg.targetName = spec.target;
-  const root = spec.dir !== undefined ? path.resolve(workspace ?? ".", spec.dir) : undefined;
-  const resolveMat = (p: string): string => (root ? path.resolve(root, p) : p);
+  const root = spec.dir !== undefined ? resolveUnder(path.resolve(workspace ?? "."), spec.dir, "project dir") : undefined;
+  const resolveMat = (p: string): string => (root ? resolveUnder(root, p, "project material") : p);
   cfg.sourcePaths = spec.sourcePaths.map(resolveMat);
   cfg.corpusPaths = (spec.corpusPaths ?? []).map(resolveMat);
   if (spec.buildRoot) cfg.buildRoot = resolveMat(spec.buildRoot);
@@ -89,6 +122,13 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   if (spec.model) cfg.auditModel = spec.model;
   if (spec.thinking && THINKING.has(spec.thinking)) cfg.thinkingLevel = spec.thinking as AuditorConfig["thinkingLevel"];
   if (spec.models) cfg.models = spec.models as NonNullable<AuditorConfig["models"]>;
+  if (spec.sandboxBackend) cfg.sandboxBackend = spec.sandboxBackend;
+  if (spec.sandboxImage) cfg.sandboxImage = spec.sandboxImage;
+  if (spec.sandboxAllowHostFallback !== undefined) cfg.sandboxAllowHostFallback = spec.sandboxAllowHostFallback;
+  if (spec.sandboxPrepareNetwork) cfg.sandboxPrepareNetwork = spec.sandboxPrepareNetwork;
+  if (spec.sandboxConfirmNetwork) cfg.sandboxConfirmNetwork = spec.sandboxConfirmNetwork;
+  if (spec.sandboxMemoryMb !== undefined) cfg.sandboxMemoryMb = spec.sandboxMemoryMb;
+  if (spec.sandboxCpus !== undefined) cfg.sandboxCpus = spec.sandboxCpus;
   cfg.outputDir = out;
   cfg.auditMaxSteps = spec.maxSteps ?? Number.POSITIVE_INFINITY;
   cfg.auditMapSteps = spec.mapSteps ?? Number.POSITIVE_INFINITY;
@@ -99,7 +139,7 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   if (spec.remap) cfg.auditRemap = true; // re-enumerate scopes from scratch (restart)
   // prepare + confirm derive their own posture from their options (clue / prior run), not from
   // the sealed audit's map/dig flags — return the base cfg (provider/model/out/target) as-is.
-  if (spec.verb === "prepare" || spec.verb === "confirm") return cfg;
+  if (spec.verb === "prepare" || spec.verb === "confirm" || spec.verb === "report") return cfg;
   // The scope-focus prior only applies to the map/dig phases (prepare/confirm returned above and
   // don't consume it). From prepare's manifest or --scope-note.
   if (spec.scopeNote && spec.scopeNote.trim()) cfg.auditScopeNote = spec.scopeNote.trim();
@@ -126,6 +166,20 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   return cfg;
 }
 
+function resolveUnder(root: string, input: string, label: string): string {
+  if (path.isAbsolute(input)) throw new Error(`Unsafe ${label}: absolute paths are not allowed in project-relative launch specs.`);
+  const normalized = path.normalize(input);
+  if (!normalized || normalized === ".." || normalized.startsWith(`..${path.sep}`)) {
+    throw new Error(`Unsafe ${label}: ${input}`);
+  }
+  const base = path.resolve(root);
+  const target = path.resolve(base, normalized);
+  if (target !== base && !target.startsWith(`${base}${path.sep}`)) {
+    throw new Error(`Unsafe ${label}: ${input}`);
+  }
+  return target;
+}
+
 // Translate a launch spec into `flounder` CLI argv — NOT used to run (the manager runs in-process),
 // but handy for showing the equivalent terminal command. Pure and unit-tested.
 export function buildArgs(spec: LaunchSpec): string[] {
@@ -142,6 +196,13 @@ export function buildArgs(spec: LaunchSpec): string[] {
     if (spec.model) out.push("--model", spec.model);
     if (spec.thinking) out.push("--thinking", spec.thinking);
     if (spec.maxSteps !== undefined) out.push("--max-steps", String(spec.maxSteps));
+    if (spec.sandboxBackend) out.push("--sandbox-backend", spec.sandboxBackend);
+    if (spec.sandboxImage) out.push("--sandbox-image", spec.sandboxImage);
+    if (spec.sandboxAllowHostFallback) out.push("--allow-host-execution");
+    if (spec.sandboxPrepareNetwork) out.push("--prepare-network", spec.sandboxPrepareNetwork);
+    if (spec.sandboxConfirmNetwork) out.push("--confirm-network", spec.sandboxConfirmNetwork);
+    if (spec.sandboxMemoryMb !== undefined) out.push("--sandbox-memory-mb", String(spec.sandboxMemoryMb));
+    if (spec.sandboxCpus !== undefined) out.push("--sandbox-cpus", String(spec.sandboxCpus));
     out.push("--out", spec.out ?? DEFAULT_OUT);
     return out;
   }
@@ -171,6 +232,13 @@ export function buildArgs(spec: LaunchSpec): string[] {
   if (spec.fresh && spec.verb === "confirm") args.push("--fresh");
   if (spec.quick && spec.verb === "run") args.push("--quick");
   if (spec.mockLlm) args.push("--mock-llm");
+  if (spec.sandboxBackend) args.push("--sandbox-backend", spec.sandboxBackend);
+  if (spec.sandboxImage) args.push("--sandbox-image", spec.sandboxImage);
+  if (spec.sandboxAllowHostFallback) args.push("--allow-host-execution");
+  if (spec.sandboxPrepareNetwork) args.push("--prepare-network", spec.sandboxPrepareNetwork);
+  if (spec.sandboxConfirmNetwork) args.push("--confirm-network", spec.sandboxConfirmNetwork);
+  if (spec.sandboxMemoryMb !== undefined) args.push("--sandbox-memory-mb", String(spec.sandboxMemoryMb));
+  if (spec.sandboxCpus !== undefined) args.push("--sandbox-cpus", String(spec.sandboxCpus));
   args.push("--out", spec.out ?? DEFAULT_OUT);
   return args;
 }

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
-import { cp, mkdir, readdir, stat, writeFile } from "node:fs/promises";
+import { randomBytes } from "node:crypto";
+import { copyFile, lstat, mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { analyzeReproductionCommandSafety } from "./policy.js";
 import type { ReproductionCommand, ReproductionCommandResult, ReproductionFile } from "../types.js";
@@ -12,6 +13,33 @@ import type { ReproductionCommand, ReproductionCommandResult, ReproductionFile }
 export interface SandboxWorkspace {
   absolute: string;
   relative: string;
+}
+
+export type SandboxBackend = "auto" | "oci" | "host";
+export type SandboxNetworkMode = "none" | "enabled";
+
+export interface SandboxExecutionOptions {
+  backend?: SandboxBackend;
+  image?: string;
+  allowHostFallback?: boolean;
+  network?: SandboxNetworkMode;
+  memoryMb?: number;
+  cpus?: number;
+}
+
+interface SandboxProcessOptions extends Required<Pick<SandboxExecutionOptions, "backend" | "image" | "allowHostFallback" | "network">> {
+  memoryMb?: number;
+  cpus?: number;
+}
+
+interface ProcessRunInput {
+  command: ReproductionCommand;
+  workspaceAbsolute: string;
+  cwdAbsolute: string;
+  tmpDir: string;
+  cacheDir?: string;
+  maxLogBytes: number;
+  options: SandboxProcessOptions;
 }
 
 /**
@@ -72,7 +100,7 @@ export function analyzeSandboxFileSafety(file: ReproductionFile): string | undef
 
 export async function writeSandboxFiles(workspaceAbsolute: string, files: ReproductionFile[]): Promise<void> {
   for (const file of files) {
-    const target = resolveWorkspacePath(workspaceAbsolute, file.path);
+    const target = await resolveWorkspacePathForWrite(workspaceAbsolute, file.path);
     await mkdir(path.dirname(target), { recursive: true });
     await writeFile(target, file.content);
   }
@@ -84,39 +112,163 @@ export async function runSandboxCommand(
   maxLogBytes: number,
   redactPaths: string[],
   cacheDir?: string,
+  executionOptions: SandboxExecutionOptions = {},
 ): Promise<ReproductionCommandResult> {
-  const cwd = command.cwd ? resolveWorkspacePath(workspaceAbsolute, command.cwd) : workspaceAbsolute;
+  const cwd = command.cwd ? await resolveWorkspacePathForRead(workspaceAbsolute, command.cwd) : workspaceAbsolute;
   const started = Date.now();
-  let stdout = "";
-  let stderr = "";
-  let timedOut = false;
-  let exitCode: number | null = null;
   const tmpDir = path.join(workspaceAbsolute, ".tmp");
   await mkdir(tmpDir, { recursive: true });
   // A persistent, host-isolated package cache (CARGO_HOME etc.) when provided, so
   // dependency builds are downloaded once and reused across runs. HOME stays the
   // per-run workspace either way, so host credentials/config are never exposed.
   if (cacheDir) await mkdir(cacheDir, { recursive: true });
-  const child = spawn(command.program, command.args, {
-    cwd,
+  const raw = await runWithSelectedBackend({
+    command,
+    workspaceAbsolute,
+    cwdAbsolute: cwd,
+    tmpDir,
+    ...(cacheDir ? { cacheDir } : {}),
+    maxLogBytes,
+    options: normalizeSandboxExecutionOptions(executionOptions),
+  });
+
+  const redactionScope = [workspaceAbsolute, tmpDir, ...redactPaths, ...machineRedactionPaths()];
+  return {
+    command,
+    exitCode: raw.exitCode,
+    expectedExitCode: command.expectedExitCode ?? 0,
+    timedOut: raw.timedOut,
+    durationMs: Date.now() - started,
+    stdout: redactMachineStrings(redactLocalPaths(raw.stdout, redactionScope)),
+    stderr: redactMachineStrings(redactLocalPaths(raw.stderr, redactionScope)),
+  };
+}
+
+function normalizeSandboxExecutionOptions(input: SandboxExecutionOptions): SandboxProcessOptions {
+  return {
+    backend: input.backend ?? "auto",
+    image: input.image || "flounder-sandbox:latest",
+    allowHostFallback: input.allowHostFallback ?? false,
+    network: input.network ?? "none",
+    ...(input.memoryMb !== undefined ? { memoryMb: input.memoryMb } : {}),
+    ...(input.cpus !== undefined ? { cpus: input.cpus } : {}),
+  };
+}
+
+async function runWithSelectedBackend(input: ProcessRunInput): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+  if (input.options.backend === "host") {
+    if (!input.options.allowHostFallback) {
+      return unavailableResult("Host sandbox backend requires explicit --allow-host-execution because model-generated commands would run on the local machine.");
+    }
+    return runHostSandboxProcess(input);
+  }
+
+  const ociAvailable = await isOciSandboxAvailable(input.options.image);
+  if (input.options.backend === "oci" || ociAvailable) {
+    if (!ociAvailable) {
+      return unavailableResult(`OCI sandbox image "${input.options.image}" is not available. Build or pull it first, or explicitly opt into host execution for trusted local targets.`);
+    }
+    return runOciSandboxProcess(input);
+  }
+
+  if (input.options.allowHostFallback) return runHostSandboxProcess(input);
+  return unavailableResult(`No OCI sandbox is available for image "${input.options.image}", and host execution fallback is disabled. Install Docker and build or pull the image, or pass --allow-host-execution only for trusted local targets.`);
+}
+
+function unavailableResult(message: string): { stdout: string; stderr: string; exitCode: number; timedOut: boolean } {
+  return { stdout: "", stderr: message, exitCode: 126, timedOut: false };
+}
+
+async function runHostSandboxProcess(input: ProcessRunInput): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+  return runSpawnedProcess({
+    program: input.command.program,
+    args: input.command.args,
+    cwd: input.cwdAbsolute,
+    env: sandboxEnv(input.workspaceAbsolute, input.tmpDir, input.cacheDir),
+    timeoutMs: input.command.timeoutMs ?? 120_000,
+    maxLogBytes: input.maxLogBytes,
+  });
+}
+
+async function runOciSandboxProcess(input: ProcessRunInput): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+  const containerName = `flounder-${process.pid}-${randomBytes(4).toString("hex")}`;
+  const cwdRelative = path.relative(input.workspaceAbsolute, input.cwdAbsolute).split(path.sep).filter(Boolean).join("/");
+  const containerCwd = cwdRelative ? `/workspace/${cwdRelative}` : "/workspace";
+  const dockerArgs = [
+    "run",
+    "--rm",
+    "--pull",
+    "never",
+    "--name",
+    containerName,
+    "--workdir",
+    containerCwd,
+    "--mount",
+    `type=bind,src=${input.workspaceAbsolute},dst=/workspace`,
+    "--cap-drop",
+    "ALL",
+    "--security-opt",
+    "no-new-privileges",
+    "--read-only",
+    "--tmpfs",
+    "/tmp:rw,nosuid,nodev,noexec,size=256m",
+    "--tmpfs",
+    "/var/tmp:rw,nosuid,nodev,noexec,size=256m",
+    "--pids-limit",
+    "512",
+  ];
+  if (input.options.network === "none") dockerArgs.push("--network", "none");
+  if (input.cacheDir) dockerArgs.push("--mount", `type=bind,src=${input.cacheDir},dst=/cache`);
+  if (typeof process.getuid === "function" && typeof process.getgid === "function") {
+    dockerArgs.push("--user", `${process.getuid()}:${process.getgid()}`);
+  }
+  if (input.options.memoryMb !== undefined) dockerArgs.push("--memory", `${Math.max(64, Math.floor(input.options.memoryMb))}m`);
+  if (input.options.cpus !== undefined) dockerArgs.push("--cpus", String(Math.max(0.1, input.options.cpus)));
+  for (const [key, value] of Object.entries(sandboxEnv("/workspace", "/workspace/.tmp", input.cacheDir ? "/cache" : undefined))) {
+    if (value !== undefined) dockerArgs.push("--env", `${key}=${value}`);
+  }
+  dockerArgs.push(input.options.image, input.command.program, ...input.command.args);
+  const result = await runSpawnedProcess({
+    program: "docker",
+    args: dockerArgs,
+    cwd: input.workspaceAbsolute,
+    env: dockerClientEnv(),
+    timeoutMs: input.command.timeoutMs ?? 120_000,
+    maxLogBytes: input.maxLogBytes,
+  });
+  if (result.timedOut) void forceRemoveContainer(containerName);
+  return result;
+}
+
+async function runSpawnedProcess(input: { program: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxLogBytes: number }): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+  let stdout = "";
+  let stderr = "";
+  let timedOut = false;
+  let exitCode: number | null = null;
+  let killTimer: ReturnType<typeof setTimeout> | undefined;
+  const child = spawn(input.program, input.args, {
+    cwd: input.cwd,
     shell: false,
-    env: localSandboxEnv(workspaceAbsolute, tmpDir, cacheDir),
+    env: input.env,
   });
   const timer = setTimeout(() => {
     timedOut = true;
     child.kill("SIGTERM");
-  }, command.timeoutMs ?? 120_000);
+    killTimer = setTimeout(() => {
+      if (exitCode === null) child.kill("SIGKILL");
+    }, 2_000);
+  }, input.timeoutMs);
 
   child.stdout?.on("data", (chunk) => {
-    stdout = appendLimited(stdout, String(chunk), maxLogBytes);
+    stdout = appendLimited(stdout, String(chunk), input.maxLogBytes);
   });
   child.stderr?.on("data", (chunk) => {
-    stderr = appendLimited(stderr, String(chunk), maxLogBytes);
+    stderr = appendLimited(stderr, String(chunk), input.maxLogBytes);
   });
 
   await new Promise<void>((resolve) => {
     child.on("error", (error) => {
-      stderr = appendLimited(stderr, error.message, maxLogBytes);
+      stderr = appendLimited(stderr, error.message, input.maxLogBytes);
       resolve();
     });
     child.on("close", (code) => {
@@ -125,17 +277,8 @@ export async function runSandboxCommand(
     });
   });
   clearTimeout(timer);
-
-  const redactionScope = [workspaceAbsolute, tmpDir, ...redactPaths, ...machineRedactionPaths()];
-  return {
-    command,
-    exitCode,
-    expectedExitCode: command.expectedExitCode ?? 0,
-    timedOut,
-    durationMs: Date.now() - started,
-    stdout: redactMachineStrings(redactLocalPaths(stdout, redactionScope)),
-    stderr: redactMachineStrings(redactLocalPaths(stderr, redactionScope)),
-  };
+  if (killTimer) clearTimeout(killTimer);
+  return { stdout, stderr, exitCode, timedOut };
 }
 
 /** Case-insensitive literal success-pattern match against combined command output. */
@@ -172,6 +315,34 @@ export function resolveWorkspacePath(workspace: string, relativePath: string): s
   const root = path.resolve(workspace);
   if (target !== root && !target.startsWith(`${root}${path.sep}`)) {
     throw new Error(`Unsafe sandbox path: ${relativePath}`);
+  }
+  return target;
+}
+
+export async function resolveWorkspacePathForRead(workspace: string, relativePath: string): Promise<string> {
+  const target = resolveWorkspacePath(workspace, relativePath);
+  return assertInsideRealWorkspace(workspace, target, relativePath);
+}
+
+export async function resolveWorkspacePathForWrite(workspace: string, relativePath: string): Promise<string> {
+  const target = resolveWorkspacePath(workspace, relativePath);
+  const parent = path.dirname(target);
+  await mkdir(parent, { recursive: true });
+  await assertInsideRealWorkspace(workspace, parent, relativePath);
+  try {
+    const info = await lstat(target);
+    if (info.isSymbolicLink()) throw new Error(`Unsafe sandbox path: ${relativePath}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+  }
+  return target;
+}
+
+async function assertInsideRealWorkspace(workspace: string, target: string, original: string): Promise<string> {
+  const rootReal = await realpath(workspace);
+  const targetReal = await realpath(target);
+  if (targetReal !== rootReal && !targetReal.startsWith(`${rootReal}${path.sep}`)) {
+    throw new Error(`Unsafe sandbox path escapes workspace through symlink: ${original}`);
   }
   return target;
 }
@@ -216,11 +387,16 @@ async function copyDirectoryContents(sourceDir: string, targetDir: string): Prom
 
 async function copySourcePath(sourcePath: string, targetPath: string): Promise<void> {
   if (shouldSkipCopyName(path.basename(sourcePath))) return;
-  await cp(sourcePath, targetPath, {
-    recursive: true,
-    force: true,
-    filter: (source) => !shouldSkipCopyName(path.basename(source)),
-  });
+  const info = await lstat(sourcePath);
+  if (info.isSymbolicLink()) return;
+  if (info.isDirectory()) {
+    await mkdir(targetPath, { recursive: true });
+    await copyDirectoryContents(sourcePath, targetPath);
+    return;
+  }
+  if (!info.isFile()) return;
+  await mkdir(path.dirname(targetPath), { recursive: true });
+  await copyFile(sourcePath, targetPath);
 }
 
 async function isDirectory(input: string): Promise<boolean> {
@@ -267,7 +443,49 @@ function replaceAll(input: string, needle: string, replacement: string): string 
   return input.split(needle).join(replacement);
 }
 
-function localSandboxEnv(workspace: string, tmpDir: string, cacheDir?: string): NodeJS.ProcessEnv {
+const ociAvailability = new Map<string, Promise<boolean>>();
+
+function isOciSandboxAvailable(image: string): Promise<boolean> {
+  let cached = ociAvailability.get(image);
+  if (!cached) {
+    cached = checkOciSandboxAvailable(image);
+    ociAvailability.set(image, cached);
+  }
+  return cached;
+}
+
+async function checkOciSandboxAvailable(image: string): Promise<boolean> {
+  const result = await runSpawnedProcess({
+    program: "docker",
+    args: ["image", "inspect", image],
+    cwd: process.cwd(),
+    env: dockerClientEnv(),
+    timeoutMs: 5000,
+    maxLogBytes: 2000,
+  });
+  return result.exitCode === 0 && !result.timedOut;
+}
+
+async function forceRemoveContainer(name: string): Promise<void> {
+  await runSpawnedProcess({
+    program: "docker",
+    args: ["rm", "-f", name],
+    cwd: process.cwd(),
+    env: dockerClientEnv(),
+    timeoutMs: 10_000,
+    maxLogBytes: 2000,
+  });
+}
+
+function dockerClientEnv(): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"]) {
+    if (process.env[key] !== undefined) out[key] = process.env[key];
+  }
+  return out;
+}
+
+function sandboxEnv(workspace: string, tmpDir: string, cacheDir?: string): NodeJS.ProcessEnv {
   // HOME is always the per-run workspace (host config/credentials stay hidden).
   // Package caches go to a persistent cacheDir when one is supplied, else the
   // per-run tmpDir (which is discarded with the run).
@@ -284,10 +502,27 @@ function localSandboxEnv(workspace: string, tmpDir: string, cacheDir?: string): 
     GOMODCACHE: path.join(pkgCache, "go-mod-cache"),
     NPM_CONFIG_CACHE: path.join(pkgCache, "npm-cache"),
   };
-  if (process.env.PATH !== undefined) out.PATH = process.env.PATH;
+  out.PATH = sandboxToolPath(process.env.PATH);
   if (process.env.LANG !== undefined) out.LANG = process.env.LANG;
   if (process.env.LC_ALL !== undefined) out.LC_ALL = process.env.LC_ALL;
   return out;
+}
+
+export function sandboxToolPath(basePath: string | undefined = process.env.PATH): string {
+  const parts = (basePath ?? "").split(path.delimiter).filter(Boolean);
+  for (const dir of [
+    "/opt/homebrew/bin",
+    "/opt/homebrew/sbin",
+    "/usr/local/bin",
+    "/usr/local/sbin",
+    "/usr/bin",
+    "/bin",
+    "/usr/sbin",
+    "/sbin",
+  ]) {
+    if (!parts.includes(dir)) parts.push(dir);
+  }
+  return parts.join(path.delimiter);
 }
 
 export function isLocalUrl(input: string): boolean {

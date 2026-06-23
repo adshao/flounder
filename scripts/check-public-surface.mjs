@@ -6,6 +6,9 @@ import { promisify } from "node:util";
 
 const root = process.cwd();
 const execFileAsync = promisify(execFile);
+const args = new Set(process.argv.slice(2));
+const scanCurrent = !args.has("--head-only");
+const scanHead = !args.has("--current-only");
 const currentSkipDirs = new Set([".git", ".npm-cache", "files", "node_modules", "runs"]);
 const historySkipDirs = new Set([".git", ".npm-cache", "node_modules"]);
 const skipFiles = new Set();
@@ -65,13 +68,15 @@ const secretPatterns = [
 ];
 
 const findings = [];
-for (const file of await listFiles(root)) {
-  if (!isTextFile(file)) continue;
-  const body = await readFile(file, "utf8");
-  const relative = toPosix(path.relative(root, file));
-  scanBody(relative, body, [...localPathPatterns, ...secretPatterns]);
+const scanned = [];
+if (scanCurrent) {
+  await scanCurrentTree();
+  scanned.push("current tree");
 }
-await scanGitHistory();
+if (scanHead) {
+  const scannedHead = await scanGitHead();
+  if (scannedHead) scanned.push("latest commit");
+}
 
 if (findings.length > 0) {
   console.error("Public-surface scan failed. Remove or redact these values before committing:");
@@ -80,7 +85,16 @@ if (findings.length > 0) {
   }
   process.exitCode = 1;
 } else {
-  console.log("Public-surface scan passed.");
+  console.log(`Public-surface scan passed (${scanned.join(" + ") || "nothing selected"}).`);
+}
+
+async function scanCurrentTree() {
+  for (const file of await listFiles(root)) {
+    if (!isTextFile(file)) continue;
+    const body = await readFile(file, "utf8");
+    const relative = toPosix(path.relative(root, file));
+    scanBody(relative, body, [...localPathPatterns, ...secretPatterns]);
+  }
 }
 
 async function listFiles(dir) {
@@ -117,38 +131,32 @@ function scanBody(file, body, patterns) {
   }
 }
 
-async function scanGitHistory() {
+async function scanGitHead() {
+  let head;
   try {
-    await execFileAsync("git", ["rev-parse", "--is-inside-work-tree"], { cwd: root });
-  } catch {
-    return;
-  }
-
-  const commits = await listGitCommits();
-  await scanGitCommitMessages(commits);
-  await scanGitBlobHistory(commits);
-}
-
-async function listGitCommits() {
-  try {
-    const result = await execFileAsync("git", ["rev-list", "--all"], {
+    const result = await execFileAsync("git", ["rev-parse", "--verify", "HEAD"], {
       cwd: root,
-      maxBuffer: 50 * 1024 * 1024,
+      maxBuffer: 1024 * 1024,
     });
-    return result.stdout.split(/\r?\n/).filter(Boolean);
+    head = result.stdout.trim();
   } catch {
-    return [];
+    return false;
   }
+  if (!head) return false;
+  await scanGitCommitMessages([head]);
+  await scanGitCommitFiles(head);
+  return true;
 }
 
 async function scanGitCommitMessages(commits) {
   if (commits.length === 0) return;
   let stdout;
   try {
-    const result = await execFileAsync("git", ["log", "--format=%H%x00%B%x00END%x00"], {
-      cwd: root,
-      maxBuffer: 50 * 1024 * 1024,
-    });
+    const logArgs =
+      commits.length === 1
+        ? ["log", "-1", "--format=%H%x00%B%x00END%x00", commits[0]]
+        : ["log", "--format=%H%x00%B%x00END%x00"];
+    const result = await execFileAsync("git", logArgs, { cwd: root, maxBuffer: 50 * 1024 * 1024 });
     stdout = result.stdout;
   } catch {
     return;
@@ -163,33 +171,31 @@ async function scanGitCommitMessages(commits) {
   }
 }
 
-async function scanGitBlobHistory(commits) {
-  for (const commit of commits) {
-    let stdout;
+async function scanGitCommitFiles(commit) {
+  let stdout;
+  try {
+    const result = await execFileAsync("git", ["diff-tree", "--root", "--no-commit-id", "--name-only", "-r", "-z", commit], {
+      cwd: root,
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    stdout = result.stdout;
+  } catch {
+    return;
+  }
+
+  const files = stdout.split("\0").filter(Boolean).filter(isPublicTextPath);
+  for (const file of files) {
+    let body;
     try {
-      const result = await execFileAsync("git", ["ls-tree", "-r", "--name-only", "-z", commit], {
+      const result = await execFileAsync("git", ["show", `${commit}:${file}`], {
         cwd: root,
-        maxBuffer: 50 * 1024 * 1024,
+        maxBuffer: 10 * 1024 * 1024,
       });
-      stdout = result.stdout;
+      body = result.stdout;
     } catch {
       continue;
     }
-
-    const files = stdout.split("\0").filter(Boolean).filter(isPublicTextPath);
-    for (const file of files) {
-      let body;
-      try {
-        const result = await execFileAsync("git", ["show", `${commit}:${file}`], {
-          cwd: root,
-          maxBuffer: 10 * 1024 * 1024,
-        });
-        body = result.stdout;
-      } catch {
-        continue;
-      }
-      scanBody(`git-blob:${commit.slice(0, 12)}:${toPosix(file)}`, body, [...localPathPatterns, ...secretPatterns]);
-    }
+    scanBody(`git-blob:${commit.slice(0, 12)}:${toPosix(file)}`, body, [...localPathPatterns, ...secretPatterns]);
   }
 }
 

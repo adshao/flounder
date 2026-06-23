@@ -5,7 +5,20 @@ import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBas
 const cmd = (program, ...args) => ({ program, args });
 
 test("agent bash allows build/dependency commands (the build phase) across ecosystems", () => {
-  for (const c of [cmd("cargo", "build"), cmd("cargo", "fetch"), cmd("npm", "install"), cmd("go", "mod", "download"), cmd("forge", "build"), cmd("pip", "install", "-r", "requirements.txt")]) {
+  for (const c of [
+    cmd("cargo", "build"),
+    cmd("cargo", "-Znext-lockfile-bump", "build"),
+    cmd("cargo", "fetch"),
+    cmd("npm", "install"),
+    cmd("go", "mod", "download"),
+    cmd("forge", "build"),
+    cmd("pip", "install", "-r", "requirements.txt"),
+    cmd("cmake", "-S", "source/aztec-packages/barretenberg/cpp", "-B", "build/bbapi-poc", "-DMOBILE=ON"),
+    cmd("cmake", "--build", "build/bbapi-poc"),
+    cmd("cmake", "--build", "build/bbapi-poc", "--parallel", "2"),
+    cmd("ninja", "-C", "build/bbapi-poc"),
+    cmd("make", "-C", "build/bbapi-poc"),
+  ]) {
     assert.equal(analyzeAgentBashCommandSafety(c).blocked, false, `${c.program} ${c.args.join(" ")} should be allowed`);
     assert.equal(isAgentBuildCommand(c), true, `${c.program} ${c.args.join(" ")} should be a build command`);
   }
@@ -14,19 +27,68 @@ test("agent bash allows build/dependency commands (the build phase) across ecosy
 test("a build command is NOT confirmation-eligible (build cannot mint a finding)", () => {
   assert.equal(isAgentConfirmCommand(cmd("cargo", "build")), false);
   assert.equal(isAgentConfirmCommand(cmd("npm", "install")), false);
+  assert.equal(isAgentConfirmCommand(cmd("cmake", "--build", "build/bbapi-poc")), false);
+  assert.equal(isAgentConfirmCommand(cmd("ninja", "-C", "build/bbapi-poc")), false);
   // and a test runner is a confirm command, not a build command
   assert.equal(isAgentBuildCommand(cmd("cargo", "test")), false);
   assert.equal(isAgentConfirmCommand(cmd("cargo", "test")), true);
+  assert.equal(isAgentBuildCommand(cmd("cargo", "-Znext-lockfile-bump", "test")), false);
+  assert.equal(isAgentConfirmCommand(cmd("cargo", "-Znext-lockfile-bump", "test")), true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "-Znext-lockfile-bump", "test", "--test", "padded_proof_acceptance")).blocked, false);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "+nightly", "-Z", "next-lockfile-bump", "test")).blocked, false);
+  assert.equal(isAgentBuildCommand(cmd("ctest", "--test-dir", "build/bbapi-poc")), false);
+  assert.equal(isAgentConfirmCommand(cmd("ctest", "--test-dir", "build/bbapi-poc")), true);
 });
 
 test("a build command still cannot smuggle a remote/mainnet target in its argv", () => {
   assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "build", "--target-dir", "https://evil.example/x")).blocked, true);
   assert.equal(analyzeAgentBashCommandSafety(cmd("forge", "build", "--fork-url", "https://mainnet.example")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cmake", "-S", "https://evil.example/project", "-B", "build")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cmake", "-P", "script.cmake")).blocked, true);
 });
 
 test("arbitrary non-build, non-test, non-inspection commands stay blocked", () => {
   assert.equal(analyzeAgentBashCommandSafety(cmd("curl", "https://evil.example")).blocked, true);
   assert.equal(analyzeAgentBashCommandSafety(cmd("rm", "-rf", "x")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("python3", "-c", "print('unchecked script')")).blocked, true);
+});
+
+test("agent bash allows readonly tool discovery, version, and local JSON inspection", () => {
+  for (const c of [
+    cmd("which", "nargo"),
+    cmd("nargo", "--version"),
+    cmd("forge", "--version"),
+    cmd("jq", ".", "provenance/mainnet_rpc_state_20260614.json"),
+    cmd("python3", "-m", "json.tool", "provenance/mainnet_rpc_state_20260614.json"),
+  ]) {
+    assert.equal(analyzeAgentBashCommandSafety(c).blocked, false, `${c.program} ${c.args.join(" ")} should be readonly inspection`);
+    assert.equal(isAgentBuildCommand(c), false, `${c.program} ${c.args.join(" ")} should not be a build command`);
+    assert.equal(isAgentConfirmCommand(c), false, `${c.program} ${c.args.join(" ")} should not confirm findings`);
+  }
+});
+
+test("agent bash allows readonly file-existence inspection tests only", () => {
+  for (const c of [
+    cmd("test", "-f", "specs/zips/zips/zip-0032.rst"),
+    cmd("test", "-d", "source_packages"),
+    cmd("[", "-e", "prepare_manifest.json", "]"),
+  ]) {
+    assert.equal(analyzeAgentBashCommandSafety(c).blocked, false, `${c.program} ${c.args.join(" ")} should be readonly inspection`);
+    assert.equal(isAgentBuildCommand(c), false);
+    assert.equal(isAgentConfirmCommand(c), false);
+  }
+
+  assert.equal(analyzeAgentBashCommandSafety(cmd("test", "a", "=", "b")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("test", "-w", "source_packages")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("[", "-f", "prepare_manifest.json")).blocked, true);
+});
+
+test("agent bash distinguishes RPC-named local files from RPC secret references", () => {
+  assert.equal(analyzeAgentBashCommandSafety(cmd("rg", "Inbox", "provenance/mainnet_rpc_state_20260614.json")).blocked, false);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cat", "provenance/MAINNET_RPC_STATE.json")).blocked, false);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cat", "$MAINNET_RPC_URL")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cat", "${MAINNET_RPC_URL}")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cat", "MAINNET_RPC_URL")).blocked, true);
 });
 
 test("command safety policy blocks live-network broadcast-like commands", () => {
@@ -46,6 +108,7 @@ test("reproduction command policy allows only structured local test commands", (
   assert.equal(analyzeReproductionCommandSafety({ program: "cargo", args: ["test", "local_regtest_poc"] }).blocked, false);
   assert.equal(analyzeReproductionCommandSafety({ program: "node", args: ["--test", "repro.test.mjs"] }).blocked, false);
   assert.equal(analyzeReproductionCommandSafety({ program: "forge", args: ["test", "--match-test", "testLocalRepro"] }).blocked, false);
+  assert.equal(analyzeReproductionCommandSafety({ program: "ctest", args: ["--test-dir", "build/bbapi-poc", "-R", "noncanonical"] }).blocked, false);
   assert.equal(analyzeReproductionCommandSafety({ program: "npx", args: ["hardhat", "test", "test/repro.ts"] }).blocked, false);
   assert.equal(analyzeReproductionCommandSafety({ program: "zcash-cli", args: ["-testnet", "sendrawtransaction", "poc"] }).blocked, true);
   assert.equal(analyzeReproductionCommandSafety({ program: "bash", args: ["-lc", "cargo test"] }).blocked, true);

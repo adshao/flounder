@@ -16,6 +16,14 @@ test("toFindingRow: findingKey is content-stable across id renumbering", () => {
   assert.notEqual(k1, kOtherTitle, "different title => different key");
   assert.notEqual(k1, kOtherLoc, "different location => different key");
 
+  // the rich content rides along so the DB row is self-contained (no run-dir scraping needed)
+  const rich = toFindingRow({ ...base, id: "f1", description: "DESC", evidence: "EV", exploitSketch: "EXP", fix: "FIX", confidence: 0.8 }, "/run");
+  assert.equal(rich.description, "DESC");
+  assert.equal(rich.evidence, "EV");
+  assert.equal(rich.exploitSketch, "EXP");
+  assert.equal(rich.fix, "FIX");
+  assert.equal(rich.confidence, 0.8);
+
   // status flows through; a report path is only emitted for a confirmed finding that has an id yet
   assert.equal(toFindingRow({ ...base, id: "f1" }, "/run").status, "confirmed-executable");
   assert.ok(toFindingRow({ ...base, id: "f1" }, "/run").reportPath, "confirmed + id => report path");

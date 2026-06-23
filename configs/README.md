@@ -1,17 +1,18 @@
-# `configs/` — opt-in domain profiles
+# `configs/` - optional context profiles
 
-These JSON files are **authored threat-model profiles**, one per common audit scenario:
+These JSON files are optional, answer-free context profiles. They are not Flounder product modes and they are not loaded by default. They exist for cases where an operator deliberately wants to give the model a familiar frame for a class of target.
 
-| File | Scenario |
+| File | Optional context |
 | --- | --- |
-| `vulnerability-audit.default.json` | generic security audit (domain-agnostic) |
-| `solidity-contract-audit.default.json` | Solidity / EVM smart contracts |
-| `cairo-starknet-audit.default.json` | Cairo contracts, Starknet OS, StarkGate-style bridges |
+| `vulnerability-audit.default.json` | generic security audit context (domain-agnostic) |
 | `zk-constraint-audit.default.json` | zero-knowledge / constraint-system circuits |
+| `solidity-contract-audit.default.json` | Solidity / EVM smart contracts |
 | `thegraph-contracts.default.json` | The Graph protocol contracts |
+| `cairo-starknet-audit.default.json` | Cairo contracts and Starknet-related components |
 
-Each is a `projectContext` scaffold for that class — the kind of assets, attacker
+Each is a `projectContext` scaffold for that class: the kind of assets, attacker
 capabilities, trust boundaries, invariants, and focus areas a known stack tends to have.
+The model still owns the audit strategy and the framework still requires execution proof.
 
 ## Not used by default — and that's deliberate
 
@@ -26,7 +27,7 @@ meant to find novel bugs, so the profiles stay off unless you ask for them.
 They exist for the cases where that trade-off is worth it: a **well-trodden vulnerability
 class** where seeding the common surface is genuinely useful, a **capped budget** that
 needs a head start on focus/out-of-scope, or **quickly framing scope** for a familiar
-stack. In those situations, opt in:
+stack. The Solidity/EVM and ZK profiles are common high-signal examples. In those situations, opt in:
 
 ```bash
 flounder run --config ./configs/solidity-contract-audit.default.json \
@@ -74,7 +75,7 @@ is real because a PoC ran, never because it matched a profile. (The profiles' ow
 
 ## Extending this directory
 
-This is the opt-in home for **domain knowledge packs**. To add one, keep it generic to a
+This is the opt-in home for **domain context packs**. To add one, keep it generic to a
 *class* and **answer-free**: capture the attack surface and invariants a class tends to
 have, never a specific known bug in a specific target. Anything target-specific belongs in
 that audit's `--corpus`, not here.
