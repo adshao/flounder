@@ -516,6 +516,13 @@ test("api: launching prepare clears the current scope inventory projection", asy
     assert.deepEqual(scopes.scopes, []);
     assert.equal(scopes.progress.total, 0);
 
+    const currentDecisions = await json(await fetch(`${base}/api/projects/${created.uuid}/confirm-decisions`));
+    assert.deepEqual(currentDecisions.confirmDecisions, []);
+    const staleDecisions = await json(await fetch(`${base}/api/projects/${created.uuid}/confirm-decisions?includeStale=true`));
+    assert.equal(staleDecisions.confirmDecisions.length, 1);
+    assert.equal(staleDecisions.confirmDecisions[0].bug, "Old verified finding");
+    assert.equal(staleDecisions.confirmDecisions[0].material_stale, true);
+
     const list = await json(await fetch(`${base}/api/projects`));
     const snapshot = list.projects.find((project) => project.uuid === created.uuid);
     assert.equal(snapshot.progress.total, 0);
@@ -604,6 +611,13 @@ test("api: running prepare resets the project current view to the new material s
     assert.equal(staleFindings.total, 1);
     assert.equal(staleFindings.findings[0].title, "Old verified finding");
     assert.equal(staleFindings.findings[0].material_stale, true);
+
+    const currentDecisions = await json(await fetch(base + `/api/projects/${created.uuid}/confirm-decisions`));
+    assert.deepEqual(currentDecisions.confirmDecisions, []);
+    const staleDecisions = await json(await fetch(base + `/api/projects/${created.uuid}/confirm-decisions?includeStale=true`));
+    assert.equal(staleDecisions.confirmDecisions.length, 1);
+    assert.equal(staleDecisions.confirmDecisions[0].bug, "Old verified finding");
+    assert.equal(staleDecisions.confirmDecisions[0].material_stale, true);
 
     const list = await json(await fetch(base + "/api/projects"));
     const snapshot = list.projects.find((project) => project.uuid === created.uuid);

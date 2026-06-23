@@ -245,8 +245,9 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "GET", path: "/api/projects/:uuid/confirm-decisions",
-    summary: "List confirm decisions (one per distinct bug). Filter ?reproduced=yes for the bugs actually reproduced on the real target (the audit's payoff).",
-    params: { uuid: "project UUID" }, query: { reproduced: "string? — e.g. 'yes' for confirmed bugs" },
+    summary: "List current-material confirm decisions (one per distinct bug). Filter ?reproduced=yes for bugs reproduced on the real target; pass ?includeStale=true to inspect decisions from older prepared material snapshots.",
+    params: { uuid: "project UUID" },
+    query: { reproduced: "string? — e.g. 'yes' for confirmed bugs", includeStale: "boolean? — include decisions from older prepared material snapshots" },
     handler: confirmDecisionsList,
   }),
 
@@ -2258,12 +2259,36 @@ function globalFindingStats(rows: Array<Record<string, unknown>>): { total: numb
 }
 
 function confirmDecisionsList(c: Ctx): void {
-  withProject(c, (id) => {
+  withProject(c, (id, project) => {
     const reproduced = c.url.searchParams.get("reproduced");
+    const includeStale = c.url.searchParams.get("includeStale") === "true";
+    const allRuns = c.store.listRuns(id);
+    const materialBoundary = latestPrepareRun(allRuns);
+    const activePrepareRefresh = activePrepareRefreshStartedAt(c.store, project, materialBoundary);
+    const currentRuns = currentVisibleRuns(allRuns, materialBoundary, activePrepareRefresh);
+    const currentRunIds = runIdSet(currentRuns);
     let rows = c.store.listConfirmDecisions(id);
+    rows = rows
+      .filter((row) => includeStale || (!activePrepareRefresh && rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)))
+      .map((row) => annotateConfirmDecisionMaterialStaleness(row, currentRunIds, materialBoundary, activePrepareRefresh));
     if (reproduced) rows = rows.filter((row) => row.reproduced === reproduced);
     sendJson(c.res, 200, { confirmDecisions: rows });
   });
+}
+
+function annotateConfirmDecisionMaterialStaleness(
+  row: Record<string, unknown>,
+  currentRunIds: Set<number>,
+  materialBoundary?: Record<string, unknown>,
+  activePrepareRefreshStartedAt?: string,
+): Record<string, unknown> {
+  if (!activePrepareRefreshStartedAt && rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)) return row;
+  return {
+    ...row,
+    material_stale: true,
+    stale_since_prepare_run_id: materialBoundary?.id,
+    stale_since_prepare_started_at: activePrepareRefreshStartedAt ?? materialBoundary?.started_at,
+  };
 }
 
 // ---- providers (model-strategy profiles) ----------------------------------
