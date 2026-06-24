@@ -1,10 +1,11 @@
 # Security Policy
 
-`flounder` is built for authorized white-hat source auditing. It can help produce high-impact vulnerability hypotheses, so project use and contributions must preserve the safety boundary.
+`flounder` is built for white-hat source auditing. It can help produce high-impact vulnerability hypotheses, so project use and contributions must preserve the safety boundary.
 
 ## Supported Use
 
-- Audit only code you own, code you are engaged to audit, or code that is explicitly in a public bug-bounty scope.
+- You may create projects and run sealed local audits for source code that is publicly available, code you own, code you are engaged to audit, or code that is explicitly in a public bug-bounty scope.
+- Treat public-source audits without a bug bounty as private white-hat research: keep verification local, do not interact with live systems except by read-only access or local forks, and disclose privately to maintainers before sharing details.
 - `flounder run` verification stays local-only and network-sealed: unit tests, regtest, devnet, forked nodes, or isolated fixtures.
 - `flounder confirm` may fork and read a live network/data to reproduce a finding locally, but it must never broadcast a transaction to a non-local network or write to any live system — replay the exploit against a local fork only.
 - Never broadcast transactions or run exploit flows against a public testnet or mainnet, in either command.

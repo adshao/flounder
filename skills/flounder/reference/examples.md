@@ -6,7 +6,7 @@ Read the root `SKILL.md` first. These examples show common audit paths.
 
 - [Agent Requests](#agent-requests)
 - [Blind Audit / Capability Check](#blind-audit--capability-check)
-- [Open-World Bounty Audit](#open-world-bounty-audit)
+- [Open-World Public-Source Audit](#open-world-public-source-audit)
 - [ZK / Proof-System Audit](#zk--proof-system-audit)
 - [Incident Investigation](#incident-investigation)
 - [Dashboard Project Triage](#dashboard-project-triage)
@@ -21,13 +21,13 @@ Blind audit this repository with Flounder. Do not use external hints or incident
 
 Investigate why transaction 0x... was hacked with Flounder.
 
-Run an open-world bug-bounty audit for ./contracts. Use the official docs and public bounty scope if available.
+Run an open-world public-source audit for ./contracts. Use the official docs, deployments, and public bounty scope if available.
 ```
 
 ## Blind Audit / Capability Check
 
-Use this to measure Flounder's unaided capability on an authorized target. The
-target can be prepared by Flounder, or supplied as existing local source. Do not
+Use this to measure Flounder's unaided capability on a public-source or
+authorized target. The target can be prepared by Flounder, or supplied as existing local source. Do not
 use incident writeups, known bug names, exploit theories, or answer-bearing
 corpus.
 
@@ -64,17 +64,17 @@ flounder confirm ~/.flounder/evm-audit-<timestamp> \
   --source ./contracts --build-root .
 ```
 
-## Open-World Bounty Audit
+## Open-World Public-Source Audit
 
 Use this when the user permits Flounder to collect public context, official
-docs, deployment facts, and bounty scope. Add source paths when you already
-have a checkout; the scenario is defined by the allowed open-world context, not
-by whether source was pre-supplied.
+docs, deployment facts, and bounty scope when available. Add source paths when
+you already have a checkout; the scenario is defined by the allowed open-world
+context, not by whether source was pre-supplied or whether a bounty exists.
 
 ```bash
 flounder ui
 # Create a project with source/build paths and a task clue such as:
-# "Open-world bounty audit for <project>; collect official docs, deployments, and scope."
+# "Open-world public-source audit for <project>; collect official docs, deployments, and scope."
 # Leave Run after create checked, or later:
 curl -X POST http://127.0.0.1:4500/api/projects/<uuid>/runs \
   -H 'content-type: application/json' \
