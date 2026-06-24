@@ -17,6 +17,8 @@ Flounder turns modern coding agents into an end-to-end security audit system. Gi
 
 The important distinction is that Flounder is not a scanner for one stack, a checklist runner, or a set of hand-written bug rules. It is a thin white-hat audit workflow around the model: the model decides how to reason about the target, while Flounder supplies the sandbox, command policy, durable state, execution gates, daemon control plane, and reporting needed to make that reasoning usable.
 
+<p align="center"><img src="assets/screenshots/demo-full-overview.png" alt="Flounder dashboard showing a running audit workflow, live activity, findings, and report status." width="900" /></p>
+
 ## Use It With An Agent
 
 Install the skill once from GitHub, even when you do not have the source
