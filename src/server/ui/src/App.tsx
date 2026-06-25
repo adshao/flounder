@@ -29,6 +29,8 @@ import {
   fmtDur,
   fmtTime,
   isVerifyRun,
+  verifyRunProgress,
+  verifyRunRechecksConfirmed,
   pct,
   phaseState,
   PHASES,
@@ -719,6 +721,10 @@ function pendingVerifyFindings(rows: FindingRow[] | undefined): FindingRow[] {
   return topCandidateFindings(unresolved);
 }
 
+function rawPendingVerifyCount(rows: FindingRow[] | undefined): number {
+  return activeFindings(rows).filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
+}
+
 function reportableFindings(rows: FindingRow[] | undefined, requiresConfirmation = true): FindingRow[] {
   return activeFindings(rows).filter((finding) => requiresConfirmation ? finding.confirm_status === "reproduced" : isExecutionConfirmedFinding(finding));
 }
@@ -746,13 +752,18 @@ function confirmButtonTitle(count: number, locallyVerified: number, launchLocked
 
 function verifyStatusSummary(rows: FindingRow[] | undefined): string {
   const passed = localVerifiedFindings(rows).length;
-  const pending = (rows ?? []).filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
-  const refuted = (rows ?? []).filter((finding) => finding.status === "refuted").length;
+  const pending = rawPendingVerifyCount(rows);
+  const refuted = activeFindings(rows).filter((finding) => finding.status === "refuted").length;
   const parts = [];
   if (passed) parts.push(`${passed} passed`);
   if (pending) parts.push(`${pending} pending`);
   if (refuted) parts.push(`${refuted} refuted`);
   return parts.length ? `Local verification: ${parts.join(" · ")}` : "";
+}
+
+function activeVerifySummary(run: RunRow | undefined): string {
+  const progress = verifyRunProgress(run);
+  return progress ? `Local verification: ${progress.done} checked · ${progress.remaining} pending` : "";
 }
 
 function findingsSummary(detail: ProjectDetail): string {
@@ -2343,19 +2354,25 @@ function ProjectDetailView(props: {
   const confirmed = allFindings.filter((finding) => finding.status === "confirmed-executable" || finding.status === "confirmed-differential").length;
   const reproduced = confirmedDecisions(confirmDecisions).length;
   const runningRun = currentRuns.find((run) => run.status === "running");
+  const runningVerify = isVerifyRun(runningRun) ? runningRun : undefined;
+  const runningVerifyProgress = verifyRunProgress(runningVerify);
   const hasPipelineRun = detail.runs.some((run) => run.kind === "run");
   const runningInactive = runningRun ? runInactiveLabel(runningRun) : null;
   const requiresConfirmation = needsRealTargetConfirmation(detail);
-  const pendingConfirm = pendingConfirmFindings(allFindings, requiresConfirmation).length;
-  const pendingVerify = verifyCandidates.length;
+  const rawPendingVerify = rawPendingVerifyCount(allFindings);
+  const verifyRechecksConfirmed = verifyRunRechecksConfirmed(runningVerify, rawPendingVerify, activeFindings(allFindings).length);
+  const pendingConfirmBase = pendingConfirmFindings(allFindings, requiresConfirmation).length;
+  const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmBase;
+  const pendingVerify = runningVerifyProgress ? runningVerifyProgress.remaining : verifyCandidates.length;
   const pendingReports = pendingFormalReports(allFindings, requiresConfirmation).length;
   const locallyVerified = localVerifiedFindings(allFindings).length;
+  const displayedVerified = runningVerifyProgress ? runningVerifyProgress.done : locallyVerified;
   const reportsReady = reportableFindings(allFindings, requiresConfirmation).filter((finding) => finding.has_report).length;
   const reportStat = pendingReports > 0 ? pendingReports : reportsReady;
   const reportLabel = pendingReports > 0 ? "to report" : "reports";
   const candidateStat = pendingVerify > 0 ? pendingVerify : overviewCandidates.length;
   const candidateLabel = pendingVerify > 0 ? "to verify" : "candidates";
-  const localVerifySummary = verifyStatusSummary(allFindings);
+  const localVerifySummary = activeVerifySummary(runningVerify) || verifyStatusSummary(allFindings);
   const setupAttention = prepareMaterialsAttention(detail.prepareSummary);
   const launchLocked = props.busy || Boolean(runningRun);
   const requiredProviders = requiredProviderProfiles(detail, providers);
@@ -2558,7 +2575,7 @@ function ProjectDetailView(props: {
           <Stat n={progress.total} label="mapped" onClick={() => setTab("scopes")} />
           <Stat n={progress.audited} label="audited" onClick={() => setTab("scopes")} />
           <Stat n={candidateStat} label={candidateLabel} onClick={() => { props.setFindingStatus(""); props.setFindingQuery(""); setTab("overview"); scrollToProjectSection("project-top-candidates"); }} />
-          <Stat n={locallyVerified} label="verified" good onClick={() => { props.setFindingStatus("execution-confirmed"); props.setFindingQuery(""); setTab("findings"); }} />
+          <Stat n={displayedVerified} label={runningVerifyProgress ? "checked" : "verified"} good onClick={() => { props.setFindingStatus("execution-confirmed"); props.setFindingQuery(""); setTab("findings"); }} />
           <Stat n={reproduced} label="reproduced" onClick={() => { setTab("overview"); scrollToProjectSection("project-real-target-decisions"); }} />
           <Stat n={reportStat} label={reportLabel} onClick={() => { setTab("overview"); scrollToProjectSection("project-real-target-decisions"); }} />
         </div>
@@ -2766,10 +2783,14 @@ function ProjectOverview({
   const currentRuns = currentMaterialRuns(detail.runs, detail.material);
   const current = currentRuns.find((run) => run.status === "running") ?? currentRuns[0];
   const runningRun = currentRuns.find((run) => run.status === "running");
-  const pendingConfirm = pendingConfirmFindings(detail.allFindings, needsRealTargetConfirmation(detail)).length;
+  const runningVerify = isVerifyRun(runningRun) ? runningRun : undefined;
+  const runningVerifyProgress = verifyRunProgress(runningVerify);
+  const rawPendingVerify = rawPendingVerifyCount(detail.allFindings);
+  const verifyRechecksConfirmed = verifyRunRechecksConfirmed(runningVerify, rawPendingVerify, activeFindings(detail.allFindings).length);
+  const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmFindings(detail.allFindings, needsRealTargetConfirmation(detail)).length;
   const sourceConfirmed = detail.statusCounts["confirmed-source"] ?? 0;
   const suspectedLeads = detail.statusCounts.suspected ?? 0;
-  const unverifiedLeads = sourceConfirmed + suspectedLeads;
+  const unverifiedLeads = rawPendingVerify || sourceConfirmed + suspectedLeads;
   const decisions = detail.confirmDecisions.length;
   const reproduced = confirmedDecisions(detail.confirmDecisions).length;
   const progress = detail.progress;
@@ -2781,8 +2802,12 @@ function ProjectOverview({
   const runValue = current ? runKindLabel(current.kind, current) : "No runs yet";
   const runDetail = current ? overviewRunDetail(current, detail.confirmDecisions) : "Start Run to prepare materials, map/dig, confirm impact, and generate reports.";
   const synthesis = runStages(latestRunWithStage(detail, "synthesis")).synthesis;
-  const verifyValue = verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : "No candidates";
-  const verifyDetail = verifyCount
+  const verifyValue = runningVerifyProgress
+    ? `${runningVerifyProgress.done}/${runningVerifyProgress.target} checked`
+    : verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : "No candidates";
+  const verifyDetail = runningVerifyProgress
+    ? `${plural(runningVerifyProgress.remaining, "finding")} left in the active Verify run`
+    : verifyCount
     ? `${plural(verifyCount, "prioritized candidate")} selected from ${plural(unverifiedLeads, "unverified lead")}`
     : pendingConfirm
       ? "Execution-confirmed findings can move to real-target confirmation."
@@ -2799,14 +2824,20 @@ function ProjectOverview({
       : "Runs after dig when findings exist.";
   const proofDetail = pendingConfirm
     ? `${plural(pendingConfirm, "finding")} waiting for Confirm`
+    : verifyRechecksConfirmed
+      ? "Waiting for Verify to finish"
     : decisions
       ? `${reproduced}/${decisions} confirm decisions reproduced`
       : "Available after an audit-confirmed finding exists";
-  const candidateTitle = verifyCount ? "Candidates to verify" : "Most suspicious bugs";
-  const candidateSummary = verifyCount
+  const candidateTitle = runningVerifyProgress ? "Verification in progress" : verifyCount ? "Candidates to verify" : "Most suspicious bugs";
+  const candidateSummary = runningVerifyProgress
+    ? `${runningVerifyProgress.done}/${runningVerifyProgress.target} findings checked`
+    : verifyCount
     ? `${verifyCount} prioritized ${verifyCount === 1 ? "candidate needs" : "candidates need"} verification`
     : "No candidate waiting for execution verification";
-  const candidateDetail = verifyCount
+  const candidateDetail = runningVerifyProgress
+    ? `${plural(runningVerifyProgress.remaining, "finding")} left before Confirm can use the refreshed local results.`
+    : verifyCount
     ? "These suspected or source-confirmed findings are the next local verification worklist."
     : "Highest-ranked dig and synthesis outputs are shown here after local verification.";
   const candidateEmpty = verifyCount
@@ -3350,16 +3381,22 @@ function ProjectFindings(props: {
     : "No findings yet. Findings appear after dig audits mapped scopes and produces a locally checked claim.";
   const requiresConfirmation = needsRealTargetConfirmation(props.detail);
   const allFindings = props.detail.allFindings ?? [];
+  const currentRuns = currentMaterialRuns(props.detail.runs, props.detail.material);
+  const runningRun = currentRuns.find((run) => run.status === "running");
+  const runningVerify = isVerifyRun(runningRun) ? runningRun : undefined;
+  const runningVerifyProgress = verifyRunProgress(runningVerify);
+  const rawPendingVerify = rawPendingVerifyCount(allFindings);
+  const verifyRechecksConfirmed = verifyRunRechecksConfirmed(runningVerify, rawPendingVerify, activeFindings(allFindings).length);
   const journey = [
     {
       label: "Verify",
-      count: pendingVerifyFindings(allFindings).length,
-      detail: "Candidates that still need local execution proof.",
+      count: runningVerifyProgress ? runningVerifyProgress.remaining : pendingVerifyFindings(allFindings).length,
+      detail: runningVerifyProgress ? `${runningVerifyProgress.done}/${runningVerifyProgress.target} findings checked in the active Verify run.` : "Candidates that still need local execution proof.",
     },
     {
       label: "Confirm",
-      count: pendingConfirmFindings(allFindings, requiresConfirmation).length,
-      detail: requiresConfirmation ? "Locally verified findings waiting for real-target reproduction." : "Not required for this source-only target.",
+      count: verifyRechecksConfirmed ? 0 : pendingConfirmFindings(allFindings, requiresConfirmation).length,
+      detail: verifyRechecksConfirmed ? "Waiting for active Verify to refresh local results." : requiresConfirmation ? "Locally verified findings waiting for real-target reproduction." : "Not required for this source-only target.",
     },
     {
       label: "Report",

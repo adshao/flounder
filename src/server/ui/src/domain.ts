@@ -172,6 +172,25 @@ export function isVerifyRun(run: RunRow | undefined): boolean {
   return Boolean(run && parseJson<{ verify?: boolean }>(run.budgets_json, {}).verify === true);
 }
 
+export function isVerifyFromStartRun(run: RunRow | undefined): boolean {
+  return Boolean(run && parseJson<{ verifyFromStart?: boolean }>(run.budgets_json, {}).verifyFromStart === true);
+}
+
+export function verifyRunProgress(run: RunRow | undefined): { done: number; target: number; remaining: number } | null {
+  if (!isVerifyRun(run) || run?.run_scopes_target == null) return null;
+  const target = Math.max(0, run.run_scopes_target);
+  const done = Math.min(target, Math.max(0, run.run_scopes_done ?? 0));
+  return { done, target, remaining: Math.max(0, target - done) };
+}
+
+export function verifyRunRechecksConfirmed(run: RunRow | undefined, pendingVerifyCount: number, totalFindingCount = 0): boolean {
+  const progress = verifyRunProgress(run);
+  if (!progress) return false;
+  return isVerifyFromStartRun(run)
+    || (totalFindingCount > 0 && progress.target >= totalFindingCount)
+    || progress.target > Math.max(0, pendingVerifyCount) + progress.done;
+}
+
 export function runScopeBatchComplete(run: RunRow | undefined): boolean {
   return Boolean(run?.status === "running" && run.run_scopes_target != null && (run.run_scopes_done ?? 0) >= run.run_scopes_target);
 }
@@ -240,7 +259,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const conf = latest("confirm");
   const synthesis = stages(latestRunWithStage(runs, "synthesis")).synthesis;
   const requiresConfirmation = needsRealTargetConfirmation(detail);
-  const pendingConfirm = requiresConfirmation
+  const pendingConfirmRaw = requiresConfirmation
     ? findings.filter((finding) => isExecutionConfirmedFinding(finding) && !finding.confirm_status).length
     : 0;
   const pendingVerify = findings.filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
@@ -255,6 +274,9 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const mapRunning = Boolean(audit && audit.kind !== "audit" && !digStarted);
   const batchDone = runScopeBatchComplete(audit);
   const isVerify = isVerifyRun(audit);
+  const verifyProgress = verifyRunProgress(audit);
+  const verifyRechecksConfirmed = verifyRunRechecksConfirmed(audit, pendingVerify, findings.length);
+  const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmRaw;
   const finalizingAudit = Boolean(batchDone && audit && !isVerify && !activeScope);
   const digRunning = Boolean(audit && !isVerify && (audit.kind === "audit" || digStarted) && !finalizingAudit);
   const thisRun = audit && audit.run_scopes_target != null
@@ -262,8 +284,8 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
       ? " · finalizing"
       : ` · current run ${audit.run_scopes_done ?? 0}/${audit.run_scopes_target}`
     : "";
-  const verifyStat = isVerify
-    ? `Verifying ${audit?.run_scopes_done ?? 0}/${audit?.run_scopes_target ?? "?"} findings${detail.findingsTotal ? ` · ${detail.findingsTotal} in project` : ""}`
+  const verifyStat = verifyProgress
+    ? `Verifying ${verifyProgress.done}/${verifyProgress.target} findings${detail.findingsTotal ? ` · ${detail.findingsTotal} in project` : ""}`
     : "";
   const auditRun = audit ?? auditLatest;
   const startMs = auditRun?.started_at ? new Date(auditRun.started_at).getTime() : 0;
@@ -301,9 +323,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
     map: { status: mapRunning ? "running" : progress.total > 0 ? "done" : "none", stat: progress.total > 0 ? `${progress.total} scopes mapped` : mapRunning ? "Mapping scopes" : "Not started", dur: mapDur },
     dig: {
       status: digRunning ? "running" : progress.audited > 0 ? (progress.pending > 0 ? "partial" : "done") : progress.total > 0 ? "pending" : "none",
-      stat: isVerify
-        ? verifyStat
-        : finalizingAudit
+      stat: finalizingAudit
           ? `Verifying candidates · ${progress.audited}/${progress.total} scopes audited${detail.findingsTotal ? ` · ${detail.findingsTotal} in project` : ""}`
           : progress.total > 0
             ? `${progress.audited}/${progress.total} scopes audited · ${progress.pending} pending${detail.findingsTotal ? ` · ${detail.findingsTotal} ${detail.findingsTotal === 1 ? "finding" : "findings"}` : ""}${thisRun}`
@@ -347,6 +367,8 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
     confirm: {
       status: conf?.status === "running"
         ? "running"
+        : verifyRechecksConfirmed
+          ? "pending"
         : !requiresConfirmation && locallyVerified > 0
           ? "done"
           : decisions.length
@@ -356,6 +378,8 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
             : "none",
       stat: !requiresConfirmation && locallyVerified > 0
         ? "Not required"
+        : verifyRechecksConfirmed
+          ? "Waiting for Verify to finish"
         : decisions.length
         ? `${repro}/${decisions.length} reproduced${pendingConfirm ? ` · ${pendingConfirm} waiting` : ""}`
         : pendingConfirm > 0
@@ -392,7 +416,7 @@ export function runProgress(run: RunRow, decisions: ConfirmDecision[]): string {
   }
   if (isVerifyRun(run) && run.run_scopes_target != null) {
     if (runScopeBatchComplete(run)) return `Finalizing verification after ${run.run_scopes_done ?? 0}/${run.run_scopes_target} findings`;
-    return `${run.run_scopes_done ?? 0}/${run.run_scopes_target} findings verified`;
+    return `${run.run_scopes_done ?? 0}/${run.run_scopes_target} findings checked`;
   }
   if (run.run_scopes_target != null) {
     if (runScopeBatchComplete(run)) {

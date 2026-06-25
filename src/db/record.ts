@@ -88,7 +88,7 @@ export class RunRecorder implements RunTracker {
         thinking: cfg.thinkingLevel,
         // Mark a verify run (in the run's budgets only, not the project config) so the dashboard can
         // show "verifying N/M findings" instead of mislabeling it as a dig.
-        budgets: cfg.auditVerify ? { ...configSnapshot(cfg), verify: true } : configSnapshot(cfg),
+        budgets: cfg.auditVerify ? { ...configSnapshot(cfg), verify: true, ...(cfg.auditVerifyFromStart ? { verifyFromStart: true } : {}) } : configSnapshot(cfg),
         // The OS pid lets a supervising run-manager correlate this DB row to the process
         // it spawned (and reconcile status if the process dies before finalize).
         pid: process.pid,

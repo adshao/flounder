@@ -138,6 +138,7 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   if (spec.maxScopes !== undefined) cfg.auditMaxScopes = spec.maxScopes;
   if (spec.digSamples !== undefined) cfg.auditDigSamples = spec.digSamples;
   if (spec.digConcurrency !== undefined) cfg.auditDigConcurrency = spec.digConcurrency;
+  if (spec.verifyFromStart) cfg.auditVerifyFromStart = true;
   if (spec.remap) cfg.auditRemap = true; // re-enumerate scopes from scratch (restart)
   // prepare + confirm derive their own posture from their options (clue / prior run), not from
   // the sealed audit's map/dig flags — return the base cfg (provider/model/out/target) as-is.

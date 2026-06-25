@@ -71,7 +71,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     let phaseStarts = 0;
     const sink = activitySink(() => tracker);
     const makeTracker = (cfg: AuditorConfig, runDir: string, kind: string): RunTracker => {
-      tracker = new RemoteTracker(base, headers, { jobId: job.id, project: cfg.targetName, kind, runDir, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, budgets: cfg.auditVerify ? { ...configSnapshot(cfg), verify: true } : configSnapshot(cfg), additional: phaseStarts > 0 });
+      tracker = new RemoteTracker(base, headers, { jobId: job.id, project: cfg.targetName, kind, runDir, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, budgets: cfg.auditVerify ? { ...configSnapshot(cfg), verify: true, ...(cfg.auditVerifyFromStart ? { verifyFromStart: true } : {}) } : configSnapshot(cfg), additional: phaseStarts > 0 });
       phaseStarts += 1;
       return tracker;
     };

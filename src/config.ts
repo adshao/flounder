@@ -84,6 +84,9 @@ export interface AuditorConfig {
   // enumeration; reuses the confirmation gate. The confirmation step the dig
   // produces on its own, runnable standalone against an existing suspected finding.
   auditVerify?: string;
+  // True when the verify worklist intentionally re-checks already locally confirmed
+  // findings, not just suspected/source-confirmed candidates.
+  auditVerifyFromStart: boolean;
   // CONFIRM mode (`flounder confirm`): the open-world counterpart to the network-sealed
   // `flounder run`. When set, the bash tool swaps to the network-enabled policy (fork/read
   // live networks, fetch, search — never BROADCAST). This is the only capability
@@ -194,6 +197,7 @@ export function defaultConfig(): AuditorConfig {
     auditRemap: false,
     auditMapOnly: false,
     auditRequireInventory: false,
+    auditVerifyFromStart: false,
     confirmMode: false,
     prepareMode: false,
     dryRun: false,
