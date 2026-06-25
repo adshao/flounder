@@ -874,11 +874,11 @@ function currentVisibleRuns(runs: Array<Record<string, unknown>>, boundary?: Rec
   });
 }
 
-function activePrepareRefreshStartedAt(store: MetadataStore, project: Record<string, unknown>, boundary?: Record<string, unknown>): string | undefined {
+function activePrepareRefreshStartedAt(store: MetadataStore, project: Record<string, unknown>, boundary?: Record<string, unknown>, jobs?: Array<Record<string, unknown>>): string | undefined {
   const projectName = stringValue(project.name);
   if (!projectName) return undefined;
   const boundaryStarted = stringValue(boundary?.started_at);
-  const job = store.runningJobs().find((entry) => {
+  const job = (jobs ?? store.runningJobs()).find((entry) => {
     if (stringValue(entry.project) !== projectName) return false;
     const spec = safeParse(entry.spec_json) as { verb?: unknown } | null;
     return spec?.verb === "prepare";
@@ -3073,13 +3073,14 @@ function summarizeDaemonCapabilities(capabilities: unknown): Record<string, unkn
 }
 
 function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}): Array<Record<string, unknown>> {
+  const runningJobs = store.runningJobs();
   const activeByTarget = new Map<string, number>();
-  for (const job of store.runningJobs()) activeByTarget.set(String(job.project), (activeByTarget.get(String(job.project)) ?? 0) + 1);
+  for (const job of runningJobs) activeByTarget.set(String(job.project), (activeByTarget.get(String(job.project)) ?? 0) + 1);
   return store.listProjects(options).map((project) => {
     const id = Number(project.id);
     const allRuns = store.listRuns(id);
     const materialBoundary = latestPrepareRun(allRuns);
-    const activePrepareRefresh = activePrepareRefreshStartedAt(store, project, materialBoundary);
+    const activePrepareRefresh = activePrepareRefreshStartedAt(store, project, materialBoundary, runningJobs);
     const currentRuns = currentVisibleRuns(allRuns, materialBoundary, activePrepareRefresh);
     const viewBoundary = materialViewBoundary(materialBoundary, activePrepareRefresh);
     const scopeBoundary = latestScopeInventoryBoundaryRun(currentRuns);
