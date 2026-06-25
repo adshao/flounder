@@ -394,13 +394,23 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
       store.upsertFindings(created.id, runId, [
         {
           findingKey: "confirmed-bug",
-          title: "Confirmed escrow drain",
+          title: "Confirmed escrow drain through unchecked withdrawal proof",
           location: "src/Vault.sol:88",
           severity: "critical",
           status: "confirmed-executable",
           confidence: 0.91,
         },
       ], "differential");
+      store.upsertFindings(created.id, runId, [
+        {
+          findingKey: "duplicate-suspected-bug",
+          title: "Escrow drain is reachable through unchecked withdrawal proof",
+          location: "src/Vault.sol:88",
+          severity: "high",
+          status: "suspected",
+          confidence: 0.72,
+        },
+      ], "synthesis");
     } finally {
       store.close();
     }
@@ -427,6 +437,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
     const suspected = detail.allFindings.find((finding) => finding.finding_key === "suspected-bug");
     assert.equal(suspected.timeline[0].reason, "synthesis");
+    assert.equal(detail.allFindings.some((finding) => finding.finding_key === "duplicate-suspected-bug"), false);
   });
 });
 

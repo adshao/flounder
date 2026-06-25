@@ -3015,11 +3015,11 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
 function verifyWorklist(store: MetadataStore, projectId: number, currentResultRunIds: Set<number>, materialBoundary?: Record<string, unknown>): unknown[] {
   return reportableFindings(store.listFindings(projectId)
     .filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary))
-    .filter((row) => !isIgnoredFinding(row))
+    .filter((row) => !isIgnoredFinding(row)))
     .filter((row) => {
       const status = String(row.status ?? "");
       return status === "suspected" || status === "confirmed-source";
-    }))
+    })
     .map((row) => normalizeProjectVerifyFindings(findingDetailRow(row)));
 }
 
