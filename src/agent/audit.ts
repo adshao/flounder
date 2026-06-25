@@ -191,41 +191,62 @@ export async function runAudit(
     // VERIFY posture: confirm-or-refute existing suspected finding(s) by execution.
     // Skips map/dig enumeration; for each finding it runs a focused session seeded
     // with the claim ("write a PoC that triggers it, or refute it"), routed through
-    // the same confirmation gate. The shared post-loop differential stage then
-    // upgrades any confirmed-executable finding to confirmed-differential. This is
-    // exactly the confirmation tail of a dig, runnable standalone on a prior finding.
+    // the same confirmation gate. Each claim gets its own workspace/session so one
+    // candidate's generated PoC files cannot influence the next candidate's verdict.
+    // This is exactly the confirmation tail of a dig, runnable standalone on a prior finding.
     const toVerify = await loadFindingsToVerify(cfg.auditVerify);
     await logger.event("audit_verify_start", { findings: toVerify.length });
     const verifyCfg = withRole(cfg, "dig");
     const aggregated: AgentFinding[] = [];
     const aggregatedSteps: TranscriptStep[] = [];
+    const workspaceRoots = cfg.buildRoot ? [cfg.buildRoot] : cfg.sourcePaths;
     recorder.runScopes(0, toVerify.length); // surface "verifying 0/N" before the first verdict lands
     for (const [idx, finding] of toVerify.entries()) {
-      clearScratchFindings(session);
-      const phase = await runPhase(verifyCfg, { mode: "verify", verifySeed: buildVerifySeed(finding), maxSteps: cfg.auditDigSteps });
+      const verifyLabel = `verify-${idx + 1}`;
+      const verifyWorkspace = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, `audit/${verifyLabel}`);
+      const verifySession = newSession();
+      verifySession.workspace = verifyWorkspace;
+      verifySession.baselineFiles = await listWorkspaceFiles(verifyWorkspace.absolute);
+      if (session.buildCacheDir) verifySession.buildCacheDir = session.buildCacheDir;
+      await copyCorpusIntoWorkspace(verifyWorkspace, corpus);
+      const verifyCtx: ToolContext = { cfg: verifyCfg, source, corpus, memory, logger, session: verifySession };
+      clearScratchFindings(verifySession);
+      const phase = await runPhase(verifyCfg, { mode: "verify", verifySeed: buildVerifySeed(finding), maxSteps: cfg.auditDigSteps }, { ctx: verifyCtx, cwd: verifyWorkspace.absolute });
       aggregatedSteps.push(...phase.steps);
-      ingestFindingsFromScratch(session);
+      ingestFindingsFromScratch(verifySession);
       // Carry the original suspected finding's identity onto THIS claim's verdict so it flips that
       // row (status + PoC) rather than inserting a duplicate. The link is positional — claim N is
       // seeded from input finding N — so it survives the verify session renaming the title. Only the
       // primary verdict inherits it; any extra finding the session split out stays its own new row.
       const originId = typeof finding.originId === "number" ? finding.originId : typeof finding.origin_id === "number" ? finding.origin_id : undefined;
       const inheritedScopeId = typeof finding.scopeId === "string" ? finding.scopeId : typeof finding.scope_id === "string" ? finding.scope_id : undefined;
-      const primaryVerdict = session.findings[0];
+      const primaryVerdict = verifySession.findings[0];
       if (originId !== undefined && primaryVerdict) primaryVerdict.originId = originId;
       if (inheritedScopeId) {
-        for (const produced of session.findings) if (!produced.scopeId) produced.scopeId = inheritedScopeId;
+        for (const produced of verifySession.findings) if (!produced.scopeId) produced.scopeId = inheritedScopeId;
       }
-      for (const produced of session.findings) aggregated.push(produced);
-      recorder.findings(session.findings, logger.runDir, `verify ${idx + 1}/${toVerify.length}`); // persist this verdict live (flips the original when originId is set)
+      for (const produced of verifySession.findings) {
+        if (produced.confirmationStatus !== "confirmed-executable" || !produced.fixPatch || !produced.commandRunId) continue;
+        const exploitRun = verifySession.commandRuns.find((run) => run.id === produced.commandRunId);
+        if (!exploitRun) continue;
+        const result = await runDifferentialConfirmation({ workspace: verifyWorkspace, finding: produced, exploitRun, baselineFiles: verifySession.baselineFiles, cfg: verifyCfg, logger, ...(verifySession.buildCacheDir ? { cacheDir: verifySession.buildCacheDir } : {}) });
+        if (result.confirmed) produced.confirmationStatus = "confirmed-differential";
+      }
+      const commandIdPrefix = `${verifyLabel}:`;
+      for (const produced of verifySession.findings) if (produced.commandRunId) produced.commandRunId = `${commandIdPrefix}${produced.commandRunId}`;
+      session.commandRuns.push(...verifySession.commandRuns.map((run) => ({ ...run, id: `${commandIdPrefix}${run.id}` })));
+      for (const [scratchPath, content] of verifySession.scratchFiles) session.scratchFiles.set(`${verifyLabel}/${scratchPath}`, content);
+      for (const produced of verifySession.findings) aggregated.push(produced);
+      recorder.findings(verifySession.findings, logger.runDir, `verify ${idx + 1}/${toVerify.length}`); // persist this verdict live (flips the original when originId is set)
       recorder.runScopes(idx + 1, toVerify.length); // live progress for the UI
-      await logger.event("audit_verify_done", { index: idx + 1, of: toVerify.length, claim: String(finding.title ?? "").slice(0, 90), produced: session.findings.length });
+      await logger.event("audit_verify_done", { index: idx + 1, of: toVerify.length, claim: String(finding.title ?? "").slice(0, 90), produced: verifySession.findings.length });
     }
     aggregated.forEach((produced, i) => {
       produced.id = `f${i + 1}`;
     });
     session.findings = aggregated;
     session.counters.finding = aggregated.length;
+    digDifferentialDone = true;
     manualFindings = true;
     steps = aggregatedSteps;
     stoppedReason = phaseFailureReason ?? "finished";
@@ -306,7 +327,7 @@ export async function runAudit(
       const live = options.control?.getRunScopesTarget?.();
       const raw = typeof live === "number" && Number.isFinite(live) ? live : cfg.auditMaxScopes;
       if (toDig.length === 0) return 0;
-      return Math.max(1, Math.min(toDig.length, Math.floor(raw)));
+      return Math.min(toDig.length, Math.max(0, Math.floor(raw)));
     };
     const effectiveRunScopesTarget = (done: number): number => Math.max(done, requestedRunScopesTarget());
     let reportedRunScopesTarget = effectiveRunScopesTarget(0);

@@ -6,6 +6,7 @@
 
 import path from "node:path";
 import os from "node:os";
+import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
@@ -40,10 +41,16 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
   const maxConcurrent = Math.max(1, opts.concurrency ?? 2);
   const inflight = new Map<number, AbortController>(); // jobId -> abort
   const runScopeTargets = new Map<number, number>(); // jobId -> live dig-batch target
+  const instanceId = randomUUID();
+  const heartbeat = (): void => {
+    void post(base, headers, "/api/daemon/heartbeat", { instanceId, activeJobIds: [...inflight.keys()] });
+  };
 
   const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", capabilities: await daemonCapabilities(), workspace }) }).catch(() => null);
   if (!reg || !reg.ok) throw new Error(`daemon: could not register with ${base} (status ${reg ? reg.status : "no response"}) — check --server and --token`);
   console.log(`[flounder daemon] connected to ${base}  (out=${out}, workspace=${workspace}, concurrency=${maxConcurrent})`);
+  setInterval(heartbeat, 10_000);
+  heartbeat();
 
   const claimLoop = async (): Promise<void> => {
     while (inflight.size < maxConcurrent) {
@@ -58,6 +65,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
   const runJob = async (job: { id: number; project: string; spec: LaunchSpec }): Promise<void> => {
     const abort = new AbortController();
     inflight.set(job.id, abort);
+    heartbeat();
     const spec: LaunchSpec = { ...job.spec, out };
     let tracker: RemoteTracker | undefined;
     let phaseStarts = 0;
@@ -128,6 +136,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     } finally {
       inflight.delete(job.id);
       runScopeTargets.delete(job.id);
+      heartbeat();
       void claimLoop();
     }
   };
@@ -225,6 +234,35 @@ async function runPipelineJob(
   });
   await ctx.flushTracker();
 
+  const verify = await pipelineWorklist(base, headers, spec.target, "verify", spec.verifyFromStart === true);
+  if (verify.verifyFindings.length > 0) {
+    const verifySpec: LaunchSpec = {
+      ...spec,
+      verb: "audit",
+      dir: undefined,
+      sourcePaths: [staged],
+      buildRoot: staged,
+      verifyFindings: verify.verifyFindings,
+    };
+    const verifyCfg = specToConfig(verifySpec, ctx.out, ctx.workspace);
+    const verifyTempDir = await mkdtemp(path.join(os.tmpdir(), `flounder-verify-${ctx.jobId}-`));
+    try {
+      const vf = path.join(verifyTempDir, "findings.json");
+      await writeFile(vf, JSON.stringify(verify.verifyFindings), "utf8");
+      verifyCfg.auditVerify = vf;
+      await runAudit(verifyCfg, {
+        kind: "audit",
+        signal: ctx.signal,
+        makeTracker: ctx.makeTracker,
+        onActivity: ctx.onActivity,
+        ...(ctx.mockLlm ? { llm: new MockAuditLlmClient() } : {}),
+      });
+    } finally {
+      await rm(verifyTempDir, { recursive: true, force: true });
+    }
+    await ctx.flushTracker();
+  }
+
   const confirm = await pipelineWorklist(base, headers, spec.target, "confirm");
   if (confirm.inputRunDir && confirm.inputRunDirs.length > 0 && confirm.confirmKeys.length > 0) {
     const confirmSpec: LaunchSpec = {
@@ -272,23 +310,30 @@ async function runPipelineJob(
   }
 }
 
-async function pipelineWorklist(base: string, headers: Record<string, string>, project: string, phase: "confirm" | "report"): Promise<{
+async function pipelineWorklist(base: string, headers: Record<string, string>, project: string, phase: "verify" | "confirm" | "report", verifyFromStart = false): Promise<{
+  verifyFindings: unknown[];
   inputRunDir?: string;
   inputRunDirs: string[];
   confirmKeys: string[];
   reportFindings: ReportFindingSpec[];
 }> {
-  const res = await fetch(base + "/api/daemon/pipeline-worklist", { method: "POST", headers, body: JSON.stringify({ project, phase }) });
+  const res = await fetch(base + "/api/daemon/pipeline-worklist", {
+    method: "POST",
+    headers,
+    body: JSON.stringify({ project, phase, ...(phase === "verify" && verifyFromStart ? { verifyFromStart: true } : {}) }),
+  });
   if (!res.ok) throw new Error(`pipeline ${phase} worklist failed (${res.status})`);
   const body = (await res.json().catch(() => ({}))) as {
     inputRunDir?: unknown;
     inputRunDirs?: unknown;
     confirmKeys?: unknown;
     reportFindings?: unknown;
+    verifyFindings?: unknown;
   };
   const strings = (value: unknown): string[] => Array.isArray(value) ? value.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0) : [];
   const inputRunDir = typeof body.inputRunDir === "string" ? body.inputRunDir : undefined;
   return {
+    verifyFindings: Array.isArray(body.verifyFindings) ? body.verifyFindings : [],
     ...(inputRunDir ? { inputRunDir } : {}),
     inputRunDirs: strings(body.inputRunDirs),
     confirmKeys: strings(body.confirmKeys),

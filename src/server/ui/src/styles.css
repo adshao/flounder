@@ -2075,6 +2075,12 @@ small {
   padding-inline: 7px;
 }
 
+.origin-label {
+  color: var(--accent);
+  background: var(--sel-bg);
+  border-color: transparent;
+}
+
 .label,
 .state,
 .severity {

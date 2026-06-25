@@ -519,6 +519,17 @@ function FindingChecks({ finding }: { finding: FindingRow }) {
   );
 }
 
+function findingOriginBadge(finding: FindingRow): { label: string; title: string } | null {
+  const reasons = (finding.timeline ?? []).map((event) => String(event.reason ?? ""));
+  if (reasons.includes("synthesis")) {
+    return { label: "Synthesized", title: "This candidate was synthesized from findings across scopes." };
+  }
+  if (reasons.some((reason) => reason === "audit" || reason === "dig" || reason === "differential")) {
+    return { label: "Dig", title: "This candidate came from scope-level audit work." };
+  }
+  return null;
+}
+
 function formatConfidence(value: number | null | undefined): string {
   if (value == null || !Number.isFinite(value)) return "";
   const pct = value <= 1 ? Math.round(value * 100) : Math.round(value);
@@ -603,7 +614,7 @@ function phaseLabel(phase: ProjectPhase): string {
     prepare: "Prepare",
     map: "Map",
     dig: "Dig",
-    synthesis: "Synthesis",
+    synthesis: "Synthesize",
     verify: "Verify",
     confirm: "Confirm",
     report: "Report",
@@ -2775,16 +2786,16 @@ function ProjectOverview({
     ? `${plural(verifyCount, "prioritized candidate")} selected from ${plural(unverifiedLeads, "unverified lead")}`
     : pendingConfirm
       ? "Execution-confirmed findings can move to real-target confirmation."
-      : "Synthesis and dig outputs appear as candidates here.";
+      : "Synthesize and dig outputs appear as candidates here.";
   const synthesisValue = synthesis
-    ? `${synthesis.produced ?? 0} composed ${synthesis.produced === 1 ? "lead" : "leads"}`
+    ? `${synthesis.produced ?? 0} synthesized ${synthesis.produced === 1 ? "lead" : "leads"}`
     : progress.audited > 0
       ? "No synthesis output"
       : "Not run yet";
   const synthesisDetail = synthesis
     ? `${plural(synthesis.pool ?? 0, "input finding")} across ${plural(synthesis.scopes ?? 0, "scope")}`
     : progress.audited > 0
-      ? "Cross-scope composition has not produced a new candidate."
+      ? "Synthesis has not produced a new candidate."
       : "Runs after dig when findings exist.";
   const proofDetail = pendingConfirm
     ? `${plural(pendingConfirm, "finding")} waiting for Confirm`
@@ -2823,7 +2834,7 @@ function ProjectOverview({
           <div className="queue-grid">
             <QueueItem label={runLabel} value={runValue} detail={runDetail} />
             <QueueItem label="Scope coverage" value={scopeValue} detail={scopeDetail} />
-            <QueueItem label="Synthesis" value={synthesisValue} detail={synthesisDetail} />
+            <QueueItem label="Synthesize" value={synthesisValue} detail={synthesisDetail} />
             <QueueItem label="Candidate verification" value={verifyValue} detail={verifyDetail} />
             <QueueItem label="Real-target proof" value={plural(reproduced, "reproduced finding")} detail={proofDetail} />
           </div>
@@ -3621,21 +3632,25 @@ function FindingList({ findings, compact, empty, onOpenReport }: { findings: Fin
   if (!findings.length) return <EmptyInline>{empty ?? "No findings match this view."}</EmptyInline>;
   return (
     <div className={compact ? "candidate-list compact" : "candidate-list"}>
-      {findings.map((finding, index) => (
-        <button key={finding.id} className="candidate-row" onClick={() => onOpenReport(finding)}>
-          <span className="rank">{index + 1}</span>
-          <span className="grow">
-            <strong>{finding.title}</strong>
-            <small>{finding.location}</small>
-          </span>
-          <span className="candidate-meta">
-            <StatusBadge status={finding.status} />
-            <FindingChecks finding={finding} />
-            {finding.severity ? <span className={`severity sev-${finding.severity}`}>{finding.severity}</span> : null}
-            <ConfidenceBadge value={finding.confidence} />
-          </span>
-        </button>
-      ))}
+      {findings.map((finding, index) => {
+        const origin = findingOriginBadge(finding);
+        return (
+          <button key={finding.id} className="candidate-row" onClick={() => onOpenReport(finding)}>
+            <span className="rank">{index + 1}</span>
+            <span className="grow">
+              <strong>{finding.title}</strong>
+              <small>{finding.location}</small>
+            </span>
+            <span className="candidate-meta">
+              {origin ? <span className="label origin-label" title={origin.title}>{origin.label}</span> : null}
+              <StatusBadge status={finding.status} />
+              <FindingChecks finding={finding} />
+              {finding.severity ? <span className={`severity sev-${finding.severity}`}>{finding.severity}</span> : null}
+              <ConfidenceBadge value={finding.confidence} />
+            </span>
+          </button>
+        );
+      })}
     </div>
   );
 }

@@ -11,7 +11,7 @@ export const PHASE_DESC: Record<(typeof PHASES)[number], string> = {
   prepare: "Stage source and warm the build sandbox",
   map: "Build the scope inventory",
   dig: "Audit mapped scopes and confirm locally",
-  synthesis: "Compose findings into distinct bug candidates",
+  synthesis: "Synthesize findings into distinct bug candidates",
   verify: "Confirm or refute candidates by local execution",
   confirm: "Reproduce confirmed findings on the real target",
   report: "Prepare one submission package per bug",
@@ -319,9 +319,9 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
             ? "done"
             : "none",
       stat: finalizingAudit
-        ? "Composing bug candidates"
+        ? "Synthesizing bug candidates"
         : synthesis
-          ? `${synthesis.produced ?? 0} composed ${synthesis.produced === 1 ? "candidate" : "candidates"}`
+          ? `${synthesis.produced ?? 0} synthesized ${synthesis.produced === 1 ? "candidate" : "candidates"}`
           : progress.audited > 0
             ? "No cross-scope candidate"
             : "Not started",

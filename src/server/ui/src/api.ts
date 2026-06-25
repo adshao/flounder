@@ -132,6 +132,17 @@ export interface FindingRow {
   confidence?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
+  timeline?: FindingStatusEvent[];
+}
+
+export interface FindingStatusEvent {
+  id?: number;
+  finding_id?: number;
+  from_status?: string | null;
+  to_status?: string | null;
+  reason?: string | null;
+  run_id?: number | null;
+  ts?: string | null;
 }
 
 export interface ConfirmDecision {
@@ -356,6 +367,7 @@ export interface LaunchPayload {
   quick?: boolean;
   mockLlm?: boolean;
   remap?: boolean;
+  verifyFromStart?: boolean;
   findingId?: number;
   findingIds?: number[];
   verifyFindings?: unknown;

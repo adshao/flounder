@@ -30,6 +30,8 @@ import { deriveScopeNote } from "../scope-note.js";
 const UI_HTML_PATH = fileURLToPath(new URL("./public/index.html", import.meta.url));
 const UI_PUBLIC_DIR = path.dirname(UI_HTML_PATH);
 const PROJECT_STREAM_LIMIT = 100;
+const DAEMON_JOB_HEARTBEAT_TTL_MS = 45_000;
+const DAEMON_OFFLINE_RECONCILE_GRACE_MS = DAEMON_JOB_HEARTBEAT_TTL_MS * 2;
 const PROJECT_STATUS_FILTERS = ["running", "needs-work", "done", "failed", "not-started"] as const;
 type ProjectStatusFilter = (typeof PROJECT_STATUS_FILTERS)[number];
 type ProjectStatusCounts = Record<"all" | ProjectStatusFilter, number>;
@@ -55,6 +57,7 @@ export interface UiServerOptions {
 class ControlPlane {
   private readonly daemons = new Map<ServerResponse, number>();
   private readonly buses = new Map<number, ActivityBus>();
+  private readonly daemonJobHeartbeats = new Map<string, { daemonId: number; activeJobIds: Set<number>; at: number }>();
 
   addDaemon(res: ServerResponse, daemonId: number): void {
     this.daemons.set(res, daemonId);
@@ -69,6 +72,33 @@ class ControlPlane {
   }
   hasDaemon(daemonId: number): boolean {
     return this.daemonCount(daemonId) > 0;
+  }
+  hasDaemonSignal(daemonId: number): boolean {
+    return this.hasDaemon(daemonId) || this.hasFreshJobHeartbeat(daemonId);
+  }
+  updateDaemonJobs(daemonId: number, instanceId: string, activeJobIds: number[]): void {
+    this.daemonJobHeartbeats.set(`${daemonId}:${instanceId}`, {
+      daemonId,
+      activeJobIds: new Set(activeJobIds),
+      at: Date.now(),
+    });
+    this.pruneDaemonJobHeartbeats();
+  }
+  hasFreshJobHeartbeat(daemonId: number): boolean {
+    this.pruneDaemonJobHeartbeats();
+    for (const heartbeat of this.daemonJobHeartbeats.values()) if (heartbeat.daemonId === daemonId) return true;
+    return false;
+  }
+  daemonHoldsJob(daemonId: number, jobId: number): boolean {
+    this.pruneDaemonJobHeartbeats();
+    for (const heartbeat of this.daemonJobHeartbeats.values()) {
+      if (heartbeat.daemonId === daemonId && heartbeat.activeJobIds.has(jobId)) return true;
+    }
+    return false;
+  }
+  private pruneDaemonJobHeartbeats(): void {
+    const cutoff = Date.now() - DAEMON_JOB_HEARTBEAT_TTL_MS;
+    for (const [key, heartbeat] of this.daemonJobHeartbeats) if (heartbeat.at < cutoff) this.daemonJobHeartbeats.delete(key);
   }
 
   /** Nudge every connected daemon to (re)claim queued jobs. */
@@ -170,6 +200,7 @@ const ROUTES: Route[] = [
         offset,
         search: c.url.searchParams.get("q") ?? undefined,
       };
+      reconcileLostExecutorJobs(c.store, c.plane);
       await reconcileAllStaleAuditingScopes(c);
       sendJson(c.res, 200, projectListResponse(c.store, options, normalizeProjectStatusFilter(c.url.searchParams.get("status"))));
     },
@@ -226,9 +257,10 @@ const ROUTES: Route[] = [
     summary: "Queue project work (Run/Continue pipeline, map, audit a region/scope, verify, confirm, report, or prepare). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's primary and More actions controls.",
     params: { uuid: "project UUID" },
     body: {
-      verb: "'run' | 'map' | 'audit' | 'confirm' | 'report' | 'prepare' (default 'run'; project run = prepare-if-needed→map/dig→confirm→report; source run = map→dig)",
+      verb: "'run' | 'map' | 'audit' | 'confirm' | 'report' | 'prepare' (default 'run'; project run = prepare-if-needed→map/dig→verify→confirm→report; source run = map→dig→verify)",
       remap: "boolean? — re-enumerate scopes (restart)", fresh: "boolean? — confirm: ignore a prior interrupted confirm",
       quick: "boolean? — run: single breadth pass", mockLlm: "boolean? — offline mock model",
+      verifyFromStart: "boolean? — run/continue pipeline: re-run Verify from the beginning instead of only pending candidates",
       region: "string? — audit: pinned region e.g. src/Foo.sol:120-180", scope: "string? — audit: scope id(s)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution; project finding rows with id are linked back to that original row",
       allowMaterialDrift: "boolean? — expert override for verifyFindings when a newer Prepare run changed project materials after the selected findings were produced",
       regenerateReports: "boolean? — report: include findings that already have formal reports; selected findingIds are always regenerated",
@@ -383,7 +415,7 @@ const ROUTES: Route[] = [
       provider: "string?", model: "string?", thinking: "string?",
       scopeCoverageMode: "focused|standard|half|full|custom? — standard/focused are cumulative project targets, not per-run additions", maxScopes: "number?", mapSteps: "number?", digSteps: "number?", maxSteps: "number?", digSamples: "number?", digConcurrency: "number?",
       sandboxBackend: "'auto'|'oci'|'host'?", sandboxImage: "string?", sandboxAllowHostFallback: "boolean?", sandboxPrepareNetwork: "'none'|'enabled'?", sandboxConfirmNetwork: "'none'|'enabled'?",
-      remap: "boolean?", quick: "boolean?", mockLlm: "boolean?", pipeline: "boolean? — run clue pipeline: prepare if needed -> map/dig -> confirm -> report", region: "string?", scope: "string?", scopeNote: "string? — map/audit: 'authorized scope note' that focuses map on the in-scope target (the pipeline auto-derives it from prepare's manifest)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution",
+      remap: "boolean?", quick: "boolean?", mockLlm: "boolean?", pipeline: "boolean? — run clue pipeline: prepare if needed -> map/dig -> verify -> confirm -> report", verifyFromStart: "boolean? — pipeline: re-run Verify from the beginning instead of only pending candidates", region: "string?", scope: "string?", scopeNote: "string? — map/audit: 'authorized scope note' that focuses map on the in-scope target (the pipeline auto-derives it from prepare's manifest)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution",
       inputRunDir: "string? — confirm", fresh: "boolean? — confirm",
       clue: "string? — prepare", posture: "string? — prepare", matchDeployed: "boolean? — prepare", endpoint: "string? — prepare",
     },
@@ -450,17 +482,21 @@ const ROUTES: Route[] = [
     handler: runLog,
   }),
 
-  route({ method: "GET", path: "/api/active", summary: "In-flight jobs (queued/dispatched/running) across all daemons.", handler: (c) => sendJson(c.res, 200, { active: activeRuns(c.store, c.plane), daemons: daemonStatusRows(c) }) }),
+  route({ method: "GET", path: "/api/active", summary: "In-flight jobs (queued/dispatched/running) across all daemons.", handler: (c) => {
+    reconcileLostExecutorJobs(c.store, c.plane);
+    sendJson(c.res, 200, { active: activeRuns(c.store, c.plane), daemons: daemonStatusRows(c) });
+  } }),
   route({ method: "GET", path: "/api/stream", summary: "Server-sent events: the project snapshot + active list, pushed ~1/s for live updates.", handler: (c) => streamSnapshots(c.res, c.store, c.plane) }),
 
   // ---- execution plane: daemon ↔ server (hidden from the agent catalog) ----------------
   route({ method: "POST", path: "/api/daemon/register", summary: "(daemon) Register/heartbeat. Bearer token required.", hidden: true, handler: daemonRegister }),
+  route({ method: "POST", path: "/api/daemon/heartbeat", summary: "(daemon) Heartbeat with the job ids this daemon instance currently holds.", hidden: true, handler: daemonHeartbeat }),
   route({ method: "GET", path: "/api/daemon/stream", summary: "(daemon) SSE: poll/cancel nudges from the server.", hidden: true, handler: daemonStream }),
   route({ method: "POST", path: "/api/daemon/claim", summary: "(daemon) Atomically claim the oldest queued job.", hidden: true, handler: daemonClaim }),
   route({ method: "POST", path: "/api/daemon/runs", summary: "(daemon) Start a run row for a claimed job; links job→run.", hidden: true, handler: daemonRunStart }),
   route({ method: "PATCH", path: "/api/daemon/runs/:id", summary: "(daemon) Report run progress: scopes / findings / confirm-decisions / finish.", hidden: true, handler: daemonRunUpdate }),
   route({ method: "POST", path: "/api/daemon/runs/:id/activity", summary: "(daemon) Push a batch of token-level activity events for the live log.", hidden: true, handler: daemonRunActivity }),
-  route({ method: "POST", path: "/api/daemon/pipeline-worklist", summary: "(daemon) Resolve confirm/report work for an in-process pipeline job.", hidden: true, handler: daemonPipelineWorklist }),
+  route({ method: "POST", path: "/api/daemon/pipeline-worklist", summary: "(daemon) Resolve verify/confirm/report work for an in-process pipeline job.", hidden: true, handler: daemonPipelineWorklist }),
   route({ method: "POST", path: "/api/daemon/jobs/:id/status", summary: "(daemon) Report a job's terminal status (done/error/canceled).", hidden: true, handler: daemonJobStatus }),
 ];
 
@@ -752,6 +788,7 @@ async function projectCreate(c: Ctx): Promise<void> {
 
 async function projectGet(c: Ctx): Promise<void> {
   await withProjectAsync(c, async (id, project) => {
+    reconcileLostExecutorJobs(c.store, c.plane);
     await reconcileStaleAuditingScopes(c, project);
     const allRunsRaw = c.store.listRuns(id);
     const materialBoundary = latestPrepareRun(allRunsRaw);
@@ -769,7 +806,7 @@ async function projectGet(c: Ctx): Promise<void> {
       ? []
       : reportableFindings(c.store.listFindings(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const activeFindings = allFindings.filter((finding) => !isIgnoredFinding(finding));
-    const findingSummaries = allFindings.map(findingSummaryRow);
+    const findingSummaries = allFindings.map((finding) => findingSummaryRow({ ...finding, timeline: c.store.findingTimeline(Number(finding.id)) }));
     const auditConfirmedFindings = countAuditConfirmedFindings(activeFindings);
     const confirmDecisions = activePrepareRefresh
       ? []
@@ -2118,6 +2155,7 @@ function normalizeLaunchSpec(body: Record<string, unknown>, target: string, verb
     quick: bool(body.quick),
     mockLlm: bool(body.mockLlm),
     pipeline: bool(body.pipeline),
+    verifyFromStart: bool(body.verifyFromStart),
     region: str(body.region),
     scope: str(body.scope),
     scopeNote: str(body.scopeNote),
@@ -2209,6 +2247,7 @@ function findingSummaryRow(row: Record<string, unknown>): Record<string, unknown
     "tracking_status",
     "created_at",
     "updated_at",
+    "timeline",
   ]) {
     if (key in row) out[key] = row[key];
   }
@@ -2799,6 +2838,20 @@ async function daemonRegister(c: Ctx): Promise<void> {
   sendJson(c.res, 200, { ok: true, daemonId: Number(daemon.id), name: daemon.name });
 }
 
+async function daemonHeartbeat(c: Ctx): Promise<void> {
+  const daemon = daemonAuth(c);
+  if (!daemon) return;
+  const body = (await readBody(c.req)) as { instanceId?: unknown; activeJobIds?: unknown };
+  const instanceId = typeof body.instanceId === "string" && body.instanceId.trim() ? body.instanceId.trim() : "default";
+  const activeJobIds = Array.isArray(body.activeJobIds)
+    ? body.activeJobIds.filter((id): id is number => typeof id === "number" && Number.isInteger(id) && id > 0)
+    : [];
+  c.store.touchDaemon(Number(daemon.id));
+  c.plane.updateDaemonJobs(Number(daemon.id), instanceId, activeJobIds);
+  const reconciled = reconcileLostExecutorJobs(c.store, c.plane);
+  sendJson(c.res, 200, { ok: true, activeJobIds, reconciled });
+}
+
 function daemonStream(c: Ctx): void {
   const daemon = daemonAuth(c);
   if (!daemon) return;
@@ -2912,11 +2965,11 @@ async function daemonRunActivity(c: Ctx): Promise<void> {
 async function daemonPipelineWorklist(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
-  const body = (await readBody(c.req)) as { project?: string; phase?: string };
+  const body = (await readBody(c.req)) as { project?: string; phase?: string; verifyFromStart?: boolean };
   const projectName = typeof body.project === "string" ? body.project.trim() : "";
   if (!projectName) return sendJson(c.res, 400, { error: "project is required" });
-  const phase = body.phase === "confirm" || body.phase === "report" ? body.phase : "";
-  if (!phase) return sendJson(c.res, 400, { error: "phase must be confirm or report" });
+  const phase = body.phase === "verify" || body.phase === "confirm" || body.phase === "report" ? body.phase : "";
+  if (!phase) return sendJson(c.res, 400, { error: "phase must be verify, confirm, or report" });
   const project = c.store.getProject(projectName);
   if (!project) return sendJson(c.res, 404, { error: `no project named ${projectName}` });
 
@@ -2927,6 +2980,15 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
   const scopeBoundary = latestScopeInventoryBoundaryRun(currentRuns);
   const currentResultRunIds = runIdSet(currentResultRuns(currentRuns, scopeBoundary));
   const requiresRealTargetConfirmation = latestPrepareRequiresRealTargetConfirmation(allRuns);
+
+  if (phase === "verify") {
+    const verifyFindings = verifyWorklist(c.store, projectId, currentResultRunIds, materialBoundary, body.verifyFromStart === true);
+    return sendJson(c.res, 200, {
+      phase,
+      verifyFromStart: body.verifyFromStart === true,
+      verifyFindings,
+    });
+  }
 
   if (phase === "confirm") {
     if (!requiresRealTargetConfirmation) {
@@ -2951,6 +3013,19 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
     reportFindings: reports.findings ?? [],
     ...(reports.error ? { skipReason: reports.error } : {}),
   });
+}
+
+function verifyWorklist(store: MetadataStore, projectId: number, currentResultRunIds: Set<number>, materialBoundary?: Record<string, unknown>, fromStart = false): unknown[] {
+  return reportableFindings(store.listFindings(projectId)
+    .filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary))
+    .filter((row) => !isIgnoredFinding(row)))
+    .filter((row) => {
+      const status = String(row.status ?? "");
+      if (status === "suspected" || status === "confirmed-source") return true;
+      if (!fromStart || row.confirm_status != null) return false;
+      return status === "confirmed-executable" || status === "confirmed-differential";
+    })
+    .map((row) => normalizeProjectVerifyFindings(findingDetailRow(row)));
 }
 
 async function daemonJobStatus(c: Ctx): Promise<void> {
@@ -2978,12 +3053,51 @@ async function daemonJobStatus(c: Ctx): Promise<void> {
 
 // ---- shared -----------------------------------------------------------------
 
+function reconcileLostExecutorJobs(store: MetadataStore, plane: ControlPlane): number {
+  let changed = 0;
+  for (const job of store.runningJobs()) {
+    const jobId = Number(job.id);
+    if (!Number.isFinite(jobId) || String(job.status) === "queued") continue;
+    const daemonId = typeof job.daemon_id === "number" ? job.daemon_id : undefined;
+    if (daemonId === undefined) continue;
+    if (plane.daemonHoldsJob(daemonId, jobId)) continue;
+
+    const daemonOnline = plane.hasDaemonSignal(daemonId);
+    const daemonHasFreshHeartbeat = plane.hasFreshJobHeartbeat(daemonId);
+    if (daemonOnline && !daemonHasFreshHeartbeat) continue; // connected pre-heartbeat/old daemon; warn but do not auto-kill
+    if (!daemonOnline && daemonRecentlySeen(store, daemonId)) continue;
+
+    const runId = typeof job.run_id === "number" ? job.run_id : undefined;
+    const lastActivityAt = runId !== undefined
+      ? latestRunActivityAt(store, plane, runId)
+      : stringValue(job.updated_at) || stringValue(job.created_at);
+    const activity = runInactivity(lastActivityAt);
+    if (!activity?.staleActivity) continue;
+
+    store.setJobStatus(jobId, "canceled", daemonOnline ? "executor no longer holds this job" : "executor offline before completion");
+    if (runId !== undefined) {
+      const run = store.getRun(runId);
+      if (run && run.status === "running") store.finishRun(runId, "killed");
+    }
+    changed += 1;
+  }
+  return changed;
+}
+
+function daemonRecentlySeen(store: MetadataStore, daemonId: number): boolean {
+  const daemon = store.getDaemon(daemonId);
+  const seenAt = stringValue(daemon?.last_seen_at);
+  if (!seenAt) return false;
+  const timestamp = Date.parse(seenAt);
+  return Number.isFinite(timestamp) && Date.now() - timestamp < DAEMON_OFFLINE_RECONCILE_GRACE_MS;
+}
+
 // In-flight jobs across all daemons, shaped for the dashboard's "active" list.
 function activeRuns(store: MetadataStore, plane?: ControlPlane): Array<Record<string, unknown>> {
   return store.runningJobs().map((job) => {
     const spec = safeParse(job.spec_json) as { verb?: string } | null;
     const daemonId = typeof job.daemon_id === "number" ? job.daemon_id : undefined;
-    const onlineDaemons = daemonId !== undefined && plane ? plane.daemonCount(daemonId) : undefined;
+    const onlineDaemons = daemonId !== undefined && plane ? (plane.hasDaemonSignal(daemonId) ? Math.max(1, plane.daemonCount(daemonId)) : 0) : undefined;
     const blockedReason = daemonId !== undefined && onlineDaemons === 0 ? "selected-daemon-offline" : undefined;
     const lastActivityAt = typeof job.run_id === "number" ? latestRunActivityAt(store, plane, Number(job.run_id)) : undefined;
     const activity = runInactivity(lastActivityAt);
@@ -3028,7 +3142,7 @@ function daemonRows(c: Ctx): Array<Record<string, unknown>> {
   const includeRaw = c.url.searchParams.get("include") === "capabilities";
   return c.store.listDaemons().map((daemon) => {
     const parsed = safeParse(daemon.capabilities);
-    const online = c.plane.hasDaemon(Number(daemon.id));
+    const online = c.plane.hasDaemonSignal(Number(daemon.id));
     if (includeRaw) return { ...daemon, online, capabilities: parsed ?? daemon.capabilities ?? null };
     return { ...daemon, online, capabilities: summarizeDaemonCapabilities(parsed) };
   });
@@ -3043,7 +3157,7 @@ function daemonStatusRows(c: Ctx): Array<Record<string, unknown>> {
       workspace: daemon.workspace,
       last_seen_at: daemon.last_seen_at,
       created_at: daemon.created_at,
-      online: c.plane.hasDaemon(Number(daemon.id)),
+      online: c.plane.hasDaemonSignal(Number(daemon.id)),
       capabilities: {
         providerCount: summary.providerCount,
         configuredProviderCount: summary.configuredProviderCount,
@@ -3186,11 +3300,24 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       confirmDecisionCount: confirmDecisions.length,
       runCount: store.countRuns(id),
       currentRunCount: currentResultRows.length,
-      latestRun: runApiRows(store, currentRuns.slice(0, 1), undefined, viewBoundary)[0] ?? null,
+      latestRun: runApiRows(store, latestDisplayRun(currentRuns), undefined, viewBoundary)[0] ?? null,
       activeRuns: activeByTarget.get(String(project.name)) ?? 0,
       material: materialSummary(allRuns, materialBoundary, activePrepareRefresh),
     };
   });
+}
+
+function latestDisplayRun(runs: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const run = runs.find(runHasDisplayWeight) ?? runs[0];
+  return run ? [run] : [];
+}
+
+function runHasDisplayWeight(run: Record<string, unknown>): boolean {
+  const status = stringValue(run.status);
+  if (status === "running" || status === "done") return true;
+  if (Number(run.scopes_total) > 0 || Number(run.findings_total) > 0 || Number(run.run_scopes_done) > 0) return true;
+  if (stringValue(run.stages_json)) return true;
+  return false;
 }
 
 function streamSnapshots(res: ServerResponse, store: MetadataStore, plane: ControlPlane): void {
@@ -3201,6 +3328,7 @@ function streamSnapshots(res: ServerResponse, store: MetadataStore, plane: Contr
   // A throw here (closed socket, or a transient store read error) must not crash the server.
   function tick(): void {
     try {
+      reconcileLostExecutorJobs(store, plane);
       res.write(`data: ${JSON.stringify({ projects: projectSnapshots(store, { limit: PROJECT_STREAM_LIMIT }), active: activeRuns(store, plane) })}\n\n`);
     } catch {
       clearInterval(timer);
@@ -3304,6 +3432,7 @@ function launchSpec(project: Record<string, unknown>, body: Record<string, unkno
     quick: Boolean(body.quick),
     mockLlm: Boolean(body.mockLlm),
     pipeline: Boolean(body.pipeline),
+    verifyFromStart: Boolean(body.verifyFromStart),
     region: str(body.region),
     scope: str(body.scope),
     scopeNote: str(merged.scopeNote), // a project may store a default focus note in its config

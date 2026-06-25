@@ -80,6 +80,11 @@ test("buildArgs: restart adds --remap; confirm takes the run dir positionally + 
   assert.equal(audit[1], "src/Foo.sol:10-40");
 });
 
+test("buildArgs: verify-from-start is an explicit run pipeline flag", () => {
+  assert.ok(buildArgs({ verb: "run", target: "p", sourcePaths: ["./s"], verifyFromStart: true }).includes("--verify-from-start"));
+  assert.equal(buildArgs({ verb: "audit", target: "p", sourcePaths: ["./s"], verifyFromStart: true }).includes("--verify-from-start"), false);
+});
+
 test("buildArgs: confirm without a run dir is rejected", () => {
   assert.throws(() => buildArgs({ verb: "confirm", target: "p", sourcePaths: ["./s"] }), /inputRunDir/);
 });

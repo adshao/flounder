@@ -66,7 +66,8 @@ export interface LaunchSpec {
   inputRunDirs?: string[] | undefined; // confirm (aggregate): several run dirs whose confirmed findings are unioned + reproduced together
   confirmKeys?: string[] | undefined; // confirm: restrict the work list to these finding content keys (the pending/target set the control plane resolved from finding status)
   reportFindings?: ReportFindingSpec[] | undefined; // report: confirmed/reproduced bugs to package as formal Markdown reports
-  pipeline?: boolean | undefined; // run: project/CLI clue pipeline (prepare if needed -> map/dig -> confirm -> report)
+  pipeline?: boolean | undefined; // run: project/CLI clue pipeline (prepare if needed -> map/dig -> verify -> confirm -> report)
+  verifyFromStart?: boolean | undefined; // pipeline: re-run Verify from the beginning instead of only pending candidates
   region?: string | undefined; // audit: a pinned region
   scope?: string | undefined; // audit: scope id[,id...]
   verifyFindings?: unknown; // audit: inline suspected finding(s) to confirm-or-refute (the --verify file's contents, carried inline so a remote daemon needs no local file)
@@ -223,6 +224,7 @@ export function buildArgs(spec: LaunchSpec): string[] {
   if (spec.thinking) args.push("--thinking", spec.thinking);
   if (spec.verb === "audit" && spec.scope) args.push("--scope", spec.scope);
   if (spec.verb === "audit" && spec.verifyFindings !== undefined) args.push("--verify", "<inline-findings>");
+  if (spec.verb === "run" && spec.verifyFromStart) args.push("--verify-from-start");
   if (spec.maxScopes !== undefined) args.push("--max-scopes", String(spec.maxScopes));
   if (spec.mapSteps !== undefined) args.push("--map-steps", String(spec.mapSteps));
   if (spec.digSteps !== undefined) args.push("--dig-steps", String(spec.digSteps));

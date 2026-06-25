@@ -528,6 +528,7 @@ function buildAuditSpec(cmd: "run" | "map" | "audit", rest: string[], cfg: Audit
   if (cfg.auditScopeNote && cfg.auditScopeNote.trim()) spec.scopeNote = cfg.auditScopeNote.trim(); // --scope-note, or the pipeline's prepare-derived focus
   if (cmd === "run" && rest.includes("--quick")) spec.quick = true;
   if (rest.includes("--remap")) spec.remap = true;
+  if (cmd === "run" && rest.includes("--verify-from-start")) spec.verifyFromStart = true;
   if (rest.includes("--mock-llm")) spec.mockLlm = true; // offline mock model, executed by the daemon
   if (cmd === "audit") {
     const region = rest[0] && !rest[0].startsWith("--") ? rest[0] : undefined;
@@ -1056,6 +1057,7 @@ Shared options:
 
 run / map / audit deep-phase options:
   --quick                 run only: a single breadth pass instead of map -> audit
+  --verify-from-start     run pipeline only: re-run Verify from the beginning instead of only pending candidates
   --map-steps <n>         cap the map phase (default: UNBOUNDED)
   --dig-steps <n>         cap each scope's dig (default: UNBOUNDED; the dig stops when its obligations are discharged)
   --dig-samples <n>       independent dig passes per scope, findings unioned (raises recall), default 1
