@@ -5,13 +5,18 @@ confirmation, real-target confirmation, public disclosure, or generated reports.
 
 ## Authorization
 
-Run Flounder only against authorized targets: the user's own code,
-client-authorized targets, or public bug-bounty scope. If scope is unclear, ask
-before launching model work.
+Create projects and run sealed local audits only against publicly available
+source, the user's own code, client-authorized targets, or public bug-bounty
+scope. If the source boundary is unclear, ask before launching model work.
+
+For public-source audits without a bounty, treat findings as private white-hat
+research: verify locally, avoid live-system writes, and disclose through a
+maintainer or security contact before sharing details.
 
 Do not broadcast transactions, move funds, submit writes, persist access, or
-target systems outside the authorized boundary. In confirm mode, replay exploits
-only against local tests, local forks, or isolated harnesses.
+target systems outside the declared local audit boundary or explicit authorized
+scope. In confirm mode, replay exploits only against local tests, local forks,
+or isolated harnesses.
 
 ## Sandbox Boundary
 

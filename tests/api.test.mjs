@@ -52,6 +52,7 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     assert.match(projectList.query.limit, /default 100/);
     assert.match(projectList.query.offset, /default 0/);
     assert.match(projectList.query.q, /project-name search/);
+    assert.match(projectList.query.status, /running/);
     const projectOrder = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/projects/order");
     assert.match(projectOrder.summary, /drag-and-drop/);
     const projectRun = cat.endpoints.find((e) => e.method === "POST" && e.path === "/api/projects/:uuid/runs");
@@ -97,6 +98,14 @@ test("api: project list supports archive, unarchive, pin, and manual order", asy
 
     let list = await json(await fetch(base + "/api/projects"));
     assert.deepEqual(list.projects.map((project) => project.name), ["gamma", "beta", "alpha"]);
+    assert.equal(list.statusCounts.all, 3);
+    assert.equal(list.statusCounts["not-started"], 3);
+    assert.equal(list.statusCounts.running, 0);
+
+    const notStarted = await json(await fetch(base + "/api/projects?status=not-started&limit=2"));
+    assert.deepEqual(notStarted.projects.map((project) => project.name), ["gamma", "beta"]);
+    assert.equal(notStarted.total, 3);
+    assert.equal(notStarted.statusCounts["not-started"], 3);
 
     await patch(`/api/projects/${beta.uuid}`, { pinned: true });
     list = await json(await fetch(base + "/api/projects"));

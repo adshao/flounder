@@ -26,3 +26,5 @@ secrets.json
 .netrc
 files/
 images/
+assets/screenshots/*
+!assets/screenshots/demo-full-overview.png

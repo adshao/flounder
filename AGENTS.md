@@ -69,7 +69,7 @@
 
 ## Running A Bounty Campaign At Scale
 
-- Realistic target selection: live audit-contest repos are usually private until the contest ends (you cannot clone them anonymously). The clonable, buildable universe is therefore ended public contests plus permanently-public code that carries a live bug-bounty. A large, actively-bountied, buildable protocol (many distinct modules under one repo) is a strong campaign target — clear submission path and broad surface — even when its individual modules are not the freshest code.
+- Realistic target selection: live audit-contest repos are usually private until the contest ends (you cannot clone them anonymously). The clonable, buildable universe is therefore ended public contests, permanently-public source with funds-bearing deployments, and public bug-bounty targets. A live bounty is a priority and disclosure-path signal, not a prerequisite for creating a project or running sealed local source audit. A large, actively-bountied, buildable protocol (many distinct modules under one repo) is a strong campaign target — clear submission path and broad surface — even when its individual modules are not the freshest code.
 - Fan out across modules, not just scopes: run one source-provided `flounder run --source` campaign per distinct module/protocol (separate `--target` and `--out`, shared `--build-root` on the repo root). This parallelizes coverage across the whole codebase and keeps each map/inventory focused, while a single dependency cache is reused. Combine with `--dig-concurrency` so each campaign also digs its top scopes in parallel.
 - The map must survive a budget cutoff. On a large codebase (tens to hundreds of files) instruct enumeration from bash structure scans (entrypoints / state writes / value transfers) rather than reading every file, and write `scopes.json` early after a first broad pass and rewrite it incrementally. The session (codex/pi) driver has no forced-finalize, so a too-late write is lost; early-incremental writing is what guarantees a usable inventory. Give map a real budget (`--map-steps`, e.g. 50–60) on large targets.
 - Providing reference material to the audit is supported and encouraged — it is context, not an answer. Two channels: `--scope-note` for a one-line threat-model/invariant hint, and **`--corpus <paths...>` for full design MATERIALS** the model reads to derive what the code must enforce — specifications, whitepapers, design notes, protocol docs, prior audit reports, incident write-ups/post-mortems, a relevant book chapter. Corpus files are copied into the sandbox under `corpus/` and the map/dig prompts treat them as design intent (lens 1: spec conditions -> obligations). Prefer `--corpus` for anything longer than a sentence. The hard line: materials describe what the system is SUPPOSED to guarantee; they must not contain the suspected bug, its location, or its mechanism — give the spec and let the model find the gap (this keeps blind investigation genuine, e.g. give a circuit's design spec, not "the remainder is unconstrained").
@@ -79,11 +79,12 @@
 
 ## Security And White-Hat Boundaries
 
-- Audit only code that is authorized by the owner or explicitly in public bug-bounty scope.
+- Candidate projects and sealed local audits may use publicly available source code, code the operator owns, code the operator is engaged to audit, or code explicitly in public bug-bounty scope.
+- Treat real-target interaction, disclosure, and bounty submission as separate gates: use read-only or local-fork confirmation only, never write to a live system, and disclose privately through a maintainer/security contact unless a public bounty scope exists.
 - In the sealed map/dig portion of `flounder run`, verification runs locally or in a sandbox and is network-sealed. Use unit tests, fixtures, local devnets, forked nodes, or isolated harnesses.
 - In `flounder confirm`, the network is available for reproduction, but the white-hat line holds: fork and READ live networks/data freely; never BROADCAST a transaction to a non-local network, move funds, or write to any live system. Replay the exploit only against a local fork.
 - After confirming that a bug exists in a mainnet deployment, perform a final known-issue check before treating it as submission-ready. Check existing audit reports, public disclosures, current GitHub development branches, pull requests, issues, and relevant security advisories to confirm the bug is not already known, fixed, or publicly documented.
-- Never broadcast transactions, exploit public networks, or target systems outside the authorized scope.
+- Never broadcast transactions, exploit public networks, or target systems outside the declared local audit boundary or explicit authorized scope.
 - Treat LLM output as untrusted input. Validate structured output, sanitize paths, and never execute generated commands without policy checks.
 - Treat model-generated lens packs as untrusted planning artifacts. Normalize, bound, log, and review them before using them as audit guidance.
 - Default to deny for commands that combine network access with exploit, broadcast, credential, destructive, or persistence behavior.
@@ -110,6 +111,7 @@
 ## Git And Packaging
 
 - Assume every commit may become public. Commit messages, branch names, tags, package contents, and generated changelog text must not contain sensitive or machine-specific information.
+- Before publishing any new tag, verify that the persisted database can upgrade cleanly from the latest released version to the new version. Individual commits do not need to preserve database upgradeability, but every tagged release must. During v0, API and CLI compatibility may remain unstable; database upgrade compatibility is still a release gate.
 - After completing an independent, verified feature or coherent change set, commit it before moving on to the next unrelated task. Keep commits scoped and public-safe; do not commit half-finished work, blocked experiments, private materials, raw run artifacts, or generated caches.
 - Review package contents before release. The package should contain source, compiled outputs, docs, prompts, skills, fixtures intended for publication, and license/security files only.
 - Do not rely on later cleanup to protect secrets. Prevent them from entering Git, package archives, run artifacts, and logs in the first place.

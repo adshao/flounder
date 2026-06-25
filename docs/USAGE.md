@@ -2,7 +2,7 @@
 
 Practical guide to driving Flounder from the CLI, the dashboard, the API, and the library. For the design and internals, see [ARCHITECTURE.md](ARCHITECTURE.md). For the product overview, see the [README](../README.md).
 
-Flounder is an autonomous white-hat security auditor. The operator supplies the authorized target boundary, daemon, provider profile, and budget; the model decides what to read, test, and report. Flags shape *what* it may audit and *how thoroughly* it audits, never *what the bug is*.
+Flounder is an autonomous white-hat security auditor. The operator supplies the public-source or authorized target boundary, daemon, provider profile, and budget; the model decides what to read, test, and report. Flags shape *what* it may audit and *how thoroughly* it audits, never *what the bug is*.
 
 The product workflow is prepare -> map -> dig -> confirm -> report:
 
@@ -296,7 +296,7 @@ Install from the current checkout during local development:
 npx skills add . --skill flounder -g -a codex -a claude-code
 ```
 
-After installing the skill, agents should trigger it from natural requests about Flounder audits, authorized source review, smart-contract or ZK audit work, daemon/provider setup, verifying suspected findings, confirming real findings, or collecting execution-backed bug reports. The skill is the agent operating manual: it covers setup, daemon-local provider auth, projects, provider profiles, runs, live activity, next-action decisions, confirm, and final bug packages.
+After installing the skill, agents should trigger it from natural requests about Flounder audits, public-source or authorized source review, smart-contract or ZK audit work, daemon/provider setup, verifying suspected findings, confirming real findings, or collecting execution-backed bug reports. The skill is the agent operating manual: it covers setup, daemon-local provider auth, projects, provider profiles, runs, live activity, next-action decisions, confirm, and final bug packages.
 
 ## Outputs
 

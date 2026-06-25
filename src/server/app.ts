@@ -30,6 +30,10 @@ import { deriveScopeNote } from "../scope-note.js";
 const UI_HTML_PATH = fileURLToPath(new URL("./public/index.html", import.meta.url));
 const UI_PUBLIC_DIR = path.dirname(UI_HTML_PATH);
 const PROJECT_STREAM_LIMIT = 100;
+const PROJECT_STATUS_FILTERS = ["running", "needs-work", "done", "failed", "not-started"] as const;
+type ProjectStatusFilter = (typeof PROJECT_STATUS_FILTERS)[number];
+type ProjectStatusCounts = Record<"all" | ProjectStatusFilter, number>;
+
 function loadUiHtml(): string {
   try {
     return readFileSync(UI_HTML_PATH, "utf8");
@@ -149,12 +153,13 @@ const ROUTES: Route[] = [
 
   route({
     method: "GET", path: "/api/projects",
-    summary: "List projects with a live snapshot (scope coverage, finding counts, confirmed-bug count, latest run, active runs). Paginated with ?limit/&offset; pass ?archived=1 to list archived projects for Settings.",
+    summary: "List projects with a live snapshot (scope coverage, finding counts, confirmed-bug count, latest run, active runs). Paginated with ?limit/&offset; pass ?archived=1 to list archived projects for Settings; pass ?status=running|needs-work|done|failed|not-started to filter by computed project status.",
     query: {
       archived: "boolean? — when true, return archived projects instead of active projects",
       limit: "number? (default 100)",
       offset: "number? (default 0)",
       q: "string? — case-insensitive project-name search",
+      status: "string? — one of running, needs-work, done, failed, not-started",
     },
     handler: async (c) => {
       const limit = clampInt(c.url.searchParams.get("limit"), 100, 1, 500);
@@ -166,7 +171,7 @@ const ROUTES: Route[] = [
         search: c.url.searchParams.get("q") ?? undefined,
       };
       await reconcileAllStaleAuditingScopes(c);
-      sendJson(c.res, 200, { projects: projectSnapshots(c.store, options), total: c.store.countProjects(options), limit, offset });
+      sendJson(c.res, 200, projectListResponse(c.store, options, normalizeProjectStatusFilter(c.url.searchParams.get("status"))));
     },
   }),
   route({
@@ -3070,6 +3075,60 @@ function summarizeDaemonCapabilities(capabilities: unknown): Record<string, unkn
     providerCount: providers.length,
     configuredProviderCount: providers.filter((entry) => entry.configured).length,
   };
+}
+
+function normalizeProjectStatusFilter(value: string | null | undefined): ProjectStatusFilter | undefined {
+  if (!value) return undefined;
+  return PROJECT_STATUS_FILTERS.includes(value as ProjectStatusFilter) ? value as ProjectStatusFilter : undefined;
+}
+
+function emptyProjectStatusCounts(total = 0): ProjectStatusCounts {
+  return { all: total, running: 0, "needs-work": 0, done: 0, failed: 0, "not-started": 0 };
+}
+
+function numberField(row: Record<string, unknown>, key: string): number {
+  const value = row[key];
+  return typeof value === "number" && Number.isFinite(value) ? value : 0;
+}
+
+function projectSnapshotStatus(row: Record<string, unknown>): ProjectStatusFilter {
+  const latest = row.latestRun as { status?: unknown } | null | undefined;
+  const latestStatus = typeof latest?.status === "string" ? latest.status : "";
+  if (numberField(row, "activeRuns") > 0 || latestStatus === "running") return "running";
+  if (latestStatus === "error" || latestStatus === "killed") return "failed";
+  const progress = row.progress as Coverage | null | undefined;
+  const total = typeof progress?.total === "number" ? progress.total : 0;
+  const pending = typeof progress?.pending === "number" ? progress.pending : 0;
+  if ((total > 0 && pending > 0) || numberField(row, "verifyPendingFindings") > 0 || numberField(row, "confirmPendingFindings") > 0) return "needs-work";
+  if (
+    total > 0
+    || numberField(row, "findingsTotal") > 0
+    || numberField(row, "reproducedBugs") > 0
+    || numberField(row, "confirmedBugs") > 0
+    || latestStatus === "done"
+  ) {
+    return "done";
+  }
+  return "not-started";
+}
+
+function countProjectStatuses(rows: Array<Record<string, unknown>>): ProjectStatusCounts {
+  const counts = emptyProjectStatusCounts(rows.length);
+  for (const row of rows) counts[projectSnapshotStatus(row)] += 1;
+  return counts;
+}
+
+function projectListResponse(
+  store: MetadataStore,
+  options: ProjectListOptions,
+  status: ProjectStatusFilter | undefined,
+): { projects: Array<Record<string, unknown>>; total: number; limit: number; offset: number; statusCounts: ProjectStatusCounts } {
+  const limit = typeof options.limit === "number" && Number.isFinite(options.limit) ? Math.max(1, Math.floor(options.limit)) : 100;
+  const offset = typeof options.offset === "number" && Number.isFinite(options.offset) ? Math.max(0, Math.floor(options.offset)) : 0;
+  const allRows = projectSnapshots(store, { archived: options.archived, search: options.search });
+  const statusCounts = countProjectStatuses(allRows);
+  const filteredRows = status ? allRows.filter((row) => projectSnapshotStatus(row) === status) : allRows;
+  return { projects: filteredRows.slice(offset, offset + limit), total: filteredRows.length, limit, offset, statusCounts };
 }
 
 function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}): Array<Record<string, unknown>> {

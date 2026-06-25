@@ -9,6 +9,8 @@ import {
   type ProjectConfig,
   type ProjectPayload,
   type ProjectSnapshot,
+  type ProjectStatusCounts,
+  type ProjectStatusFilter,
   type PrepareSummary,
   type PiModel,
   type ProviderProfile,
@@ -128,9 +130,28 @@ function readRoute(): RouteState {
   return { view: "projects", settingsPane: "providers" };
 }
 
+function isProjectRoutePath(pathname: string): boolean {
+  return pathname === "/" || /^\/projects\/[^/]+\/?$/.test(pathname);
+}
+
+function withProjectListFilters(pathname: string): string {
+  const [pathPart, hashPart = ""] = pathname.split("#", 2);
+  const [basePath, searchPart = ""] = pathPart.split("?", 2);
+  if (!isProjectRoutePath(basePath) || searchPart) return pathname;
+  const current = new URLSearchParams(window.location.search);
+  const next = new URLSearchParams();
+  const query = current.get("q")?.trim();
+  const status = normalizeProjectStatusFilterValue(current.get("status"));
+  if (query) next.set("q", query);
+  if (status !== "all") next.set("status", status);
+  const search = next.toString();
+  return `${basePath}${search ? `?${search}` : ""}${hashPart ? `#${hashPart}` : ""}`;
+}
+
 function go(pathname: string) {
-  const next = pathname || "/";
-  if (window.location.pathname === next && !window.location.hash) {
+  const next = withProjectListFilters(pathname || "/");
+  const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+  if (current === next) {
     window.dispatchEvent(new PopStateEvent("popstate"));
     return;
   }
@@ -250,6 +271,56 @@ function snapshotFromProjectDetail(detail: ProjectDetail): ProjectSnapshot {
 function appendProjectPage(current: ProjectSnapshot[], incoming: ProjectSnapshot[]): ProjectSnapshot[] {
   const seen = new Set(current.map((project) => project.uuid));
   return [...current, ...incoming.filter((project) => !seen.has(project.uuid))];
+}
+
+function projectStatusParam(filter: ProjectStatusFilter): Exclude<ProjectStatusFilter, "all"> | undefined {
+  return filter === "all" ? undefined : filter;
+}
+
+function normalizeProjectStatusCounts(value: Partial<ProjectStatusCounts> | undefined, total: number): ProjectStatusCounts {
+  return {
+    all: value?.all ?? total,
+    running: value?.running ?? 0,
+    "needs-work": value?.["needs-work"] ?? 0,
+    done: value?.done ?? 0,
+    failed: value?.failed ?? 0,
+    "not-started": value?.["not-started"] ?? 0,
+  };
+}
+
+function projectFilterStatus(project: ProjectSnapshot): ProjectStatusFilter {
+  const status = projectBadgeStatus(project);
+  if (status === "running") return "running";
+  if (status === "partial") return "needs-work";
+  if (status === "done") return "done";
+  if (status === "error" || status === "killed") return "failed";
+  return "not-started";
+}
+
+function projectMatchesStatusFilter(project: ProjectSnapshot, filter: ProjectStatusFilter): boolean {
+  return filter === "all" || projectFilterStatus(project) === filter;
+}
+
+function countLoadedProjectStatuses(projects: ProjectSnapshot[], total = projects.length): ProjectStatusCounts {
+  const counts: ProjectStatusCounts = { ...EMPTY_PROJECT_STATUS_COUNTS, all: total };
+  for (const project of projects) counts[projectFilterStatus(project)] += 1;
+  return counts;
+}
+
+function normalizeProjectListResponse(
+  res: { projects: ProjectSnapshot[]; total: number; statusCounts?: Partial<ProjectStatusCounts> },
+  filter: ProjectStatusFilter,
+): { projects: ProjectSnapshot[]; total: number; statusCounts: ProjectStatusCounts; serverFiltered: boolean } {
+  if (res.statusCounts) {
+    return { projects: res.projects, total: res.total, statusCounts: normalizeProjectStatusCounts(res.statusCounts, res.total), serverFiltered: true };
+  }
+  const projects = filter === "all" ? res.projects : res.projects.filter((project) => projectMatchesStatusFilter(project, filter));
+  return {
+    projects,
+    total: filter === "all" ? res.total : projects.length,
+    statusCounts: countLoadedProjectStatuses(res.projects, res.total),
+    serverFiltered: false,
+  };
 }
 
 function mergeProjectSnapshots(current: ProjectSnapshot[], incoming: ProjectSnapshot[], prependNew: boolean): ProjectSnapshot[] {
@@ -518,12 +589,12 @@ function topCandidateFindings(rows: FindingRow[] | undefined): FindingRow[] {
 function projectBadgeStatus(project: ProjectSnapshot): string | null | undefined {
   const latest = project.latestRun?.status;
   if ((project.activeRuns ?? 0) > 0 || latest === "running") return "running";
+  if (latest === "error" || latest === "killed") return latest;
   const total = project.progress?.total ?? 0;
   const pending = project.progress?.pending ?? 0;
   if (total > 0 && pending > 0) return "partial";
   if ((project.verifyPendingFindings ?? 0) > 0 || (project.confirmPendingFindings ?? 0) > 0) return "partial";
   if (total > 0 || (project.findingsTotal ?? 0) > 0 || (project.reproducedBugs ?? 0) > 0 || (project.confirmedBugs ?? 0) > 0) return "done";
-  if (latest === "error" || latest === "killed") return latest;
   return latest ?? (total > 0 ? "done" : undefined);
 }
 
@@ -718,6 +789,44 @@ const STICKY_SCROLL_THRESHOLD_PX = 32;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
 const PROJECT_PAGE_SIZE = 100;
+const PROJECT_STATUS_OPTIONS: Array<{ value: ProjectStatusFilter; label: string }> = [
+  { value: "all", label: "All" },
+  { value: "running", label: "Running" },
+  { value: "needs-work", label: "Needs work" },
+  { value: "done", label: "Done" },
+  { value: "failed", label: "Failed" },
+  { value: "not-started", label: "New" },
+];
+const EMPTY_PROJECT_STATUS_COUNTS: ProjectStatusCounts = {
+  all: 0,
+  running: 0,
+  "needs-work": 0,
+  done: 0,
+  failed: 0,
+  "not-started": 0,
+};
+
+function normalizeProjectStatusFilterValue(value: string | null | undefined): ProjectStatusFilter {
+  return PROJECT_STATUS_OPTIONS.some((option) => option.value === value) ? value as ProjectStatusFilter : "all";
+}
+
+function readProjectListFilters(): { query: string; status: ProjectStatusFilter } {
+  const params = new URLSearchParams(window.location.search);
+  return {
+    query: params.get("q") ?? "",
+    status: normalizeProjectStatusFilterValue(params.get("status")),
+  };
+}
+
+function projectListFilterUrl(query: string, status: ProjectStatusFilter): string {
+  const params = new URLSearchParams(window.location.search);
+  if (query.trim()) params.set("q", query.trim());
+  else params.delete("q");
+  if (status !== "all") params.set("status", status);
+  else params.delete("status");
+  const qs = params.toString();
+  return `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
+}
 
 function normalizeActivityBody(value: string): string {
   return value.replace(/\n{3,}/g, "\n\n").trimStart();
@@ -1173,7 +1282,9 @@ export function App() {
   const [archivedProjects, setArchivedProjects] = useState<ProjectSnapshot[]>([]);
   const [projectsTotal, setProjectsTotal] = useState(0);
   const [archivedProjectsTotal, setArchivedProjectsTotal] = useState(0);
-  const [projectQuery, setProjectQuery] = useState("");
+  const [projectQuery, setProjectQuery] = useState(() => readProjectListFilters().query);
+  const [projectStatusFilter, setProjectStatusFilter] = useState<ProjectStatusFilter>(() => readProjectListFilters().status);
+  const [projectStatusCounts, setProjectStatusCounts] = useState<ProjectStatusCounts>(EMPTY_PROJECT_STATUS_COUNTS);
   const [projectLoading, setProjectLoading] = useState(false);
   const [archivedProjectLoading, setArchivedProjectLoading] = useState(false);
   const [activeJobsTotal, setActiveJobsTotal] = useState(0);
@@ -1209,9 +1320,15 @@ export function App() {
   const [, setClockTick] = useState(0);
   const detailRef = useRef<ProjectDetail | null>(null);
   const detailRefreshRef = useRef(0);
+  const projectListRefreshRef = useRef(0);
 
   useEffect(() => {
-    const onRoute = () => setRoute(readRoute());
+    const onRoute = () => {
+      setRoute(readRoute());
+      const filters = readProjectListFilters();
+      setProjectQuery(filters.query);
+      setProjectStatusFilter(filters.status);
+    };
     addEventListener("popstate", onRoute);
     addEventListener("hashchange", onRoute);
     return () => {
@@ -1219,6 +1336,13 @@ export function App() {
       removeEventListener("hashchange", onRoute);
     };
   }, []);
+
+  useEffect(() => {
+    if (route.view !== "projects") return;
+    const next = projectListFilterUrl(projectQuery, projectStatusFilter);
+    const current = `${window.location.pathname}${window.location.search}${window.location.hash}`;
+    if (next !== current) window.history.replaceState(null, "", next);
+  }, [route.view, route.projectUuid, projectQuery, projectStatusFilter]);
 
   useEffect(() => {
     document.documentElement.dataset.theme = theme;
@@ -1250,9 +1374,17 @@ export function App() {
   async function loadProjectPage(append = false) {
     setProjectLoading(true);
     try {
-      const res = await api.projects({ limit: PROJECT_PAGE_SIZE, offset: append ? projects.length : 0, q: projectQuery });
-      setProjects((current) => append ? appendProjectPage(current, res.projects) : res.projects);
-      setProjectsTotal(res.total);
+      const res = await api.projects({ limit: PROJECT_PAGE_SIZE, offset: append ? projects.length : 0, q: projectQuery, status: projectStatusParam(projectStatusFilter) });
+      const normalized = normalizeProjectListResponse(res, projectStatusFilter);
+      if (append) {
+        const nextProjects = appendProjectPage(projects, normalized.projects);
+        setProjects(nextProjects);
+        if (!normalized.serverFiltered) setProjectStatusCounts(countLoadedProjectStatuses(nextProjects, projectStatusFilter === "all" ? Math.max(normalized.total, nextProjects.length) : nextProjects.length));
+      } else {
+        setProjects(normalized.projects);
+      }
+      setProjectsTotal(normalized.total);
+      if (normalized.serverFiltered || !append) setProjectStatusCounts(normalized.statusCounts);
     } finally {
       setProjectLoading(false);
     }
@@ -1271,14 +1403,16 @@ export function App() {
 
   async function refreshBase() {
     const [projectRes, archivedRes, providerRes, daemonRes] = await Promise.all([
-      api.projects({ limit: PROJECT_PAGE_SIZE, q: projectQuery }),
+      api.projects({ limit: PROJECT_PAGE_SIZE, q: projectQuery, status: projectStatusParam(projectStatusFilter) }),
       api.archivedProjects({ limit: PROJECT_PAGE_SIZE }),
       api.providers(),
       api.daemons(),
     ]);
-    setProjects(projectRes.projects);
+    const normalizedProjects = normalizeProjectListResponse(projectRes, projectStatusFilter);
+    setProjects(normalizedProjects.projects);
     setArchivedProjects(archivedRes.projects);
-    setProjectsTotal(projectRes.total);
+    setProjectsTotal(normalizedProjects.total);
+    setProjectStatusCounts(normalizedProjects.statusCounts);
     setArchivedProjectsTotal(archivedRes.total);
     setProviders(providerRes.providers);
     setDaemons(daemonRes.daemons);
@@ -1293,7 +1427,7 @@ export function App() {
       void loadProjectPage(false).catch((error: unknown) => setToast({ tone: "error", message: String(error instanceof Error ? error.message : error) }));
     }, 150);
     return () => window.clearTimeout(timer);
-  }, [projectQuery]);
+  }, [projectQuery, projectStatusFilter]);
 
   useEffect(() => {
     if (!route.projectUuid) {
@@ -1353,6 +1487,16 @@ export function App() {
   const loadedRunning = projects.reduce((n, project) => n + (project.activeRuns ?? (project.latestRun?.status === "running" ? 1 : 0)), 0);
   const latestRunning = Math.max(activeJobsTotal, loadedRunning);
   const visibleRunningRun = detail?.runs.some((run) => run.status === "running") ?? false;
+  const emptyProjectListTitle = projectQuery.trim() && projects.length === 0
+    ? "No matching projects"
+    : projectStatusFilter !== "all" && projects.length === 0
+      ? "No projects in this status"
+      : "Select a project";
+  const emptyProjectListBody = projectQuery.trim() && projects.length === 0
+    ? "Clear or change the project search to pick a target."
+    : projectStatusFilter !== "all" && projects.length === 0
+      ? "Change the status filter to pick another target."
+      : "Pick a target from the project list, or create one when you have source, build root, and an execution profile ready.";
 
   useEffect(() => {
     if (!latestRunning && !visibleRunningRun) return;
@@ -1367,8 +1511,29 @@ export function App() {
         const payload = JSON.parse(message.data) as { projects?: ProjectSnapshot[]; active?: unknown[] };
         if (Array.isArray(payload.active)) setActiveJobsTotal(payload.active.length);
         if (Array.isArray(payload.projects)) {
-          const prependNew = !projectQuery.trim();
-          setProjects((current) => mergeProjectSnapshots(current, payload.projects ?? [], prependNew));
+          const filtersActive = Boolean(projectQuery.trim()) || projectStatusFilter !== "all";
+          const incoming = projectStatusFilter === "all" ? payload.projects : payload.projects.filter((project) => projectMatchesStatusFilter(project, projectStatusFilter));
+          setProjects((current) => {
+            const merged = mergeProjectSnapshots(current, incoming, !filtersActive);
+            return projectStatusFilter === "all" ? merged : merged.filter((project) => projectMatchesStatusFilter(project, projectStatusFilter));
+          });
+          if (filtersActive) {
+            const now = Date.now();
+            if (now - projectListRefreshRef.current > 3_000) {
+              projectListRefreshRef.current = now;
+              void api
+                .projects({ limit: PROJECT_PAGE_SIZE, q: projectQuery, status: projectStatusParam(projectStatusFilter) })
+                .then((res) => {
+                  const normalized = normalizeProjectListResponse(res, projectStatusFilter);
+                  setProjects(normalized.projects);
+                  setProjectsTotal(normalized.total);
+                  setProjectStatusCounts(normalized.statusCounts);
+                })
+                .catch(() => {
+                  // Direct user-triggered refreshes still surface errors; avoid toast spam from live list refreshes.
+                });
+            }
+          }
           const currentUuid = route.projectUuid;
           const current = currentUuid ? payload.projects.find((project) => project.uuid === currentUuid) : undefined;
           const detailStillRunning = detailRef.current
@@ -1398,7 +1563,7 @@ export function App() {
       }
     };
     return () => source.close();
-  }, [route.projectUuid, projectQuery]);
+  }, [route.projectUuid, projectQuery, projectStatusFilter]);
 
   async function launch(action: LaunchAction, selectedFindings?: FindingRow[]) {
     if (!route.projectUuid) return;
@@ -1619,11 +1784,14 @@ export function App() {
               projects={sidebarProjects}
               total={projectsTotal}
               query={projectQuery}
+              statusFilter={projectStatusFilter}
+              statusCounts={projectStatusCounts}
               loading={projectLoading}
               selected={route.projectUuid}
               onNew={() => setModal("new-project")}
               onSelect={(uuid) => go(projectPath(uuid))}
               onQuery={setProjectQuery}
+              onStatusFilter={setProjectStatusFilter}
               onLoadMore={() => void loadProjectPage(true)}
               onUpdate={(project, body, message) => void updateProjectDisplay(project, body, message)}
               onDeleteRequest={setDeleteProjectConfirm}
@@ -1660,10 +1828,10 @@ export function App() {
                   onUpdateRunTarget={(run, target) => void updateRunTarget(run, target)}
                   onOpenRunLog={openRunLog}
                 />
-              ) : projects.length || projectsTotal > 0 || projectQuery.trim() ? (
+              ) : projects.length || projectsTotal > 0 || projectQuery.trim() || projectStatusFilter !== "all" ? (
                 <EmptyState
-                  title={projectQuery.trim() && projects.length === 0 ? "No matching projects" : "Select a project"}
-                  body={projectQuery.trim() && projects.length === 0 ? "Clear or change the project search to pick a target." : "Pick a target from the project list, or create one when you have source, build root, and an execution profile ready."}
+                  title={emptyProjectListTitle}
+                  body={emptyProjectListBody}
                   action={<Button variant="primary" icon="package" onClick={() => setModal("new-project")}>New project</Button>}
                 />
               ) : (
@@ -1831,11 +1999,14 @@ function ProjectSidebar({
   projects,
   total,
   query,
+  statusFilter,
+  statusCounts,
   loading,
   selected,
   onSelect,
   onNew,
   onQuery,
+  onStatusFilter,
   onLoadMore,
   onUpdate,
   onDeleteRequest,
@@ -1844,11 +2015,14 @@ function ProjectSidebar({
   projects: ProjectSnapshot[];
   total: number;
   query: string;
+  statusFilter: ProjectStatusFilter;
+  statusCounts: ProjectStatusCounts;
   loading: boolean;
   selected?: string;
   onSelect: (uuid: string) => void;
   onNew: () => void;
   onQuery: (query: string) => void;
+  onStatusFilter: (status: ProjectStatusFilter) => void;
   onLoadMore: () => void;
   onUpdate: (project: ProjectSnapshot, body: ProjectPayload, message: string) => void;
   onDeleteRequest: (project: ProjectSnapshot) => void;
@@ -1856,8 +2030,21 @@ function ProjectSidebar({
 }) {
   const [dragging, setDragging] = useState<string | null>(null);
   const [openMenu, setOpenMenu] = useState<string | null>(null);
+  const [filterOpen, setFilterOpen] = useState(false);
   const visibleTotal = Math.max(total, projects.length);
-  const canReorder = !query.trim() && projects.length > 1 && projects.length >= visibleTotal;
+  const hasMore = projects.length < visibleTotal;
+  const canReorder = !query.trim() && statusFilter === "all" && projects.length > 1 && projects.length >= visibleTotal;
+  const activeStatus = PROJECT_STATUS_OPTIONS.find((option) => option.value === statusFilter) ?? PROJECT_STATUS_OPTIONS[0];
+  const activeStatusCount = statusCounts[statusFilter] ?? 0;
+  const emptyMessage = (() => {
+    if (query.trim()) return "No active projects match this search.";
+    if (statusFilter === "running") return "No running projects.";
+    if (statusFilter === "needs-work") return "No projects need work.";
+    if (statusFilter === "done") return "No completed projects.";
+    if (statusFilter === "failed") return "No failed projects.";
+    if (statusFilter === "not-started") return "No new projects.";
+    return "No active projects.";
+  })();
   useEffect(() => {
     if (!openMenu) return undefined;
     const close = (event: MouseEvent) => {
@@ -1906,7 +2093,63 @@ function ProjectSidebar({
         </div>
         <Button variant={projects.length ? "primary" : undefined} icon="package" onClick={onNew}>New project</Button>
       </div>
-      <input className="searchbar" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search projects..." aria-label="Search projects" />
+      <div className="project-search-row">
+        <input className="searchbar" value={query} onChange={(event) => onQuery(event.target.value)} placeholder="Search projects..." aria-label="Search projects" />
+        <IconButton
+          icon="filter"
+          className="project-filter-button"
+          selected={filterOpen || statusFilter !== "all"}
+          aria-expanded={filterOpen}
+          aria-controls="project-status-filter"
+          title={statusFilter === "all" ? "Advanced filters" : `Filtering by ${activeStatus.label} (${activeStatusCount})`}
+          aria-label={statusFilter === "all" ? "Advanced project filters" : `Project status filter: ${activeStatus.label} (${activeStatusCount})`}
+          onClick={() => setFilterOpen((open) => !open)}
+        />
+      </div>
+      {!filterOpen && statusFilter !== "all" ? (
+        <div className="project-active-filter">
+          <span>{activeStatus.label}</span>
+          <span>{activeStatusCount}</span>
+          <IconButton
+            icon="x"
+            className="project-filter-clear"
+            title="Clear project status filter"
+            aria-label="Clear project status filter"
+            onClick={() => {
+              onStatusFilter("all");
+              setFilterOpen(false);
+            }}
+          />
+        </div>
+      ) : null}
+      {filterOpen ? (
+        <div id="project-status-filter" className="project-status-filter" role="tablist" aria-label="Project status filter">
+          {PROJECT_STATUS_OPTIONS.map((option) => (
+            <button
+              key={option.value}
+              type="button"
+              role="tab"
+              aria-selected={statusFilter === option.value}
+              className={statusFilter === option.value ? "sel" : ""}
+              onClick={() => {
+                onStatusFilter(option.value);
+                setFilterOpen(false);
+              }}
+            >
+              <span>{option.label}</span>
+              <span>{statusCounts[option.value] ?? 0}</span>
+            </button>
+          ))}
+        </div>
+      ) : null}
+      <div className="project-rail-pager" aria-live="polite">
+        <span>Showing {projects.length} of {visibleTotal}</span>
+        {hasMore ? (
+          <Button size="sm" icon="sync" onClick={onLoadMore} disabled={loading}>
+            {loading ? "Loading..." : `Load ${Math.min(PROJECT_PAGE_SIZE, visibleTotal - projects.length)} more`}
+          </Button>
+        ) : null}
+      </div>
       <ul className="project-list" role="list">
         {projects.map((project) => (
           <li
@@ -2004,8 +2247,8 @@ function ProjectSidebar({
           </li>
         ))}
       </ul>
-      {projects.length === 0 ? <div className="project-list-empty">{query.trim() ? "No active projects match this search." : "No active projects."}</div> : null}
-      {projects.length < visibleTotal ? (
+      {projects.length === 0 ? <div className="project-list-empty">{emptyMessage}</div> : null}
+      {hasMore ? (
         <div className="project-rail-more">
           <Button size="sm" icon="sync" onClick={onLoadMore} disabled={loading}>
             {loading ? "Loading..." : `Load more (${visibleTotal - projects.length})`}

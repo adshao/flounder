@@ -3,7 +3,7 @@ name: flounder
 description: >
   Operates Flounder, an autonomous white-hat security auditor. Use when a user
   asks for a security audit, bug-bounty review, vulnerability investigation, or
-  exploit proof for an authorized repository, source tree, package, smart
+  exploit proof for a public-source or authorized repository, source tree, package, smart
   contract, Solidity/EVM project, ZK or proof-system code, deployed address,
   transaction, project link, or prior Flounder run; to run Flounder prepare,
   map, dig, audit, verify, confirm, or report workflows; to configure Flounder server,
@@ -39,7 +39,7 @@ short command and status summary is enough.
 
 ## What This Skill Must Do
 
-- Turn a security-audit request into an authorized Flounder project or run.
+- Turn a security-audit request into a public-source or authorized Flounder project or run.
 - Keep the operator on the current workflow: `run <clue>` lets Flounder prepare
   the target, then map/dig, confirm, and report; `run --source` is the
   source-provided entry path for sealed map/dig.
@@ -60,12 +60,13 @@ Choose the mode from the user's intent before launching anything:
 | --- | --- | --- | --- |
 | "Do a blind audit / test Flounder's capability / no hints" | Blind capability audit | Recommended: `flounder run <project-or-repo-or-package-link>` or a dashboard project with a factual target clue. If source is already staged or external preparation is explicitly unwanted, use `flounder run --source <paths...> --build-root <root>`. | Do not add incident docs, known bug names, exploit theories, or answer-bearing corpus. Official target docs are allowed only as target material, not as a hidden answer. |
 | "Here is a suspicious tx/address; find the hack/root cause" | Incident investigation | `flounder run <tx-or-address-or-incident-link>` | Treat the clue as evidence, not as proof. Prepare may fetch chain/source data; confirm by local fork/read-only reproduction only. |
-| "Audit this project/repo openly like a bounty hunter" | Open-world bounty audit | Create a project with source paths when available plus a task/clue naming the project, bounty, repo, package, or deployment, then Run. | Let Prepare collect official docs, scope, deployments, and provenance. Do not use private or answer-bearing material. |
+| "Audit this project/repo openly like a white-hat researcher" | Open-world public-source audit | Create a project with source paths when available plus a task/clue naming the project, bounty, repo, package, or deployment, then Run. | Let Prepare collect official docs, scope, deployments, and provenance. Do not use private or answer-bearing material. |
 
 When in doubt: if the user asks to measure Flounder's unaided recall, use blind
 capability audit and keep the clue target-only. If the user gives live exploit
-evidence, use incident investigation. If the user wants broad authorized bug
-hunting and permits public context collection, use open-world bounty audit.
+evidence, use incident investigation. If the user wants broad public-source or
+authorized bug hunting and permits public context collection, use open-world
+public-source audit.
 
 ## Supporting Workflows
 
@@ -106,16 +107,17 @@ Use these when the user is not asking for a full end-to-end audit:
   --source`, `map`, and `audit` are sealed discovery phases. `prepare` and
   `confirm` are open-world phases, still under white-hat no-broadcast rules.
 - Never broadcast transactions, move funds, submit writes, persist access, or
-  target systems outside the authorized scope.
+  target systems outside the declared local audit boundary or explicit authorized
+  scope.
 
 ## First Response Checklist
 
 When a user asks to audit, confirm, verify, report, or inspect Flounder state:
 
-1. Confirm the target is authorized or in public bounty scope. If scope is
-   unclear, ask before running.
+1. Confirm the target source is public, operator-owned, client-authorized, or in
+   public bounty scope. If the source boundary is unclear, ask before running.
 2. Classify the request into one core audit mode: blind capability audit,
-   incident investigation, or open-world bounty.
+   incident investigation, or open-world public-source audit.
 3. Decide the surface:
    - Existing dashboard/API project: use `GET /api`, then project UUID routes.
    - New project or local operator workflow: start/reuse `flounder ui`.
@@ -290,11 +292,13 @@ flounder run <tx-or-address-or-incident-link>
   component, and whether the finding is reproduced, not-reproduced, or still
   suspected.
 
-### Open-World Bounty Audit
+### Open-World Public-Source Audit
 
 Use this when the user wants Flounder to actively collect official public
-context, deployments, package metadata, docs, or bounty scope. Source paths are
-useful when already available, but they are not what defines the scenario.
+context, deployments, package metadata, docs, or bounty scope when available.
+Source paths are useful when already available, but they are not what defines
+the scenario. A public bounty is a priority and submission-path signal, not a
+prerequisite for local sealed audit.
 
 1. Start or reuse `flounder ui`.
 2. Create a project with:
@@ -388,7 +392,7 @@ Open only the references needed for the current task:
 | --- | --- |
 | "Blind audit this target / test framework capability" | Blind capability audit: prefer `flounder run <target-clue>`; use `flounder run --source ... --build-root ...` when source is already staged or no external preparation is wanted |
 | "Find why this tx/address was hacked" | Incident investigation: `flounder run <tx-or-address-or-incident-link>` |
-| "Audit this repo/source openly for bug bounty" | Open-world bounty audit: project with source paths plus task/clue, then Run |
+| "Audit this repo/source openly" | Open-world public-source audit: project with source paths plus task/clue, then Run |
 | "Map the attack surface first" | `flounder map`, then inspect scopes and run `flounder audit --scope ...` |
 | "Dig this file/function/region" | `flounder audit <region> --source ... --build-root ...` |
 | "Verify this suspected bug" | Write a claims JSON and run `flounder verify <file>` or `flounder audit --verify <file>` |

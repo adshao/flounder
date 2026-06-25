@@ -373,6 +373,159 @@ textarea {
   font: inherit;
 }
 
+.project-search-row {
+  min-height: 36px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 12px;
+}
+
+.project-search-row .searchbar {
+  flex: 1 1 auto;
+  min-width: 0;
+}
+
+.project-search-row .icon-btn {
+  flex: 0 0 auto;
+}
+
+.project-filter-button.icon-btn,
+.project-filter-clear.icon-btn {
+  width: 36px;
+  min-width: 36px;
+  border-color: var(--border);
+  background: var(--canvas);
+}
+
+.project-filter-button.icon-btn.sel {
+  color: var(--accent);
+  border-color: color-mix(in srgb, var(--accent) 40%, var(--border));
+  background: var(--sel-bg);
+}
+
+.project-active-filter {
+  min-height: 32px;
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  max-width: 100%;
+  margin-top: 8px;
+  padding: 3px 4px 3px 10px;
+  border: 1px solid color-mix(in srgb, var(--accent) 34%, var(--border));
+  border-radius: 7px;
+  background: var(--sel-bg);
+  color: var(--fg);
+  font-size: 12px;
+  font-weight: 650;
+}
+
+.project-active-filter > span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-active-filter > span:nth-child(2) {
+  min-width: 20px;
+  min-height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+  font-size: 11px;
+}
+
+.project-active-filter .project-filter-clear.icon-btn {
+  width: 26px;
+  min-width: 26px;
+  height: 26px;
+  min-height: 26px;
+  border-color: transparent;
+  background: transparent;
+}
+
+.project-status-filter {
+  display: grid;
+  grid-template-columns: repeat(2, minmax(0, 1fr));
+  gap: 6px;
+  margin-top: 10px;
+}
+
+.project-status-filter button {
+  min-width: 0;
+  min-height: 31px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 6px;
+  border: 1px solid var(--border);
+  border-radius: 7px;
+  background: var(--canvas);
+  color: var(--fg-muted);
+  padding: 5px 8px;
+  font-size: 12px;
+  cursor: pointer;
+}
+
+.project-status-filter button span:first-child {
+  min-width: 0;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.project-status-filter button span:last-child {
+  flex: 0 0 auto;
+  min-width: 20px;
+  min-height: 20px;
+  display: inline-grid;
+  place-items: center;
+  border-radius: 999px;
+  background: color-mix(in srgb, var(--fg-subtle) 10%, transparent);
+  color: var(--fg-muted);
+  font-size: 11px;
+  font-weight: 650;
+}
+
+.project-status-filter button:hover,
+.project-status-filter button:focus-visible {
+  border-color: color-mix(in srgb, var(--accent) 28%, var(--border));
+  background: color-mix(in srgb, var(--accent) 4%, var(--canvas));
+}
+
+.project-status-filter button.sel {
+  border-color: color-mix(in srgb, var(--accent) 48%, var(--border));
+  background: var(--sel-bg);
+  color: var(--fg);
+}
+
+.project-status-filter button.sel span:last-child {
+  background: color-mix(in srgb, var(--accent) 16%, transparent);
+  color: var(--accent);
+}
+
+.project-rail-pager {
+  min-height: 32px;
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 10px;
+  margin-top: 10px;
+  color: var(--fg-muted);
+  font-size: 12px;
+}
+
+.project-rail-pager > span {
+  min-width: 0;
+}
+
+.project-rail-pager .btn {
+  flex: 0 0 auto;
+}
+
 .project-list {
   display: flex;
   flex-direction: column;

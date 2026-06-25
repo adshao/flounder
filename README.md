@@ -13,7 +13,7 @@
 
 ---
 
-Flounder turns modern coding agents into an end-to-end security audit system. Give it an authorized target boundary - a repository, source tree, package, deployed clue, or prior run - and the agent can prepare the workspace, read the code and supporting material, map the attack surface, dig into promising regions, construct exploit paths, run local proof tests, and then reproduce confirmed findings against real-world ground truth.
+Flounder turns modern coding agents into an end-to-end security audit system. Give it a public-source or authorized target boundary - a repository, source tree, package, deployed clue, or prior run - and the agent can prepare the workspace, read the code and supporting material, map the attack surface, dig into promising regions, construct exploit paths, run local proof tests, and then reproduce confirmed findings against real-world ground truth.
 
 The important distinction is that Flounder is not a scanner for one stack, a checklist runner, or a set of hand-written bug rules. It is a thin white-hat audit workflow around the model: the model decides how to reason about the target, while Flounder supplies the sandbox, command policy, durable state, execution gates, daemon control plane, and reporting needed to make that reasoning usable.
 
@@ -40,7 +40,7 @@ Then ask Codex, Claude Code, or another skills-aware agent naturally:
 Audit this repository with Flounder.
 ```
 
-The installed skill should trigger from requests about Flounder audits, authorized source review, smart-contract or ZK audit work, daemon/provider setup, verifying suspected findings, confirming real findings, or collecting execution-backed bug reports. The source of truth is [skills/flounder/SKILL.md](skills/flounder/SKILL.md).
+The installed skill should trigger from requests about Flounder audits, public-source or authorized source review, smart-contract or ZK audit work, daemon/provider setup, verifying suspected findings, confirming real findings, or collecting execution-backed bug reports. The source of truth is [skills/flounder/SKILL.md](skills/flounder/SKILL.md).
 
 ## Why Flounder
 
@@ -58,9 +58,9 @@ The installed skill should trigger from requests about Flounder audits, authoriz
 
 | Scenario | Start with | How Flounder should behave |
 | --- | --- | --- |
-| Blind capability audit | An authorized project, repo, package, source tree, or project link, with no bug hint | Let Flounder prepare the target when possible, or provide source/build paths when you already have them. Do not include incident reports, known bug names, exploit theories, or answer-bearing corpus. Judge the result by coverage and execution-backed findings, not by a claim that the target is safe. |
+| Blind capability audit | A public-source or authorized project, repo, package, source tree, or project link, with no bug hint | Let Flounder prepare the target when possible, or provide source/build paths when you already have them. Do not include incident reports, known bug names, exploit theories, or answer-bearing corpus. Judge the result by coverage and execution-backed findings, not by a claim that the target is safe. |
 | Incident investigation | A suspicious transaction, address, exploit link, or factual incident clue | Use Prepare to collect chain facts, deployed source, official project material, and reproduction requirements. The clue is evidence, not proof; the output should explain the root cause and whether it reproduced on attacker-real local ground truth. |
-| Open-world bounty audit | A public bounty target, repository, package, deployment, or project plus authorization/scope | Let Prepare actively collect official docs, bounty scope, deployments, provenance, and package metadata. The audit remains model-directed, but the allowed context is broader than a blind capability test. |
+| Open-world public-source audit | A public-source target, repository, package, deployment, project, or bounty scope | Let Prepare actively collect official docs, deployments, provenance, package metadata, and bounty scope when available. The audit remains model-directed, but the allowed context is broader than a blind capability test. |
 | Targeted follow-up | A suspected finding, scope id, file/region, or prior run | Use `audit --verify`, `audit --scope`, `confirm`, or selected project actions to settle a narrower question by execution. |
 | Disclosure preparation | Confirmed or reproduced findings | Consolidate duplicates, run real-target confirmation when required, regenerate selected reports, and package only non-ignored, evidence-backed bugs. |
 
@@ -143,7 +143,7 @@ flounder run --target my-target --source ./src --build-root . --corpus ./docs
 flounder confirm ~/.flounder/my-target-<timestamp> --source ./src --build-root .
 ```
 
-For a blind capability audit, the clue should name only the authorized target,
+For a blind capability audit, the clue should name only the public-source or authorized target,
 not a suspected bug. For an incident investigation, the clue should be factual
 evidence such as a transaction or address. For open-world bounty work, combine
 local source paths with a task/clue that names the public program or project so
@@ -153,7 +153,7 @@ Prepare can gather official context.
 
 ## Scenario Commands
 
-These are starting points. Replace placeholders with authorized targets and keep
+These are starting points. Replace placeholders with public-source or authorized targets and keep
 private material out of command lines that may be shared.
 
 ### Blind Capability Audit
@@ -162,7 +162,7 @@ Use this to measure Flounder's unaided audit ability. Do not include an incident
 writeup, known bug name, exploit theory, or answer-bearing corpus.
 
 ```bash
-# Let Flounder prepare an authorized public target.
+# Let Flounder prepare a public-source target.
 flounder run https://github.com/org/protocol
 
 # Or audit source that is already staged locally.
@@ -185,19 +185,19 @@ flounder run 0x<transaction-hash>
 flounder run <deployed-address-or-incident-link>
 ```
 
-### Open-World Bounty Audit
+### Open-World Public-Source Audit
 
-Use this when Flounder should collect official public context, bounty scope,
-deployments, package metadata, and provenance.
+Use this when Flounder should collect official public context, deployments,
+package metadata, provenance, and bounty scope when available.
 
 ```bash
-flounder run "Open-world bounty audit for https://github.com/org/protocol; use official docs and public scope."
+flounder run "Open-world public-source audit for https://github.com/org/protocol; use official docs, deployments, and public scope where available."
 
 # Hybrid project when source is already checked out but Prepare should still gather public context.
 # "dir" is under the daemon workspace; source/corpus paths are relative to it.
 curl -X POST http://127.0.0.1:4500/api/projects \
   -H 'content-type: application/json' \
-  -d '{"name":"protocol-bounty","providerId":1,"daemonId":1,"dir":"protocol","sourcePaths":["contracts"],"buildRoot":".","corpusPaths":["docs"],"config":{"prepareClue":"Open-world bounty audit for <program-or-project-link>; use official docs and public scope."}}'
+  -d '{"name":"protocol-audit","providerId":1,"daemonId":1,"dir":"protocol","sourcePaths":["contracts"],"buildRoot":".","corpusPaths":["docs"],"config":{"prepareClue":"Open-world public-source audit for <program-or-project-link>; use official docs, deployments, and public scope where available."}}'
 
 curl -X POST http://127.0.0.1:4500/api/projects/<uuid>/runs \
   -H 'content-type: application/json' \
@@ -371,7 +371,7 @@ Every UI operation is also a REST call. `GET /api` returns the API catalog, and 
 
 ## White-Hat Boundary
 
-Flounder is for authorized audits only: your own code, client-authorized targets, or public bug-bounty scope. Sealed discovery is local-only. Model-generated files and commands run inside the copied sandbox workspace instead of directly mutating the host checkout. Open-world confirmation can fetch, search, fork, and read, but it must never broadcast transactions, move funds, submit writes, persist access, or target systems outside scope. Replay exploits only against local tests, local forks, or isolated harnesses. See [SECURITY.md](SECURITY.md).
+Flounder supports white-hat audits of publicly available source, your own code, client-authorized targets, or public bug-bounty scope. Sealed discovery is local-only. Model-generated files and commands run inside the copied sandbox workspace instead of directly mutating the host checkout. Open-world confirmation can fetch, search, fork, and read, but it must never broadcast transactions, move funds, submit writes, persist access, or target systems outside the declared target boundary. Replay exploits only against local tests, local forks, or isolated harnesses, and disclose public-source findings privately unless a bounty program defines another path. See [SECURITY.md](SECURITY.md).
 
 ## Documentation
 

@@ -28,6 +28,7 @@ export interface ProjectSnapshot {
   sort_order?: number | null;
   created_at?: string | null;
   updated_at?: string | null;
+  config?: ProjectConfig;
   progress?: Coverage;
   findingCounts?: Record<string, number>;
   findingsTotal?: number;
@@ -43,6 +44,9 @@ export interface ProjectSnapshot {
   latestRun?: RunRow | null;
   material?: MaterialSummary;
 }
+
+export type ProjectStatusFilter = "all" | "running" | "needs-work" | "done" | "failed" | "not-started";
+export type ProjectStatusCounts = Record<ProjectStatusFilter, number>;
 
 export interface ProjectRow {
   id: number;
@@ -333,6 +337,7 @@ export interface ProjectListParams {
   limit?: number;
   offset?: number;
   q?: string;
+  status?: Exclude<ProjectStatusFilter, "all">;
 }
 
 export interface ProjectListResponse {
@@ -340,6 +345,7 @@ export interface ProjectListResponse {
   total: number;
   limit: number;
   offset: number;
+  statusCounts?: Partial<ProjectStatusCounts>;
 }
 
 export interface LaunchPayload {
@@ -377,6 +383,7 @@ function projectListPath(params: ProjectListParams = {}): string {
   if (params.limit !== undefined) query.set("limit", String(params.limit));
   if (params.offset !== undefined) query.set("offset", String(params.offset));
   if (params.q?.trim()) query.set("q", params.q.trim());
+  if (params.status) query.set("status", params.status);
   const qs = query.toString();
   return `/api/projects${qs ? `?${qs}` : ""}`;
 }

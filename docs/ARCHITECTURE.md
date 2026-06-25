@@ -248,7 +248,7 @@ Findings are persisted **incrementally** — as each scope's dig lands, then re-
 
 ## White-Hat Constraints
 
-- Audit only authorized source code.
+- Candidate projects and sealed local audits may use publicly available source code or explicitly authorized source code.
 - Keep verification local-only.
 - Never broadcast transactions or target public networks.
 - Treat model output as untrusted input.
