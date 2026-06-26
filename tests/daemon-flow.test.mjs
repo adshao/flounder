@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp, stat } from "node:fs/promises";
+import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { startUiServer } from "../dist/server/app.js";
@@ -261,28 +261,41 @@ test("daemon: active job counts connected daemon identities, not stream connecti
 });
 
 test("daemon: JSON run log compacts token deltas for history views", async () => {
-  await withServerAndToken(async ({ base, token }) => {
+  await withServerAndToken(async ({ base, token, out }) => {
     await asDaemon(base, token, "POST", "/api/daemon/register", { name: "d1" });
     const created = await j(await ui(base, "POST", "/api/projects", { name: "p", sourcePaths: ["./src"] }));
     const { jobId } = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true }));
     await asDaemon(base, token, "POST", "/api/daemon/claim");
-    const { runId } = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId, project: "p", kind: "run", runDir: "/tmp/p-1", budgets: {} }));
+    const runDir = path.join(out, "p-1");
+    await mkdir(runDir, { recursive: true });
+    const { runId } = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId, project: "p", kind: "run", runDir, budgets: {} }));
+    await writeFile(path.join(runDir, "events.jsonl"), [
+      JSON.stringify({ ts: "2026-01-01T00:00:01.000Z", kind: "audit_thinking", text: "checking the invariant" }),
+      JSON.stringify({ ts: "2026-01-01T00:00:02.000Z", kind: "audit_text", text: "Confirmed candidate" }),
+      JSON.stringify({ ts: "2026-01-01T00:00:03.000Z", kind: "step", tool: "bash", step: 1 }),
+      JSON.stringify({ ts: "2026-01-01T00:00:04.000Z", kind: "artifact", name: "confirm_decision.json", path: "confirm_decision.json" }),
+      JSON.stringify({ ts: "2026-01-01T00:00:04.250Z", kind: "artifact", name: "confirm_decision.json", path: "confirm_decision.json" }),
+    ].join("\n") + "\n");
 
     await asDaemon(base, token, "POST", `/api/daemon/runs/${runId}/activity`, {
       events: [
-        { kind: "thinking_delta", delta: "checking " },
-        { kind: "thinking_delta", delta: "the invariant" },
-        { kind: "text_delta", delta: "Confirmed " },
-        { kind: "text_delta", delta: "candidate" },
-        { kind: "step", tool: "bash", step: 1 },
+        { ts: "2026-01-01T00:00:01.100Z", kind: "thinking_delta", delta: "checking " },
+        { ts: "2026-01-01T00:00:01.200Z", kind: "thinking_delta", delta: "the invariant" },
+        { ts: "2026-01-01T00:00:02.100Z", kind: "text_delta", delta: "Confirmed " },
+        { ts: "2026-01-01T00:00:02.200Z", kind: "text_delta", delta: "candidate" },
+        { ts: "2026-01-01T00:00:03.100Z", kind: "step", tool: "bash", step: 1 },
+        { ts: "2026-01-01T00:00:03.200Z", kind: "step", tool: "bash", step: 1 },
       ],
     });
 
     const body = await j(await ui(base, "GET", `/api/runs/${runId}/log?tail=50&format=json`));
     assert.equal(body.events.some((ev) => ev.kind === "thinking_delta" || ev.kind === "text_delta"), false);
+    assert.equal(body.events.filter((ev) => ev.kind === "audit_thinking").length, 1);
     assert.equal(body.events.find((ev) => ev.kind === "audit_thinking")?.detail, "checking the invariant");
+    assert.equal(body.events.filter((ev) => ev.kind === "audit_text").length, 1);
     assert.equal(body.events.find((ev) => ev.kind === "audit_text")?.detail, "Confirmed candidate");
-    assert.ok(body.events.find((ev) => ev.kind === "step"));
+    assert.equal(body.events.filter((ev) => ev.kind === "step").length, 1);
+    assert.equal(body.events.filter((ev) => ev.kind === "artifact" && ev.name === "confirm_decision.json").length, 1);
   });
 });
 

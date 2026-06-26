@@ -1040,6 +1040,11 @@ function payloadString(payload: Record<string, unknown>, key: string): string | 
   return typeof value === "string" && value ? value : undefined;
 }
 
+function payloadBoolean(payload: Record<string, unknown>, key: string): boolean | undefined {
+  const value = payload[key];
+  return typeof value === "boolean" ? value : undefined;
+}
+
 function writeSummary(event: ActivityRecord, verb: "Wrote" | "Edited"): { label: string; body: string } {
   const payload = eventPayload(event);
   const file = payloadString(payload, "path");
@@ -1060,6 +1065,29 @@ function eventSummary(event: ActivityRecord, fallbackBody: string): { label: str
     case "artifact": {
       const body = fallbackBody.replace(/^wrote\s+/i, "").trim();
       return { label: "Saved artifact", body: body || fallbackBody };
+    }
+    case "audit_confirm_freeze": {
+      const files = payloadNumber(payload, "files");
+      return { label: "Confirm inputs frozen", body: files !== undefined ? `${files} files fingerprinted before open-world confirmation.` : fallbackBody };
+    }
+    case "audit_confirm_resume": {
+      const settled = payloadNumber(payload, "settled");
+      return { label: "Resumed decisions", body: settled !== undefined ? `${settled} previously settled decisions carried forward.` : fallbackBody };
+    }
+    case "audit_confirm_start": {
+      const findings = payloadNumber(payload, "findings");
+      const maxSteps = payloadString(payload, "maxSteps");
+      return {
+        label: "Confirm started",
+        body: [
+          findings !== undefined ? `${findings} findings in context` : undefined,
+          maxSteps ? `${maxSteps} step budget` : undefined,
+        ].filter(Boolean).join(" · ") || fallbackBody,
+      };
+    }
+    case "audit_report_start": {
+      const findings = payloadNumber(payload, "findings");
+      return { label: "Report started", body: findings !== undefined ? `${findings} submit candidates selected for formal reports.` : fallbackBody };
     }
     case "audit_scope_progress": {
       const total = payloadNumber(payload, "total");
@@ -1106,6 +1134,46 @@ function eventSummary(event: ActivityRecord, fallbackBody: string): { label: str
         label: "Running command",
         body: [runId, purpose, command ? shortCommand(command) : undefined].filter(Boolean).join(" · ") || fallbackBody,
       };
+    }
+    case "audit_confirm_finalize":
+      return { label: "Finalizing decisions", body: "Requesting the required real-target decision sheet before finishing." };
+    case "audit_confirm_finalize_done":
+      return {
+        label: payloadBoolean(payload, "hasDecision") === false ? "Decision sheet missing" : "Decision sheet ready",
+        body: payloadBoolean(payload, "hasDecision") === false ? "The confirm run finished without a decision sheet." : "The confirm run produced its decision sheet.",
+      };
+    case "audit_confirm_equiv_skipped": {
+      const items = payloadNumber(payload, "items");
+      const maxItems = payloadNumber(payload, "maxItems");
+      return {
+        label: "Equivalence check skipped",
+        body: items !== undefined && maxItems !== undefined
+          ? `${items} decisions exceeded the automatic comparison limit of ${maxItems}.`
+          : fallbackBody,
+      };
+    }
+    case "audit_confirm_done": {
+      const rows = payloadNumber(payload, "rows");
+      const reproduced = payloadNumber(payload, "reproducedYes");
+      const submit = payloadNumber(payload, "submitCandidates");
+      return {
+        label: "Confirm finished",
+        body: [
+          rows !== undefined ? `${rows} decisions` : undefined,
+          reproduced !== undefined ? `${reproduced} reproduced` : undefined,
+          submit !== undefined ? `${submit} submit candidates` : undefined,
+        ].filter(Boolean).join(" · ") || fallbackBody,
+      };
+    }
+    case "audit_report_finalize":
+      return { label: "Finalizing reports", body: "Requesting any missing formal report files before finishing." };
+    case "audit_report_finalize_done": {
+      const reports = payloadNumber(payload, "reports");
+      return { label: "Reports ready", body: reports !== undefined ? `${reports} formal reports produced` : fallbackBody };
+    }
+    case "audit_report_done": {
+      const reports = payloadNumber(payload, "reports");
+      return { label: "Report finished", body: reports !== undefined ? `${reports} formal reports produced` : fallbackBody };
     }
     default:
       return undefined;
@@ -1250,6 +1318,28 @@ function appendFinalStreamLine(next: ActivityLine[], now: number, kind: Activity
   next[index] = { ...line, body: normalizeActivityBody(merged), time: now };
 }
 
+function activityLineDedupeBody(value: string): string {
+  return normalizeActivityBody(value).replace(/\s+/g, " ").trim();
+}
+
+function appendEventLine(next: ActivityLine[], line: ActivityLine): void {
+  const key = activityLineDedupeBody(line.body);
+  const recentIndex = [...next]
+    .reverse()
+    .findIndex((existing) =>
+      existing.kind === line.kind &&
+      existing.label === line.label &&
+      activityLineDedupeBody(existing.body) === key &&
+      Math.abs(line.time - existing.time) <= STREAM_MERGE_WINDOW_MS,
+    );
+  if (recentIndex >= 0) {
+    const index = next.length - 1 - recentIndex;
+    next[index] = { ...next[index], time: line.time, step: line.step ?? next[index].step, meta: line.meta ?? next[index].meta };
+    return;
+  }
+  next.push(line);
+}
+
 function activityEventLabel(kind: string): string {
   switch (kind) {
     case "audit_thinking":
@@ -1324,7 +1414,7 @@ function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): Activ
       appendFinalStreamLine(next, now, "text", "Output", normalizedBody);
       return next.slice(-60);
     }
-    next.push({
+    appendEventLine(next, {
       id: now + next.length,
       kind: event.kind === "audit_thinking" ? "thinking" : "event",
       label: actionFailed ? "Action blocked" : action?.label ?? summary?.label ?? label,

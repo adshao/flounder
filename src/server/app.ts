@@ -3083,9 +3083,74 @@ function streamFromBus(res: ServerResponse, bus: ActivityBus, replay: Array<Reco
 
 function combinedRunActivity(run: Record<string, unknown>, bus: ActivityBus, limit: number): Array<Record<string, unknown>> {
   const events = [...persistedRunActivity(run, limit), ...compactLiveActivity(bus.snapshot(2000))];
-  return events
-    .sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")))
-    .slice(-limit);
+  return dedupeRunActivity(events.sort((a, b) => String(a.ts ?? "").localeCompare(String(b.ts ?? "")))).slice(-limit);
+}
+
+function dedupeRunActivity(events: Array<Record<string, unknown>>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const seen = new Map<string, { index: number; ts: number }>();
+  for (const event of events) {
+    const key = activityDedupeKey(event);
+    if (!key) {
+      out.push(event);
+      continue;
+    }
+    const ts = activityTs(event);
+    const prior = seen.get(key.key);
+    if (prior && Math.abs(ts - prior.ts) <= key.windowMs) {
+      const existing = out[prior.index];
+      if (existing) {
+        out[prior.index] = richerActivityEvent(existing, event);
+        seen.set(key.key, { index: prior.index, ts });
+        continue;
+      }
+    }
+    seen.set(key.key, { index: out.length, ts });
+    out.push(event);
+  }
+  return out;
+}
+
+function activityDedupeKey(event: Record<string, unknown>): { key: string; windowMs: number } | undefined {
+  const kind = stringValue(event.kind);
+  if (!kind) return undefined;
+  if (kind === "audit_thinking" || kind === "audit_text") {
+    const body = normalizedActivityKey(activityBody(event));
+    return body ? { key: `${kind}:${body}`, windowMs: 30_000 } : undefined;
+  }
+  if (kind === "step") {
+    const step = numberValue(event.step);
+    const tool = stringValue(event.tool);
+    return step > 0 ? { key: `${kind}:${tool}:${step}`, windowMs: 10_000 } : undefined;
+  }
+  if (kind === "artifact") {
+    const name = stringValue(event.name);
+    const file = stringValue(event.path);
+    const id = name || file;
+    return id ? { key: `${kind}:${name}:${file}`, windowMs: 5_000 } : undefined;
+  }
+  return undefined;
+}
+
+function activityBody(event: Record<string, unknown>): string {
+  return stringValue(event.text) || stringValue(event.detail) || stringValue(event.result) || stringValue(event.delta);
+}
+
+function normalizedActivityKey(value: string): string {
+  return value.replace(/\s+/g, " ").trim();
+}
+
+function activityTs(event: Record<string, unknown>): number {
+  const ts = typeof event.ts === "string" ? Date.parse(event.ts) : NaN;
+  return Number.isFinite(ts) ? ts : 0;
+}
+
+function richerActivityEvent(a: Record<string, unknown>, b: Record<string, unknown>): Record<string, unknown> {
+  return activityRichness(b) > activityRichness(a) ? b : a;
+}
+
+function activityRichness(event: Record<string, unknown>): number {
+  return Object.keys(event).length * 10 + activityBody(event).length + (typeof event.text === "string" ? 50 : 0);
 }
 
 function compactLiveActivity(events: Activity[]): Array<Record<string, unknown>> {
