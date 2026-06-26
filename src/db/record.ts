@@ -199,6 +199,7 @@ export class RunRecorder implements RunTracker {
 // in the suspected queue with a status prefix embedded in the title.
 function toFindingStatus(finding: AgentFinding): FindingStatus {
   if (finding.disputed || isRefutedTitle(finding.title)) return "refuted";
+  if (finding.originId != null && finding.confirmationStatus === "suspected") return "needs-evidence";
   return finding.confirmationStatus as FindingStatus;
 }
 

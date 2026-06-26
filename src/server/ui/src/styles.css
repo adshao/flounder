@@ -2120,6 +2120,7 @@ small {
 }
 
 .s-suspected,
+.s-needs-evidence,
 .s-pending,
 .s-deferred {
   color: var(--warning);

@@ -138,6 +138,9 @@ test("record: verify REFUTED verdicts become structured refuted rows", () => {
   assert.equal(refuted.status, "refuted");
   assert.equal(refuted.title, "Unbound input is guarded");
   assert.equal(refuted.findingKey, clean.findingKey);
+
+  const needsEvidence = toFindingRow({ ...base, title: "External key provenance is unresolved", originId: 123 }, "/runs/verify");
+  assert.equal(needsEvidence.status, "needs-evidence");
 });
 
 test("store: startup migration repairs verify artifact refutations and report run ids", async () => {
@@ -148,11 +151,12 @@ test("store: startup migration repairs verify artifact refutations and report ru
   let db = new MetadataStore(dbPath);
   const projectId = db.upsertProject({ name: "legacy-verify-project" });
   const oldRunId = db.startRun({ projectId, kind: "run", runDir: oldRunDir });
-  const verifyRunId = db.startRun({ projectId, kind: "audit", runDir: verifyRunDir });
+  const verifyRunId = db.startRun({ projectId, kind: "audit", runDir: verifyRunDir, budgets: { verify: true } });
   db.finishRun(oldRunId, "done");
   db.finishRun(verifyRunId, "done");
   db.upsertFindings(projectId, oldRunId, [
     { findingKey: "legacy-refuted", title: "Opaque libraries are bytecode-only", location: "manifest.json:1", severity: "high", status: "suspected" },
+    { findingKey: "legacy-evidence", title: "Verifier key provenance is unresolved", location: "manifest.json:2", severity: "high", status: "suspected" },
     {
       findingKey: "legacy-confirmed",
       title: "Confirmed rerun finding",
@@ -163,8 +167,10 @@ test("store: startup migration repairs verify artifact refutations and report ru
     },
   ]);
   const refutedBefore = db.queryFindings(projectId, { search: "Opaque libraries" })[0];
+  const needsEvidenceBefore = db.queryFindings(projectId, { search: "Verifier key provenance" })[0];
   const confirmedBefore = db.queryFindings(projectId, { search: "Confirmed rerun" })[0];
   assert.equal(refutedBefore.status, "suspected");
+  assert.equal(needsEvidenceBefore.status, "suspected");
   assert.equal(confirmedBefore.run_id, oldRunId);
 
   await mkdir(verifyRunDir, { recursive: true });
@@ -183,6 +189,19 @@ test("store: startup migration repairs verify artifact refutations and report ru
         fix: "No security fix required.",
         confidence: 0.92,
       },
+      {
+        id: "h2",
+        originId: Number(needsEvidenceBefore.id),
+        title: "Verifier key provenance is unresolved",
+        severity: "high",
+        location: "manifest.json:2",
+        description: "The local source was reviewed but the deployed key cannot be bound without setup artifacts.",
+        evidence: "The verify artifact records the exact missing external evidence.",
+        exploitSketch: "If the key was generated from another circuit, invalid proofs may verify.",
+        fix: "Publish the R1CS/zkey/vkey/proving transcript hashes.",
+        confidence: 0.81,
+        confirmationStatus: "suspected",
+      },
     ]),
   );
   db.close();
@@ -195,6 +214,12 @@ test("store: startup migration repairs verify artifact refutations and report ru
   assert.equal(refutedAfter.run_id, verifyRunId);
   assert.equal(refutedAfter.evidence, "Local regeneration matched the deployed bytecode.");
   assert.ok(db.findingTimeline(Number(refutedBefore.id)).some((event) => event.from_status === "suspected" && event.to_status === "refuted"));
+
+  const needsEvidenceAfter = db.getFinding(Number(needsEvidenceBefore.id));
+  assert.equal(needsEvidenceAfter.status, "needs-evidence");
+  assert.equal(needsEvidenceAfter.run_id, verifyRunId);
+  assert.equal(needsEvidenceAfter.evidence, "The verify artifact records the exact missing external evidence.");
+  assert.ok(db.findingTimeline(Number(needsEvidenceBefore.id)).some((event) => event.from_status === "suspected" && event.to_status === "needs-evidence"));
 
   const confirmedAfter = db.getFinding(Number(confirmedBefore.id));
   assert.equal(confirmedAfter.run_id, verifyRunId);

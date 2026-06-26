@@ -62,3 +62,25 @@ test("ui: phase cards count report packages by reproduced decision, not linked f
   assert.equal(phases.confirm.stat, "1/1 reproduced · 1 finding waiting");
   assert.equal(phases.report.stat, "1/1 report ready · 1 submission");
 });
+
+test("ui: verify card treats external-evidence leads as reviewed, not waiting", () => {
+  const detail = {
+    runs: [],
+    material: {},
+    scopes: [],
+    activeScopeCount: 0,
+    findingsTotal: 3,
+    statusCounts: { "confirmed-differential": 1, "needs-evidence": 2 },
+    prepareSummary: { realTarget: { requiresConfirmation: true } },
+    allFindings: [
+      { id: 1, finding_key: "kconfirmed", status: "confirmed-differential", confirm_status: null, has_report: false },
+      { id: 2, finding_key: "kevidence1", status: "needs-evidence", confirm_status: null, has_report: false },
+      { id: 3, finding_key: "kevidence2", status: "needs-evidence", confirm_status: null, has_report: false },
+    ],
+    confirmDecisions: [],
+  };
+  const phases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
+  assert.equal(phases.verify.status, "done");
+  assert.equal(phases.verify.stat, "1 locally verified · 2 need evidence");
+  assert.equal(phases.confirm.stat, "1 waiting for real-target confirmation");
+});

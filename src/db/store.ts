@@ -23,7 +23,13 @@ const { DatabaseSync } = createRequire(import.meta.url)("node:sqlite") as typeof
 export type RunKind = "run" | "map" | "audit" | "verify" | "confirm" | "prepare" | "report";
 export type RunStatus = "running" | "done" | "error" | "killed";
 export type ScopeStatus = "pending" | "audited" | "deferred" | "auditing";
-export type FindingStatus = "suspected" | "discharged" | "confirmed-executable" | "confirmed-differential" | "refuted";
+export type FindingStatus =
+  | "suspected"
+  | "needs-evidence"
+  | "discharged"
+  | "confirmed-executable"
+  | "confirmed-differential"
+  | "refuted";
 
 export interface ProjectInput {
   name: string;
@@ -416,8 +422,8 @@ export class MetadataStore {
 
   private reconcileFindingReportRunIds(): void {
     const runs = this.db
-      .prepare("SELECT id, project_id, run_dir FROM run WHERE run_dir IS NOT NULL AND run_dir <> ''")
-      .all() as Array<{ id: number; project_id: number; run_dir: string }>;
+      .prepare("SELECT id, project_id, kind, run_dir, budgets_json FROM run WHERE run_dir IS NOT NULL AND run_dir <> ''")
+      .all() as Array<{ id: number; project_id: number; kind: string; run_dir: string; budgets_json: string | null }>;
     if (runs.length === 0) return;
 
     const runByDir = new Map<string, number>();
@@ -438,13 +444,13 @@ export class MetadataStore {
 
   private reconcileRefutedVerifyArtifacts(): void {
     const runs = this.db
-      .prepare("SELECT id, project_id, run_dir FROM run WHERE run_dir IS NOT NULL AND run_dir <> ''")
-      .all() as Array<{ id: number; project_id: number; run_dir: string }>;
+      .prepare("SELECT id, project_id, kind, run_dir, budgets_json FROM run WHERE run_dir IS NOT NULL AND run_dir <> ''")
+      .all() as Array<{ id: number; project_id: number; kind: string; run_dir: string; budgets_json: string | null }>;
     if (runs.length === 0) return;
 
     const selectOriginal = this.db.prepare("SELECT id, project_id, title, status FROM finding WHERE id = ?");
     const updateOriginal = this.db.prepare(
-      `UPDATE finding SET run_id = ?, title = ?, location = ?, severity = ?, status = 'refuted',
+      `UPDATE finding SET run_id = ?, title = ?, location = ?, severity = ?, status = ?,
          scope_id = COALESCE(?, scope_id),
          report_markdown = COALESCE(NULLIF(?, ''), report_markdown),
          description = COALESCE(NULLIF(?, ''), description), evidence = COALESCE(NULLIF(?, ''), evidence),
@@ -458,11 +464,16 @@ export class MetadataStore {
         ...readFindingArtifact(path.join(run.run_dir, "audit_findings.json")),
       ];
       for (const artifact of artifacts) {
-        if (!artifactTitleIsRefuted(artifact)) continue;
+        const status = artifactTitleIsRefuted(artifact)
+          ? "refuted"
+          : runIsVerify(run) && artifactStatus(artifact) === "suspected"
+            ? "needs-evidence"
+            : undefined;
+        if (!status) continue;
         const originId = artifactOriginId(artifact);
         if (originId === undefined) continue;
         const original = selectOriginal.get(originId) as { id: number; project_id: number; title: string | null; status: string } | undefined;
-        if (!original || original.project_id !== run.project_id || original.status === "refuted") continue;
+        if (!original || original.project_id !== run.project_id || original.status === status) continue;
 
         const ts = now();
         updateOriginal.run(
@@ -470,6 +481,7 @@ export class MetadataStore {
           cleanArtifactTitle(stringValue(artifact.title)) ?? original.title ?? null,
           stringValue(artifact.location) ?? null,
           stringValue(artifact.severity) ?? null,
+          status,
           stringValue(artifact.scopeId) ?? null,
           "", // refuted hypotheses do not have a submit-ready report body.
           stringValue(artifact.description) ?? null,
@@ -481,7 +493,7 @@ export class MetadataStore {
           original.id,
           run.project_id,
         );
-        this.recordStatusEvent(original.id, original.status, "refuted", "verify artifact migration", run.id, ts);
+        this.recordStatusEvent(original.id, original.status, status, "verify artifact migration", run.id, ts);
       }
     }
   }
@@ -1471,6 +1483,16 @@ function artifactOriginId(artifact: Record<string, unknown>): number | undefined
   const value = artifact.originId ?? artifact.origin_id;
   const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : NaN;
   return Number.isInteger(n) && n > 0 ? n : undefined;
+}
+
+function artifactStatus(artifact: Record<string, unknown>): string | undefined {
+  return stringValue(artifact.confirmationStatus ?? artifact.status);
+}
+
+function runIsVerify(run: { kind: string; budgets_json: string | null }): boolean {
+  if (run.kind === "verify") return true;
+  const budgets = typeof run.budgets_json === "string" ? jsonParseOrNull(run.budgets_json) : null;
+  return isRecord(budgets) && budgets.verify === true;
 }
 
 function stringValue(value: unknown): string | undefined {

@@ -444,6 +444,7 @@ function findingStatusOptionLabel(status: string): string {
     "confirmed-differential": "Differential confirmed",
     "confirmed-executable": "Execution confirmed",
     "confirmed-source": "Source-confirmed lead",
+    "needs-evidence": "Needs evidence",
     suspected: "Needs verification",
     discharged: "Discharged",
     refuted: "Refuted",
@@ -473,6 +474,7 @@ function nextAction(finding: FindingRow): string {
   if (finding.status.startsWith("confirmed") && finding.confirm_status === "reproduced") return "Prepare disclosure";
   if (finding.status.startsWith("confirmed") && finding.confirm_status === "not-reproduced") return "Review reproduction";
   if (finding.status.startsWith("confirmed")) return "Confirm real target";
+  if (finding.status === "needs-evidence") return "Collect evidence";
   if (finding.status === "suspected") return "Triage";
   if (finding.status === "refuted" || finding.status === "discharged") return "Archive";
   return "Review";
@@ -484,6 +486,7 @@ function findingWorkflow(finding: FindingRow): { label: string; detail: string; 
   if (tracking === "accepted" || tracking === "fixed") return { label: tracking === "accepted" ? "Accepted" : "Fixed", detail: nextAction(finding), className: "s-confirmed-executable" };
   if (tracking === "submitted") return { label: "Submitted", detail: "Waiting for vendor response", className: "s-confirmed-source" };
   if (finding.status === "refuted" || finding.status === "discharged") return { label: "Closed", detail: nextAction(finding), className: "s-discharged" };
+  if (finding.status === "needs-evidence") return { label: "Needs evidence", detail: "Collect external proof", className: "s-needs-evidence" };
   if (finding.confirm_status === "not-reproduced" || finding.confirm_status === "not_reproduced") return { label: "Needs review", detail: "Real-target proof failed", className: "s-refuted" };
   if (finding.confirm_status === "reproduced" && !finding.has_report) return { label: "Needs report", detail: "Package reproduced bug", className: "s-pending" };
   if (finding.confirm_status === "reproduced") return { label: "Ready to disclose", detail: "Formal report exists", className: "s-confirmed-executable" };
@@ -501,6 +504,8 @@ function findingCheckBadges(finding: FindingRow): { label: string; className: st
     ? { label: "Verified", className: "s-confirmed-executable", title: "Local execution verification passed." }
     : finding.status === "refuted" || finding.status === "discharged"
       ? { label: "Refuted", className: "s-refuted", title: "Local verification refuted or discharged this finding." }
+      : finding.status === "needs-evidence"
+        ? { label: "Needs evidence", className: "s-needs-evidence", title: "Local verification reviewed this finding, but external evidence is needed to settle it." }
       : { label: "Needs verify", className: "s-suspected", title: "This finding still needs local execution verification." };
   const confirm = finding.confirm_status === "reproduced"
     ? { label: "Confirmed", className: "s-confirmed-executable", title: "Real-target confirmation reproduced this finding." }
@@ -754,10 +759,12 @@ function confirmButtonTitle(count: number, locallyVerified: number, launchLocked
 function verifyStatusSummary(rows: FindingRow[] | undefined): string {
   const passed = localVerifiedFindings(rows).length;
   const pending = rawPendingVerifyCount(rows);
+  const needsEvidence = activeFindings(rows).filter((finding) => finding.status === "needs-evidence").length;
   const refuted = activeFindings(rows).filter((finding) => finding.status === "refuted").length;
   const parts = [];
   if (passed) parts.push(`${passed} passed`);
   if (pending) parts.push(`${pending} pending`);
+  if (needsEvidence) parts.push(`${needsEvidence} need evidence`);
   if (refuted) parts.push(`${refuted} refuted`);
   return parts.length ? `Local verification: ${parts.join(" · ")}` : "";
 }
@@ -770,10 +777,12 @@ function activeVerifySummary(run: RunRow | undefined): string {
 function findingsSummary(detail: ProjectDetail): string {
   const suspected = detail.statusCounts.suspected ?? 0;
   const source = detail.statusCounts["confirmed-source"] ?? 0;
+  const needsEvidence = detail.statusCounts["needs-evidence"] ?? 0;
   const confirmed = (detail.statusCounts["confirmed-differential"] ?? 0) + (detail.statusCounts["confirmed-executable"] ?? 0);
   const pieces = [];
   if (suspected) pieces.push(`${plural(suspected, "suspected lead")}`);
   if (source) pieces.push(`${plural(source, "source-confirmed lead")}`);
+  if (needsEvidence) pieces.push(`${plural(needsEvidence, "lead needing evidence")}`);
   if (confirmed) pieces.push(`${plural(confirmed, "audit-confirmed finding")}`);
   return pieces.length ? pieces.join(" · ") : "No candidate findings yet";
 }
@@ -1293,6 +1302,7 @@ function savedBugViews(stats: BugStats): Array<{ id: string; label: string; stat
     { id: "differential", label: "Differential", status: "confirmed-differential", tracking: "open", count: stats.byStatus["confirmed-differential"] ?? 0 },
     { id: "executable", label: "Executable", status: "confirmed-executable", tracking: "open", count: stats.byStatus["confirmed-executable"] ?? 0 },
     { id: "triage", label: "Needs triage", status: "suspected", tracking: "open", count: stats.byStatus.suspected ?? 0 },
+    { id: "evidence", label: "Needs evidence", status: "needs-evidence", tracking: "open", count: stats.byStatus["needs-evidence"] ?? 0 },
     { id: "submitted", label: "Submitted", tracking: "submitted", count: stats.byTracking.submitted ?? 0 },
     { id: "accepted", label: "Accepted", tracking: "accepted", count: stats.byTracking.accepted ?? 0 },
     { id: "ignored", label: "Ignored", tracking: "ignored", count: stats.byTracking.ignored ?? 0 },
@@ -2798,6 +2808,7 @@ function ProjectOverview({
   const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmFindings(detail.allFindings, needsRealTargetConfirmation(detail)).length;
   const sourceConfirmed = detail.statusCounts["confirmed-source"] ?? 0;
   const suspectedLeads = detail.statusCounts.suspected ?? 0;
+  const needsEvidence = detail.statusCounts["needs-evidence"] ?? 0;
   const unverifiedLeads = rawPendingVerify || sourceConfirmed + suspectedLeads;
   const decisions = detail.confirmDecisions.length;
   const reproduced = confirmedDecisions(detail.confirmDecisions).length;
@@ -2812,13 +2823,15 @@ function ProjectOverview({
   const synthesis = runStages(latestRunWithStage(detail, "synthesis")).synthesis;
   const verifyValue = runningVerifyProgress
     ? `${runningVerifyProgress.done}/${runningVerifyProgress.target} checked`
-    : verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : "No candidates";
+    : verifyCount ? plural(verifyCount, "candidate") : pendingConfirm ? "Ready for confirm" : needsEvidence ? plural(needsEvidence, "needs evidence") : "No candidates";
   const verifyDetail = runningVerifyProgress
     ? `${plural(runningVerifyProgress.remaining, "finding")} left in the active Verify run`
     : verifyCount
     ? `${plural(verifyCount, "prioritized candidate")} selected from ${plural(unverifiedLeads, "unverified lead")}`
     : pendingConfirm
-      ? "Execution-confirmed findings can move to real-target confirmation."
+      ? `Execution-confirmed findings can move to real-target confirmation.${needsEvidence ? ` ${plural(needsEvidence, "lead")} need external evidence.` : ""}`
+      : needsEvidence
+        ? "Local verification reviewed these leads; external evidence is needed to settle them."
       : "Synthesize and dig outputs appear as candidates here.";
   const synthesisValue = synthesis
     ? `${synthesis.produced ?? 0} synthesized ${synthesis.produced === 1 ? "lead" : "leads"}`

@@ -1,6 +1,6 @@
 import type { ConfirmDecision, Coverage, FindingRow, PhaseConfig, ProjectDetail, RunRow, ScopeRow } from "./api";
 
-export const STATUSES = ["confirmed-differential", "confirmed-executable", "confirmed-source", "suspected", "discharged", "refuted"] as const;
+export const STATUSES = ["confirmed-differential", "confirmed-executable", "confirmed-source", "needs-evidence", "suspected", "discharged", "refuted"] as const;
 export const TRACKING = ["open", "triaging", "submitted", "accepted", "fixed", "duplicate", "rejected", "ignored"] as const;
 export const PROVIDER_PHASES = ["prepare", "map", "dig", "confirm"] as const;
 export const PHASES = ["prepare", "map", "dig", "synthesis", "verify", "confirm", "report"] as const;
@@ -21,6 +21,7 @@ const STATUS_RANK: Record<string, number> = {
   "confirmed-differential": 5,
   "confirmed-executable": 4,
   "confirmed-source": 3,
+  "needs-evidence": 1,
   suspected: 2,
   discharged: 0,
   refuted: -1,
@@ -316,6 +317,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
     : 0;
   const pendingVerify = findings.filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
   const locallyVerified = findings.filter(isExecutionConfirmedFinding).length;
+  const needsEvidence = findings.filter((finding) => finding.status === "needs-evidence").length;
   const audit = runs.find((r) => r.status === "running" && ["run", "audit", "map"].includes(r.kind));
   const auditLatest = latest("run", "audit", "map");
   const verifyLatest = runs.find((run) => isVerifyRun(run));
@@ -402,15 +404,15 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
         ? "running"
         : pendingVerify > 0
           ? "pending"
-          : locallyVerified > 0
+          : locallyVerified > 0 || needsEvidence > 0
             ? "done"
             : "none",
       stat: isVerify
         ? verifyStat
         : pendingVerify > 0
           ? `${pendingVerify} ${pendingVerify === 1 ? "candidate" : "candidates"} waiting`
-          : locallyVerified > 0
-            ? `${locallyVerified} locally verified`
+          : locallyVerified > 0 || needsEvidence > 0
+            ? `${locallyVerified} locally verified${needsEvidence ? ` · ${needsEvidence} need evidence` : ""}`
             : "Not started",
       dur: runDur(verifyLatest, verifyLatest?.status === "running"),
     },

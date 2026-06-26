@@ -4,6 +4,7 @@ export type FindingStatus =
   | "confirmed-differential"
   | "confirmed-executable"
   | "confirmed-source"
+  | "needs-evidence"
   | "suspected"
   | "discharged"
   | "refuted"
