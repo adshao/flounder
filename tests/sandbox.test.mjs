@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { defaultConfig, sandboxExecutionOptions, sandboxNetworkForPurpose } from "../dist/config.js";
-import { runSandboxCommand, sandboxToolPath } from "../dist/security/sandbox.js";
+import { checkSandboxReadiness, runSandboxCommand, sandboxToolPath } from "../dist/security/sandbox.js";
 
 async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -58,6 +58,16 @@ test("sandbox refuses implicit host fallback when the OCI image is unavailable",
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
+});
+
+test("sandbox readiness reports missing OCI image before agent commands run", async () => {
+  const image = `flounder-test-missing-${Date.now()}-${Math.random().toString(16).slice(2)}:latest`;
+  const readiness = await checkSandboxReadiness({ backend: "auto", image, allowHostFallback: false, network: "none" });
+
+  assert.equal(readiness.ok, false);
+  assert.equal(readiness.backend, "auto");
+  assert.equal(readiness.image, image);
+  assert.match(readiness.message ?? "", /No OCI sandbox is available|OCI sandbox image/);
 });
 
 test("sandbox host backend is explicit and still uses isolated HOME and caches", async () => {

@@ -27,6 +27,14 @@ export interface SandboxExecutionOptions {
   cpus?: number;
 }
 
+export interface SandboxReadiness {
+  ok: boolean;
+  backend: SandboxBackend;
+  image: string;
+  allowHostFallback: boolean;
+  message?: string;
+}
+
 interface SandboxProcessOptions extends Required<Pick<SandboxExecutionOptions, "backend" | "image" | "allowHostFallback" | "network">> {
   memoryMb?: number;
   cpus?: number;
@@ -152,6 +160,40 @@ function normalizeSandboxExecutionOptions(input: SandboxExecutionOptions): Sandb
     network: input.network ?? "none",
     ...(input.memoryMb !== undefined ? { memoryMb: input.memoryMb } : {}),
     ...(input.cpus !== undefined ? { cpus: input.cpus } : {}),
+  };
+}
+
+export async function checkSandboxReadiness(input: SandboxExecutionOptions = {}): Promise<SandboxReadiness> {
+  const options = normalizeSandboxExecutionOptions(input);
+  if (options.backend === "host") {
+    if (options.allowHostFallback) return { ok: true, backend: options.backend, image: options.image, allowHostFallback: true };
+    return {
+      ok: false,
+      backend: options.backend,
+      image: options.image,
+      allowHostFallback: false,
+      message: "Host sandbox backend requires explicit --allow-host-execution because model-generated commands would run on the local machine.",
+    };
+  }
+
+  const ociAvailable = await isOciSandboxAvailable(options.image);
+  if (ociAvailable) return { ok: true, backend: options.backend, image: options.image, allowHostFallback: options.allowHostFallback };
+  if (options.backend === "oci") {
+    return {
+      ok: false,
+      backend: options.backend,
+      image: options.image,
+      allowHostFallback: options.allowHostFallback,
+      message: `OCI sandbox image "${options.image}" is not available. Build or pull it first, or explicitly opt into host execution for trusted local targets.`,
+    };
+  }
+  if (options.allowHostFallback) return { ok: true, backend: options.backend, image: options.image, allowHostFallback: true };
+  return {
+    ok: false,
+    backend: options.backend,
+    image: options.image,
+    allowHostFallback: false,
+    message: `No OCI sandbox is available for image "${options.image}", and host execution fallback is disabled. Install Docker and build or pull the image, or pass --allow-host-execution only for trusted local targets.`,
   };
 }
 

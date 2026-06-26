@@ -89,6 +89,34 @@ test("ui: phase cards do not double-count findings already covered by decisions"
   assert.equal(phases.report.stat, "1 waiting for formal report · 1 submit candidate");
 });
 
+test("ui: confirm phase surfaces latest confirm run errors", () => {
+  const detail = {
+    runs: [
+      {
+        id: 12,
+        kind: "confirm",
+        status: "error",
+        started_at: "2026-06-26T00:00:00.000Z",
+        ended_at: "2026-06-26T00:00:05.000Z",
+        job_error: "No OCI sandbox is available",
+      },
+    ],
+    material: {},
+    scopes: [],
+    activeScopeCount: 0,
+    findingsTotal: 1,
+    statusCounts: { "confirmed-differential": 1 },
+    prepareSummary: { realTarget: { requiresConfirmation: true } },
+    allFindings: [
+      { id: 1, finding_key: "kconfirmed", status: "confirmed-differential", confirm_status: null, has_report: false },
+    ],
+    confirmDecisions: [],
+  };
+  const phases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
+  assert.equal(phases.confirm.status, "error");
+  assert.equal(phases.confirm.stat, "Confirm blocked");
+});
+
 test("ui: verify card treats external-evidence leads as reviewed, not waiting", () => {
   const detail = {
     runs: [],

@@ -16,10 +16,12 @@ import { MockAuditLlmClient } from "../llm/mock.js";
 import { deriveScopeNote } from "../scope-note.js";
 import { specToConfig, type LaunchSpec, type ReportFindingSpec } from "./run-manager.js";
 import { toScopeRow, toFindingRow, configSnapshot, type RunTracker, type ConfirmDecisionInput, type FindingReportInput } from "../db/record.js";
-import { defaultOutputDir, defaultWorkspaceDir, type AuditorConfig } from "../config.js";
-import type { Coverage, RunStatus } from "../db/store.js";
+import { defaultConfig, defaultOutputDir, defaultWorkspaceDir, sandboxExecutionOptions, type AuditorConfig } from "../config.js";
+import type { Coverage, RunKind, RunStatus } from "../db/store.js";
 import type { AgentFinding, AuditScope } from "../agent/tools.js";
 import { assertProviderAuthenticated, knownRuntimeProviders, providerAuthStatus } from "../provider-auth.js";
+import { checkSandboxReadiness } from "../security/sandbox.js";
+import { RunLogger } from "../trace/logger.js";
 
 export interface DaemonOptions {
   server: string;
@@ -70,7 +72,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     let tracker: RemoteTracker | undefined;
     let phaseStarts = 0;
     const sink = activitySink(() => tracker);
-    const makeTracker = (cfg: AuditorConfig, runDir: string, kind: string): RunTracker => {
+    const makeTracker = (cfg: AuditorConfig, runDir: string, kind: RunKind): RunTracker => {
       tracker = new RemoteTracker(base, headers, { jobId: job.id, project: cfg.targetName, kind, runDir, provider: cfg.provider, model: cfg.auditModel, thinking: cfg.thinkingLevel, budgets: cfg.auditVerify ? { ...configSnapshot(cfg), verify: true, ...(cfg.auditVerifyFromStart ? { verifyFromStart: true } : {}) } : configSnapshot(cfg), additional: phaseStarts > 0 });
       phaseStarts += 1;
       return tracker;
@@ -93,6 +95,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
         await runReport(cfg, { findings: spec.reportFindings, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}) });
       } else if (spec.verb === "confirm") {
         if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir");
+        await requireSandboxReady(cfg, "confirm", { makeTracker, flushTracker, onActivity: sink.push });
         await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.inputRunDirs ? { inputRunDirs: spec.inputRunDirs } : {}), ...(spec.confirmKeys ? { confirmKeys: spec.confirmKeys } : {}), ...(spec.confirmSettledRows ? { settledDecisions: spec.confirmSettledRows } : {}), ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
       } else if (spec.verb === "prepare") {
         if (!spec.clue) throw new Error("prepare requires a clue (tx / address / project / link)");
@@ -115,6 +118,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           await writeFile(vf, JSON.stringify(spec.verifyFindings), "utf8");
           cfg.auditVerify = vf;
         }
+        await requireSandboxReady(cfg, spec.verb, { makeTracker, flushTracker, onActivity: sink.push });
         try {
           await runAudit(cfg, {
             kind: spec.verb,
@@ -187,7 +191,7 @@ async function runPipelineJob(
     out: string;
     workspace: string;
     signal: AbortSignal;
-    makeTracker: (cfg: AuditorConfig, runDir: string, kind: string) => RunTracker;
+    makeTracker: (cfg: AuditorConfig, runDir: string, kind: RunKind) => RunTracker;
     flushTracker: () => Promise<void>;
     onActivity: (event: Activity) => void;
     mockLlm: boolean;
@@ -224,6 +228,7 @@ async function runPipelineJob(
     ...(scopeNote ? { scopeNote } : {}),
   };
   const auditCfg = specToConfig(auditSpec, ctx.out, ctx.workspace);
+  await requireSandboxReady(auditCfg, "run", ctx);
   await runAudit(auditCfg, {
     kind: "run",
     signal: ctx.signal,
@@ -250,6 +255,7 @@ async function runPipelineJob(
       const vf = path.join(verifyTempDir, "findings.json");
       await writeFile(vf, JSON.stringify(verify.verifyFindings), "utf8");
       verifyCfg.auditVerify = vf;
+      await requireSandboxReady(verifyCfg, "audit", ctx);
       await runAudit(verifyCfg, {
         kind: "audit",
         signal: ctx.signal,
@@ -277,6 +283,7 @@ async function runPipelineJob(
       ...(confirm.confirmSettledRows ? { confirmSettledRows: confirm.confirmSettledRows } : {}),
     };
     const confirmCfg = specToConfig(confirmSpec, ctx.out, ctx.workspace);
+    await requireSandboxReady(confirmCfg, "confirm", ctx);
     await runConfirm(confirmCfg, {
       inputRunDir: confirmSpec.inputRunDir!,
       signal: ctx.signal,
@@ -352,7 +359,42 @@ export async function ensureDaemonDirectories(out: string, workspace: string): P
   await mkdir(path.resolve(workspace), { recursive: true });
 }
 
+async function requireSandboxReady(
+  cfg: AuditorConfig,
+  kind: RunKind,
+  ctx: {
+    makeTracker: (cfg: AuditorConfig, runDir: string, kind: RunKind) => RunTracker;
+    flushTracker: () => Promise<void>;
+    onActivity: (event: Activity) => void;
+  },
+): Promise<void> {
+  const readiness = await checkSandboxReadiness(sandboxExecutionOptions(cfg, "none"));
+  if (readiness.ok) return;
+  const message = readiness.message ?? "Sandbox execution is not available.";
+  const logger = new RunLogger(cfg.outputDir, blockedRunTarget(cfg.targetName, kind), new Date());
+  await logger.init();
+  await logger.event("sandbox_unavailable", {
+    backend: readiness.backend,
+    image: readiness.image,
+    allowHostFallback: readiness.allowHostFallback,
+    message,
+  });
+  const tracker = ctx.makeTracker(cfg, logger.runDir, kind);
+  ctx.onActivity({ kind: "event", delta: message });
+  tracker.finish("error");
+  await ctx.flushTracker();
+  throw new Error(message);
+}
+
+function blockedRunTarget(targetName: string, kind: RunKind): string {
+  if (kind === "confirm") return `${targetName}-confirm`;
+  if (kind === "prepare") return `${targetName}-prepare`;
+  if (kind === "report") return `${targetName}-report`;
+  return targetName;
+}
+
 async function daemonCapabilities(): Promise<Record<string, unknown>> {
+  const sandbox = await checkSandboxReadiness(sandboxExecutionOptions(defaultConfig(), "none"));
   const providers = await Promise.all(
     knownRuntimeProviders().map(async (provider) => {
       try {
@@ -369,7 +411,7 @@ async function daemonCapabilities(): Promise<Record<string, unknown>> {
       }
     }),
   );
-  return { providers };
+  return { providers, sandbox };
 }
 
 // Reports a run's progress to the server. Serializes calls on one chain so the run is

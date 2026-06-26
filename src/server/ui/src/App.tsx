@@ -405,9 +405,16 @@ function runInactiveLabel(run: RunRow): string | null {
   return fmtDur(Math.max(0, run.inactive_seconds) * 1000);
 }
 
-function daemonProviderStatuses(daemon: DaemonRow | undefined): Array<{ provider: string; configured: boolean; required?: boolean }> {
+function daemonCapabilityPayload(daemon: DaemonRow | undefined): Record<string, unknown> | null {
   const caps = daemon?.capabilities;
-  if (!caps || typeof caps !== "object" || Array.isArray(caps)) return [];
+  if (!caps) return null;
+  if (typeof caps === "object" && !Array.isArray(caps)) return caps as Record<string, unknown>;
+  return parseJson<Record<string, unknown>>(caps, {});
+}
+
+function daemonProviderStatuses(daemon: DaemonRow | undefined): Array<{ provider: string; configured: boolean; required?: boolean }> {
+  const caps = daemonCapabilityPayload(daemon);
+  if (!caps) return [];
   const providers = (caps as { providers?: unknown }).providers;
   if (!Array.isArray(providers)) return [];
   return providers.flatMap((entry) => {
@@ -434,6 +441,37 @@ function daemonAuthSummary(daemon: DaemonRow): string {
     .slice(0, 4);
   if (configured.length) return `provider auth: ${configured.join(", ")}`;
   return daemonProviderStatuses(daemon).length ? "provider auth: none configured" : "provider auth: not reported";
+}
+
+function daemonSandboxStatus(daemon: DaemonRow | undefined): { ok: boolean; state: string; message: string; signature: string } | null {
+  if (!daemon) return null;
+  const caps = daemonCapabilityPayload(daemon);
+  const sandbox = caps?.sandbox;
+  if (!sandbox || typeof sandbox !== "object" || Array.isArray(sandbox)) {
+    const message = "Restart this daemon so it reports sandbox readiness before launching audit phases.";
+    return {
+      ok: false,
+      state: "Sandbox not reported",
+      message,
+      signature: JSON.stringify({ ok: false, reason: "not-reported" }),
+    };
+  }
+  const read = sandbox as { ok?: unknown; backend?: unknown; image?: unknown; allowHostFallback?: unknown; message?: unknown };
+  const ok = read.ok === true;
+  const backend = typeof read.backend === "string" ? read.backend : "auto";
+  const image = typeof read.image === "string" && read.image.trim() ? read.image : "flounder-sandbox:latest";
+  const allowHostFallback = read.allowHostFallback === true;
+  const message = typeof read.message === "string" && read.message.trim()
+    ? read.message
+    : ok
+      ? `Sandbox is ready using the ${backend} backend.`
+      : `Sandbox is not ready for image ${image}.`;
+  return {
+    ok,
+    state: ok ? `Sandbox ready (${backend})` : `Sandbox missing (${image})`,
+    message,
+    signature: JSON.stringify({ ok, backend, image, allowHostFallback, message }),
+  };
 }
 
 function phaseProviderId(config: ProjectConfig, phase: ProviderPhase): number | undefined {
@@ -2461,9 +2499,20 @@ function ProjectDetailView(props: {
   const candidateLabel = pendingVerify > 0 ? "to verify" : needsEvidenceCount > 0 ? "need evidence" : "top findings";
   const localVerifySummary = activeVerifySummary(runningVerify) || verifyStatusSummary(allFindings);
   const setupAttention = prepareMaterialsAttention(detail.prepareSummary);
-  const setupAttentionSignature = prepareAttentionSignature(detail.prepareSummary, setupAttention);
+  const sandboxStatus = daemonSandboxStatus(selectedDaemon);
+  const setupAttentionSignals = [
+    ...(setupAttention ? [{ tone: setupAttention.tone, label: setupAttention.label, signature: prepareAttentionSignature(detail.prepareSummary, setupAttention) }] : []),
+    ...(sandboxStatus && !sandboxStatus.ok ? [{ tone: "warn" as const, label: sandboxStatus.state, signature: sandboxStatus.signature }] : []),
+  ].filter((entry) => entry.signature);
+  const setupAttentionDisplay = setupAttentionSignals.length
+    ? {
+      tone: setupAttentionSignals.some((entry) => entry.tone === "warn") ? "warn" as const : "pending" as const,
+      label: setupAttentionSignals.length === 1 ? setupAttentionSignals[0]!.label : `${plural(setupAttentionSignals.length, "setup issue")} needs attention`,
+    }
+    : null;
+  const setupAttentionSignature = setupAttentionSignals.length ? JSON.stringify(setupAttentionSignals) : "";
   const setupUnread = Boolean(
-    setupAttention
+    setupAttentionDisplay
     && setupAttentionSignature
     && tab !== "setup"
     && setupReadWatermarks[project.uuid] !== setupAttentionSignature
@@ -2556,6 +2605,14 @@ function ProjectDetailView(props: {
       actionLabel: provider && selectedDaemon && authMissing.length === 0 && !authUnknown ? "View" : "Fix",
       onClick: !provider || !selectedDaemon ? props.onOpenEdit : () => go("/settings/daemons"),
     },
+    ...(sandboxStatus ? [{
+      label: "Sandbox",
+      state: sandboxStatus.state,
+      ok: sandboxStatus.ok,
+      actionLabel: sandboxStatus.ok ? "View" : "Fix",
+      onClick: () => go("/settings/daemons"),
+      title: sandboxStatus.message,
+    }] : []),
     { label: "Coverage", state: coverageLabel(config.cfg), ok: true, actionLabel: "Edit", onClick: props.onOpenEdit },
     {
       label: "Source",
@@ -2720,13 +2777,13 @@ function ProjectDetailView(props: {
             role="tab"
             aria-selected={tab === t.id}
             className={tab === t.id ? "sel" : ""}
-            title={t.id === "setup" && setupAttention ? (setupUnread ? setupAttention.label : "Setup attention reviewed") : t.id === "activity" && runningRun ? (activityUnread ? `New activity in ${runKindLabel(runningRun.kind, runningRun)}` : `${runKindLabel(runningRun.kind, runningRun)} is running`) : undefined}
+            title={t.id === "setup" && setupAttentionDisplay ? (setupUnread ? setupAttentionDisplay.label : "Setup attention reviewed") : t.id === "activity" && runningRun ? (activityUnread ? `New activity in ${runKindLabel(runningRun.kind, runningRun)}` : `${runKindLabel(runningRun.kind, runningRun)} is running`) : undefined}
             onClick={() => setTab(t.id)}
           >
             <span>{t.label}</span>
             {t.id === "decisions" && confirmDecisions.length ? <Counter>{confirmDecisions.length}</Counter> : null}
             {t.id === "activity" && activityUnread ? <span className="tab-alert-dot pending" aria-label="New activity" /> : null}
-            {t.id === "setup" && setupAttention && setupUnread ? <span className={`tab-alert-dot ${setupAttention.tone}`} aria-label="Setup attention" /> : null}
+            {t.id === "setup" && setupAttentionDisplay && setupUnread ? <span className={`tab-alert-dot ${setupAttentionDisplay.tone}`} aria-label="Setup attention" /> : null}
           </button>
         ))}
       </div>
@@ -2882,6 +2939,7 @@ type SetupDisclosureItem = {
   ok: boolean;
   actionLabel?: string;
   onClick?: () => void;
+  title?: string;
 };
 
 function ProjectSetupDisclosure({ items }: { items: SetupDisclosureItem[] }) {
@@ -2899,7 +2957,7 @@ function ProjectSetupDisclosure({ items }: { items: SetupDisclosureItem[] }) {
             type="button"
             className={`setup-detail ${item.ok ? "ok" : "warn"}`}
             onClick={item.onClick}
-            title={item.actionLabel ?? `Open ${item.label}`}
+            title={item.title ?? item.actionLabel ?? `Open ${item.label}`}
           >
             <span className="dot" />
             <span>

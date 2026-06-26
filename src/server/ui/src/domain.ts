@@ -345,6 +345,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const verifyLatest = runs.find((run) => isVerifyRun(run));
   const reportLatest = latest("report");
   const reportRunning = reportLatest?.status === "running";
+  const reportError = reportLatest?.status === "error";
   const activeScope = (detail.activeScopeCount ?? 0) > 0 || Boolean((detail.scopes ?? []).some((scope) => scope.status === "auditing"));
   const digStarted = Boolean(audit && audit.run_scopes_target != null);
   const mapRunning = Boolean(audit && audit.kind !== "audit" && !digStarted);
@@ -439,7 +440,9 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
       dur: runDur(verifyLatest, verifyLatest?.status === "running"),
     },
     confirm: {
-      status: conf?.status === "running"
+      status: conf?.status === "error"
+        ? "error"
+        : conf?.status === "running"
         ? "running"
         : verifyRechecksConfirmed
           ? "pending"
@@ -450,7 +453,9 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
           : pendingConfirm > 0
             ? "pending"
             : "none",
-      stat: !requiresConfirmation && locallyVerified > 0
+      stat: conf?.status === "error"
+        ? "Confirm blocked"
+        : !requiresConfirmation && locallyVerified > 0
         ? "Not required"
         : verifyRechecksConfirmed
           ? "Waiting for Verify to finish"
@@ -462,8 +467,10 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
       dur: runDur(conf, conf?.status === "running"),
     },
     report: {
-      status: reportRunning ? "running" : reportPackages.ready > 0 ? (reportPackages.ready === reportPackages.total ? "ready" : "partial") : reportPackages.total > 0 ? "pending" : decisions.length > 0 ? "pending" : "none",
-      stat: reportRunning
+      status: reportError ? "error" : reportRunning ? "running" : reportPackages.ready > 0 ? (reportPackages.ready === reportPackages.total ? "ready" : "partial") : reportPackages.total > 0 ? "pending" : decisions.length > 0 ? "pending" : "none",
+      stat: reportError
+        ? "Report failed"
+        : reportRunning
         ? "Writing formal reports"
         : reportPackages.ready > 0
           ? `${reportPackages.ready}/${reportPackages.total} ${reportPackages.total === 1 ? "report" : "reports"} ready${reportPackages.submissions ? ` · ${reportPackages.submissions} ${reportPackages.submissions === 1 ? "submission" : "submissions"}` : ""}`
