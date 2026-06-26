@@ -105,10 +105,15 @@ export interface ConfirmSettledRow {
 }
 
 export interface ReportFindingSpec {
-  findingId: number;
+  findingId?: number | undefined;
+  decisionId?: number | undefined;
+  reportKey?: string | undefined;
+  unit?: "finding" | "decision" | undefined;
   findingKey: string;
   title: string;
   evidenceMode?: "real-target-reproduced" | "source-only-local-confirmed" | undefined;
+  evidenceLevel?: string | undefined;
+  submissionConfidence?: string | undefined;
   location?: string | undefined;
   severity?: string | undefined;
   status?: string | undefined;
@@ -119,6 +124,7 @@ export interface ReportFindingSpec {
   fix?: string | undefined;
   confidence?: number | undefined;
   decisions?: Array<Record<string, unknown>> | undefined;
+  linkedFindings?: Array<Record<string, unknown>> | undefined;
 }
 
 // Translate a launch spec into an AuditorConfig — the daemon's equivalent of the CLI's

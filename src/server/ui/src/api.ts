@@ -154,6 +154,9 @@ export interface ConfirmDecision {
   reproduced?: string | null;
   recommendation?: string | null;
   members_json?: string | null;
+  severity?: string | null;
+  evidence_level?: string | null;
+  submission_confidence?: string | null;
   distinct_fix?: string | null;
   repro_evidence?: string | null;
   corroboration?: string | null;
@@ -162,6 +165,7 @@ export interface ConfirmDecision {
   merged_from_json?: string | null;
   repro_command_id?: string | null;
   decision_path?: string | null;
+  has_report?: boolean | null;
   created_at?: string;
 }
 
@@ -437,6 +441,7 @@ export const api = {
   bugs: (params: URLSearchParams) =>
     fetchJson<{ findings: FindingRow[]; total: number; limit: number; offset: number; stats: { total: number; active: number; byStatus: Record<string, number>; byTracking: Record<string, number> } }>(`/api/bugs?${params.toString()}`),
   findingReport: (id: number) => fetchJson<{ markdown: string; source: "db" | "generated" }>(`/api/findings/${id}/report`),
+  decisionReport: (id: number) => fetchJson<{ markdown: string; source: "db" | "generated" }>(`/api/confirm-decisions/${id}/report`),
   trackFinding: (id: number, status: string) => patchJson<unknown>(`/api/findings/${id}/tracking`, { status }),
   artifact: (runId: number, name: string) => fetch(`/api/runs/${runId}/artifact?name=${encodeURIComponent(name)}`),
 };

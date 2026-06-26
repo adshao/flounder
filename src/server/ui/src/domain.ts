@@ -71,26 +71,6 @@ export function confirmedDecisions(rows: ConfirmDecision[] | undefined): Confirm
   return (rows ?? []).filter((row) => row.reproduced === "yes");
 }
 
-function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
-  const members = parseJson<unknown[]>(decision.members_json, []);
-  const keys = new Set<string>();
-  const add = (value: string): void => {
-    const key = value.trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
-    if (/^k[0-9a-z]+$/.test(key)) keys.add(key);
-  };
-  for (const member of members) {
-    if (typeof member !== "string") continue;
-    const cleaned = member.trim();
-    add(cleaned);
-    add(cleaned.split(/\s+/)[0] ?? "");
-    const bracketed = cleaned.match(/^\[(k[0-9a-z]+)\]/i)?.[1];
-    if (bracketed) add(bracketed);
-    const embedded = cleaned.match(/\b(k[0-9a-z]+)\b/i)?.[1];
-    if (embedded) add(embedded);
-  }
-  return [...keys];
-}
-
 function reportPackageStats(findings: FindingRow[], decisions: ConfirmDecision[], requiresConfirmation: boolean): { ready: number; total: number; submissions: number } {
   if (!requiresConfirmation) {
     const reportable = findings.filter(isExecutionConfirmedFinding);
@@ -100,14 +80,9 @@ function reportPackageStats(findings: FindingRow[], decisions: ConfirmDecision[]
       submissions: 0,
     };
   }
-  const byKey = new Map(findings.map((finding) => [String(finding.finding_key ?? "").toLowerCase(), finding]));
   const reproduced = decisions.filter((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop");
-  const ready = reproduced.filter((decision) => {
-    const keys = confirmDecisionMemberKeys(decision);
-    return keys.length > 0 && keys.every((key) => Boolean(byKey.get(key)?.has_report));
-  }).length;
   return {
-    ready,
+    ready: reproduced.filter((decision) => decision.has_report).length,
     total: reproduced.length,
     submissions: reproduced.filter((decision) => decision.recommendation === "submit-candidate").length,
   };

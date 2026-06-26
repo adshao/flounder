@@ -53,7 +53,7 @@ import { Icon, type IconName } from "./icons";
 type View = "projects" | "findings" | "settings";
 type SettingsPane = "providers" | "daemons" | "archived";
 type ProjectTab = "overview" | "decisions" | "findings" | "scopes" | "runs" | "activity" | "setup";
-type ModalName = "new-project" | "run" | "edit-project" | "report" | "run-log" | "artifact" | null;
+type ModalName = "new-project" | "run" | "edit-project" | "report" | "decision-report" | "run-log" | "artifact" | null;
 type ArtifactPreview = { title: string; runId: number; name: string };
 type LaunchAction = "run" | "prepare" | "map" | "audit" | "confirm" | "verify" | "report";
 
@@ -749,6 +749,25 @@ function pendingFormalReports(rows: FindingRow[] | undefined, requiresConfirmati
   return reportableFindings(rows, requiresConfirmation).filter((finding) => !finding.has_report);
 }
 
+function reportableDecisions(decisions: ConfirmDecision[] | undefined): ConfirmDecision[] {
+  return (decisions ?? []).filter((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop");
+}
+
+function pendingDecisionReports(decisions: ConfirmDecision[] | undefined): ConfirmDecision[] {
+  return reportableDecisions(decisions).filter((decision) => !decision.has_report);
+}
+
+function reportDecisionFindings(detail: ProjectDetail, missingOnly: boolean): FindingRow[] {
+  const decisions = missingOnly ? pendingDecisionReports(detail.confirmDecisions) : reportableDecisions(detail.confirmDecisions);
+  const keys = new Set(decisions.flatMap(confirmDecisionMemberKeys));
+  if (!keys.size) return [];
+  return activeFindings(detail.allFindings).filter((finding) => finding.finding_key && keys.has(finding.finding_key.toLowerCase()));
+}
+
+function selectedReportDecisions(detail: ProjectDetail, selectedIds: Set<number>): ConfirmDecision[] {
+  return reportableDecisions(detail.confirmDecisions).filter((decision) => decisionFindings(decision, detail.allFindings ?? []).some((finding) => selectedIds.has(finding.id)));
+}
+
 function verifyButtonLabel(count: number): string {
   return count > 0 ? `Verify (${count})` : "Verify";
 }
@@ -1350,6 +1369,7 @@ export function App() {
   const [projectFindingStatus, setProjectFindingStatus] = useState("");
   const [modal, setModal] = useState<ModalName>(null);
   const [reportFinding, setReportFinding] = useState<FindingRow | null>(null);
+  const [reportDecision, setReportDecision] = useState<ConfirmDecision | null>(null);
   const [artifactPreview, setArtifactPreview] = useState<ArtifactPreview | null>(null);
   const [logRun, setLogRun] = useState<RunRow | null>(null);
   const [stopConfirmRun, setStopConfirmRun] = useState<RunRow | null>(null);
@@ -1642,8 +1662,9 @@ export function App() {
         setModal(null);
         return;
       }
-      if (action === "report" && reportableFindings(currentDetail.allFindings, requiresConfirmation).length === 0) {
-        setToast({ tone: "warning", message: requiresConfirmation ? "There are no real-target reproduced findings ready for formal reports yet." : "There are no locally execution-confirmed findings ready for formal reports yet." });
+      const reportableCount = requiresConfirmation ? reportableDecisions(currentDetail.confirmDecisions).length : reportableFindings(currentDetail.allFindings, requiresConfirmation).length;
+      if (action === "report" && reportableCount === 0) {
+        setToast({ tone: "warning", message: requiresConfirmation ? "There are no real-target decisions ready for submission reports yet." : "There are no locally execution-confirmed findings ready for formal reports yet." });
         setModal(null);
         return;
       }
@@ -1861,6 +1882,10 @@ export function App() {
                     setReportFinding(finding);
                     setModal("report");
                   }}
+                  onOpenDecisionReport={(decision) => {
+                    setReportDecision(decision);
+                    setModal("decision-report");
+                  }}
                   onOpenArtifact={(artifact) => {
                     setArtifactPreview(artifact);
                     setModal("artifact");
@@ -1960,6 +1985,7 @@ export function App() {
       {modal === "run" && currentDetailForModal ? <RunModal detail={currentDetailForModal} busy={busy} onClose={() => setModal(null)} onLaunch={requestLaunch} onUpdateRunTarget={(run, target) => void updateRunTarget(run, target)} onError={(message) => setToast({ tone: "error", message })} /> : null}
       {modal === "edit-project" && detail ? <EditProjectModal detail={detail} providers={providers} daemons={daemons} onClose={() => setModal(null)} onSaved={async () => { setDetail(await api.project(detail.project.uuid)); setModal(null); }} onError={(message) => setToast({ tone: "error", message })} /> : null}
       {modal === "report" && reportFinding ? <ReportModal finding={reportFinding} onClose={() => setModal(null)} /> : null}
+      {modal === "decision-report" && reportDecision ? <DecisionReportModal decision={reportDecision} onClose={() => setModal(null)} /> : null}
       {modal === "artifact" && artifactPreview ? <ArtifactModal artifact={artifactPreview} onClose={() => { setModal(null); setArtifactPreview(null); }} /> : null}
       {modal === "run-log" && logRun ? <RunLogModal run={logRun} onClose={() => { setModal(null); setLogRun(null); }} /> : null}
       {stopConfirmRun ? (
@@ -2349,6 +2375,7 @@ function ProjectDetailView(props: {
   onOpenRunModal: () => void;
   onOpenEdit: () => void;
   onOpenReport: (finding: FindingRow) => void;
+  onOpenDecisionReport: (decision: ConfirmDecision) => void;
   onOpenArtifact: (artifact: ArtifactPreview) => void;
   onTracking: (finding: FindingRow, status: string) => void;
   onPatchScope: (scopeId: string, body: unknown) => Promise<void> | void;
@@ -2385,10 +2412,12 @@ function ProjectDetailView(props: {
   const pendingConfirmBase = pendingConfirmFindings(allFindings, requiresConfirmation).length;
   const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmBase;
   const pendingVerify = runningVerifyProgress ? runningVerifyProgress.remaining : verifyCandidates.length;
-  const pendingReports = pendingFormalReports(allFindings, requiresConfirmation).length;
+  const pendingReports = requiresConfirmation ? pendingDecisionReports(confirmDecisions).length : pendingFormalReports(allFindings, requiresConfirmation).length;
   const locallyVerified = localVerifiedFindings(allFindings).length;
   const displayedVerified = runningVerifyProgress ? runningVerifyProgress.done : locallyVerified;
-  const reportsReady = reportableFindings(allFindings, requiresConfirmation).filter((finding) => finding.has_report).length;
+  const reportsReady = requiresConfirmation
+    ? reportableDecisions(confirmDecisions).filter((decision) => decision.has_report).length
+    : reportableFindings(allFindings, requiresConfirmation).filter((finding) => finding.has_report).length;
   const reportStat = pendingReports > 0 ? pendingReports : reportsReady;
   const reportLabel = pendingReports > 0 ? "to report" : "reports";
   const candidateStat = pendingVerify > 0 ? pendingVerify : overviewCandidates.length;
@@ -2634,7 +2663,7 @@ function ProjectDetailView(props: {
         ))}
       </div>
       {tab === "overview" ? <ProjectOverview detail={currentDetail} candidates={overviewCandidates} verifyCount={pendingVerify} verifyLocked={launchLocked || pendingVerify === 0} onVerifyCandidates={() => props.onLaunch("verify")} onOpenReport={props.onOpenReport} /> : null}
-      {tab === "decisions" ? <ProjectDecisions detail={currentDetail} onOpenFinding={openLinkedFinding} onOpenReport={props.onOpenReport} /> : null}
+      {tab === "decisions" ? <ProjectDecisions detail={currentDetail} onOpenFinding={openLinkedFinding} onOpenDecisionReport={props.onOpenDecisionReport} /> : null}
       {tab === "findings" ? (
         <ProjectFindings
           detail={currentDetail}
@@ -2917,13 +2946,13 @@ function ProjectOverview({
   );
 }
 
-function ProjectDecisions({ detail, onOpenFinding, onOpenReport }: { detail: ProjectDetail; onOpenFinding: (finding: FindingRow) => void; onOpenReport: (finding: FindingRow) => void }) {
+function ProjectDecisions({ detail, onOpenFinding, onOpenDecisionReport }: { detail: ProjectDetail; onOpenFinding: (finding: FindingRow) => void; onOpenDecisionReport: (decision: ConfirmDecision) => void }) {
   return (
     <ConfirmDecisionsCard
       decisions={detail.confirmDecisions}
       findings={detail.allFindings ?? []}
       onOpenFinding={onOpenFinding}
-      onOpenReport={onOpenReport}
+      onOpenDecisionReport={onOpenDecisionReport}
     />
   );
 }
@@ -2949,6 +2978,14 @@ function decisionLabel(decision: ConfirmDecision): string {
 
 function recommendationLabel(decision: ConfirmDecision): string {
   return decision.recommendation ? decision.recommendation.replace(/-/g, " ") : "no recommendation";
+}
+
+function decisionMetaLabel(decision: ConfirmDecision): string {
+  return [
+    recommendationLabel(decision),
+    decision.severity ? `severity ${decision.severity}` : "",
+    decision.submission_confidence ? `confidence ${decision.submission_confidence}` : "",
+  ].filter(Boolean).join(" · ");
 }
 
 function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
@@ -2977,7 +3014,17 @@ function decisionFindings(decision: ConfirmDecision, findings: FindingRow[]): Fi
   return findings.filter((finding) => finding.finding_key && keys.has(finding.finding_key.toLowerCase()));
 }
 
-function ConfirmDecisionsCard({ decisions, findings, onOpenFinding, onOpenReport }: { decisions: ConfirmDecision[]; findings: FindingRow[]; onOpenFinding: (finding: FindingRow) => void; onOpenReport: (finding: FindingRow) => void }) {
+function ConfirmDecisionsCard({
+  decisions,
+  findings,
+  onOpenFinding,
+  onOpenDecisionReport,
+}: {
+  decisions: ConfirmDecision[];
+  findings: FindingRow[];
+  onOpenFinding: (finding: FindingRow) => void;
+  onOpenDecisionReport: (decision: ConfirmDecision) => void;
+}) {
   if (!decisions.length) {
     return (
       <div id="project-real-target-decisions" className="section-anchor">
@@ -3000,7 +3047,7 @@ function ConfirmDecisionsCard({ decisions, findings, onOpenFinding, onOpenReport
                     {decisionLabel(decision)}
                   </span>
                   <strong>{decision.bug}</strong>
-                  <small>{recommendationLabel(decision)}</small>
+                  <small>{decisionMetaLabel(decision)}</small>
                   {linkedFindings.length ? (
                     <div className="linked-findings" aria-label="Linked findings">
                       {linkedFindings.map((finding) => (
@@ -3012,17 +3059,9 @@ function ConfirmDecisionsCard({ decisions, findings, onOpenFinding, onOpenReport
                   ) : null}
                 </div>
                 <div className="decision-actions">
-                  {linkedFindings.length ? (
-                    linkedFindings.map((finding) => (
-                      <Button key={finding.id} size="sm" icon="file" title={finding.title ?? "Open report"} onClick={() => onOpenReport(finding)}>
-                        Report #{finding.id}
-                      </Button>
-                    ))
-                  ) : (
-                    <Button size="sm" disabled title="This decision is missing a linked finding id.">
-                      No finding report
-                    </Button>
-                  )}
+                  <Button size="sm" icon="file" title={decision.has_report ? "Open submission report" : "Open generated decision report draft"} onClick={() => onOpenDecisionReport(decision)}>
+                    {decision.has_report ? "Submission report" : "Draft report"}
+                  </Button>
                 </div>
               </div>
             );
@@ -3495,8 +3534,8 @@ function ProjectFindings(props: {
     },
     {
       label: "Report",
-      count: pendingFormalReports(allFindings, requiresConfirmation).length,
-      detail: "Reproduced or source-only confirmed bugs missing formal reports.",
+      count: requiresConfirmation ? pendingDecisionReports(props.detail.confirmDecisions).length : pendingFormalReports(allFindings, requiresConfirmation).length,
+      detail: requiresConfirmation ? "Reproduced decisions missing submission reports." : "Source-only confirmed bugs missing formal reports.",
     },
     {
       label: "Track",
@@ -4710,8 +4749,8 @@ function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError 
   const requiresConfirmation = needsRealTargetConfirmation(detail);
   const confirmable = pendingConfirmFindings(detail.allFindings, requiresConfirmation).length;
   const verifiable = pendingVerifyFindings(detail.allFindings).length;
-  const reportable = reportableFindings(detail.allFindings, requiresConfirmation).length;
-  const missingReports = pendingFormalReports(detail.allFindings, requiresConfirmation).length;
+  const reportable = requiresConfirmation ? reportableDecisions(detail.confirmDecisions).length : reportableFindings(detail.allFindings, requiresConfirmation).length;
+  const missingReports = requiresConfirmation ? pendingDecisionReports(detail.confirmDecisions).length : pendingFormalReports(detail.allFindings, requiresConfirmation).length;
   const hasPipelineRun = detail.runs.some((run) => run.kind === "run");
   const locked = busy || Boolean(running);
   const [runTargetDraft, setRunTargetDraft] = useState("");
@@ -4752,7 +4791,7 @@ function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError 
     { verb: "audit", label: "Dig pending scopes", detail: pendingScopes ? `Deep-audit the next pending batch from ${plural(pendingScopes, "mapped scope")}.` : "Disabled until Map scopes creates pending scope inventory.", disabled: locked || pendingScopes === 0 },
     { verb: "verify", label: verifyButtonLabel(verifiable), detail: verifiable ? `Confirm-or-refute ${plural(verifiable, "candidate")} by local execution.` : "Disabled until synthesis or dig leaves suspected candidates.", disabled: locked || verifiable === 0 },
     { verb: "confirm", label: "Confirm", detail: requiresConfirmation ? (confirmable ? `Reproduce ${plural(confirmable, "execution-confirmed finding")} against the real target.` : "Disabled until local execution confirms a finding.") : "Not required for this source-only target.", disabled: locked || confirmable === 0 },
-    { verb: "report", label: missingReports ? `Generate reports (${missingReports})` : "Regenerate reports", detail: reportable ? `Write formal Markdown reports for ${plural(reportable, requiresConfirmation ? "real-target reproduced finding" : "locally confirmed finding")}.` : requiresConfirmation ? "Disabled until confirm reproduces at least one finding." : "Disabled until local execution confirms at least one finding.", disabled: locked || reportable === 0 },
+    { verb: "report", label: missingReports ? `Generate reports (${missingReports})` : "Regenerate reports", detail: reportable ? `Write formal Markdown reports for ${plural(reportable, requiresConfirmation ? "real-target decision" : "locally confirmed finding")}.` : requiresConfirmation ? "Disabled until confirm reproduces at least one decision." : "Disabled until local execution confirms at least one finding.", disabled: locked || reportable === 0 },
   ];
   return (
     <Modal title={`${running ? "Run settings" : "Run controls"} - ${detail.project.name}`} onClose={onClose}>
@@ -4795,15 +4834,18 @@ function LaunchConfirmModal({ action, detail, busy, onCancel, onConfirm }: { act
   const isConfirm = action === "confirm";
   const isReport = action === "report";
   const requiresConfirmation = needsRealTargetConfirmation(detail);
-  const targets = isReport ? reportableFindings(detail.allFindings, requiresConfirmation) : isConfirm ? pendingConfirmFindings(detail.allFindings, requiresConfirmation) : pendingVerifyFindings(detail.allFindings);
-  const defaultReportTargets = pendingFormalReports(detail.allFindings, requiresConfirmation);
+  const targets = isReport
+    ? (requiresConfirmation ? reportDecisionFindings(detail, false) : reportableFindings(detail.allFindings, requiresConfirmation))
+    : isConfirm ? pendingConfirmFindings(detail.allFindings, requiresConfirmation) : pendingVerifyFindings(detail.allFindings);
+  const defaultReportTargets = requiresConfirmation ? reportDecisionFindings(detail, true) : pendingFormalReports(detail.allFindings, requiresConfirmation);
   const defaultTargets = isReport ? (defaultReportTargets.length ? defaultReportTargets : targets) : targets;
   const [selectedIds, setSelectedIds] = useState<Set<number>>(() => new Set(defaultTargets.map((finding) => finding.id)));
   const selectedTargets = targets.filter((finding) => selectedIds.has(finding.id));
-  const count = selectedTargets.length;
-  const selectedMissingReports = isReport ? selectedTargets.filter((finding) => !finding.has_report).length : 0;
-  const selectedExistingReports = isReport ? selectedTargets.filter((finding) => finding.has_report).length : 0;
-  const existingReportTargets = isReport ? targets.filter((finding) => finding.has_report).length : 0;
+  const selectedDecisionReports = isReport && requiresConfirmation ? selectedReportDecisions(detail, selectedIds) : [];
+  const count = isReport && requiresConfirmation ? selectedDecisionReports.length : selectedTargets.length;
+  const selectedMissingReports = isReport ? (requiresConfirmation ? selectedDecisionReports.filter((decision) => !decision.has_report).length : selectedTargets.filter((finding) => !finding.has_report).length) : 0;
+  const selectedExistingReports = isReport ? (requiresConfirmation ? selectedDecisionReports.filter((decision) => decision.has_report).length : selectedTargets.filter((finding) => finding.has_report).length) : 0;
+  const existingReportTargets = isReport ? (requiresConfirmation ? reportableDecisions(detail.confirmDecisions).filter((decision) => decision.has_report).length : targets.filter((finding) => finding.has_report).length) : 0;
   const allSelected = targets.length > 0 && selectedIds.size === targets.length;
   function toggleFinding(id: number) {
     setSelectedIds((current) => {
@@ -4855,7 +4897,7 @@ function LaunchConfirmModal({ action, detail, busy, onCancel, onConfirm }: { act
               ? `${plural(selectedMissingReports, "new report")} will be generated and ${plural(selectedExistingReports, "existing report")} will be regenerated.`
               : selectedExistingReports > 0
                 ? `${plural(selectedExistingReports, "existing report")} will be regenerated.`
-                : `${plural(count, requiresConfirmation ? "reproduced finding" : "locally confirmed finding")} will be packaged into formal reports.`
+                : `${plural(count, requiresConfirmation ? "real-target decision" : "locally confirmed finding")} will be packaged into formal reports.`
             : isConfirm
               ? `${plural(count, "finding")} will be checked against the real target.`
               : `${plural(count, "candidate")} will be checked by local execution.`}
@@ -4863,7 +4905,7 @@ function LaunchConfirmModal({ action, detail, busy, onCancel, onConfirm }: { act
         <p>
           {isReport
             ? requiresConfirmation
-              ? "The daemon writes one submission-ready Markdown report per selected reproduced bug. It may inspect source and existing evidence for accuracy, but it must not invent missing details."
+              ? "The daemon writes one submission-ready Markdown report per selected real-target decision. It may inspect source and existing evidence for accuracy, but it must not invent missing details."
               : "The daemon writes one submission-ready Markdown report per selected source-only bug using the local execution evidence. It may inspect source and existing evidence for accuracy, but it must not invent missing details."
             : isConfirm
               ? "This may use network reads and local forks to reproduce already audit-confirmed findings. Flounder still keeps the white-hat boundary: no broadcast and no live-system writes."
@@ -4873,17 +4915,24 @@ function LaunchConfirmModal({ action, detail, busy, onCancel, onConfirm }: { act
           <input type="checkbox" checked={allSelected} onChange={toggleAll} />
           <span>{allSelected ? "Clear all" : "Select all"}</span>
         </label>
-        <div className="confirm-targets" aria-label={isReport ? "Findings to report" : isConfirm ? "Findings to confirm" : "Findings to verify"}>
-          {targets.map((finding) => (
-            <label className="confirm-target" key={finding.id}>
-              <input type="checkbox" checked={selectedIds.has(finding.id)} onChange={() => toggleFinding(finding.id)} />
-              <span className="target-index">#{finding.id}</span>
-              <span>
-                <strong>{finding.title ?? "Untitled finding"}</strong>
-                <small>{finding.location || "No location"} · {finding.status}{isReport ? ` · ${finding.has_report ? "report exists" : "needs report"}` : ""}</small>
-              </span>
-            </label>
-          ))}
+        <div className="confirm-targets" aria-label={isReport && requiresConfirmation ? "Linked findings for decision reports" : isReport ? "Findings to report" : isConfirm ? "Findings to confirm" : "Findings to verify"}>
+          {targets.map((finding) => {
+            const targetReportState = isReport
+              ? requiresConfirmation
+                ? (selectedReportDecisions(detail, new Set([finding.id])).some((decision) => decision.has_report) ? "decision report exists" : "needs decision report")
+                : (finding.has_report ? "report exists" : "needs report")
+              : "";
+            return (
+              <label className="confirm-target" key={finding.id}>
+                <input type="checkbox" checked={selectedIds.has(finding.id)} onChange={() => toggleFinding(finding.id)} />
+                <span className="target-index">#{finding.id}</span>
+                <span>
+                  <strong>{finding.title ?? "Untitled finding"}</strong>
+                  <small>{finding.location || "No location"} · {finding.status}{isReport ? ` · ${targetReportState}` : ""}</small>
+                </span>
+              </label>
+            );
+          })}
         </div>
       </div>
     </Modal>
@@ -5028,6 +5077,40 @@ function ReportModal({ finding, onClose }: { finding: FindingRow; onClose: () =>
   );
 }
 
+function DecisionReportModal({ decision, onClose }: { decision: ConfirmDecision; onClose: () => void }) {
+  const fallback = useMemo(() => decisionReportMarkdown(decision), [decision]);
+  const [markdown, setMarkdown] = useState(fallback);
+  const [loading, setLoading] = useState(true);
+  const [error, setError] = useState("");
+  useEffect(() => {
+    let cancelled = false;
+    setMarkdown(fallback);
+    setError("");
+    setLoading(true);
+    void api
+      .decisionReport(Number(decision.id))
+      .then((response) => {
+        if (!cancelled && response.markdown.trim()) setMarkdown(redactReportMarkdown(response.markdown));
+      })
+      .catch((err: unknown) => {
+        if (!cancelled) setError(String(err instanceof Error ? err.message : err));
+      })
+      .finally(() => {
+        if (!cancelled) setLoading(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [decision.id, fallback]);
+  return (
+    <Modal title={`Submission report #${decision.id ?? ""}`} wide onClose={onClose}>
+      {loading ? <EmptyInline>Loading report...</EmptyInline> : null}
+      {!loading && error ? <div className="inline-note">Showing a generated decision summary because the DB report endpoint could not be loaded.</div> : null}
+      <MarkdownReport markdown={markdown} fileName={`decision-${decision.id ?? "report"}.md`} />
+    </Modal>
+  );
+}
+
 function ArtifactModal({ artifact, onClose }: { artifact: ArtifactPreview; onClose: () => void }) {
   const [body, setBody] = useState("");
   const [loading, setLoading] = useState(true);
@@ -5082,6 +5165,30 @@ function findingReportMarkdown(finding: FindingRow): string {
   if (finding.evidence) lines.push("## Evidence", "", "```", finding.evidence, "```", "");
   if (finding.exploit_sketch) lines.push("## Exploit", "", finding.exploit_sketch, "");
   if (finding.fix) lines.push("## Fix", "", finding.fix, "");
+  return lines.join("\n").trim();
+}
+
+function decisionReportMarkdown(decision: ConfirmDecision): string {
+  const lines = [
+    `# ${decision.bug || "Submission report"}`,
+    "",
+    "- Submission unit: real-target decision",
+    decision.reproduced ? `- Reproduced: ${decision.reproduced}` : "",
+    decision.recommendation ? `- Recommendation: ${recommendationLabel(decision)}` : "",
+    decision.severity ? `- Severity: ${decision.severity}` : "",
+    decision.evidence_level ? `- Evidence level: ${decision.evidence_level}` : "",
+    decision.submission_confidence ? `- Submission confidence: ${decision.submission_confidence}` : "",
+    decision.repro_command_id ? `- Command evidence: \`${decision.repro_command_id}\`` : "",
+    "",
+  ].filter(Boolean);
+  if (decision.repro_evidence) lines.push("## Reproduction Evidence", "", decision.repro_evidence, "");
+  if (decision.distinct_fix) lines.push("## Distinct Fix", "", decision.distinct_fix, "");
+  if (decision.corroboration || decision.novelty || decision.human_gates) {
+    lines.push("## Novelty and Disclosure Notes", "");
+    if (decision.corroboration) lines.push(`- Corroboration: ${decision.corroboration}`);
+    if (decision.novelty) lines.push(`- Novelty: ${decision.novelty}`);
+    if (decision.human_gates) lines.push(`- Human gates: ${decision.human_gates}`);
+  }
   return lines.join("\n").trim();
 }
 

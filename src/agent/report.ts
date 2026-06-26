@@ -13,10 +13,15 @@ import { isPiSessionProvider, runAuditSession } from "./pi-session.js";
 import { buildTools, newSession, type AgentSession, type AgentTool, type ToolContext, type ToolResult } from "./tools.js";
 
 export interface ReportFindingInput {
-  findingId: number;
+  findingId?: number | undefined;
+  decisionId?: number | undefined;
+  reportKey?: string | undefined;
+  unit?: "finding" | "decision" | undefined;
   findingKey: string;
   title: string;
   evidenceMode?: "real-target-reproduced" | "source-only-local-confirmed" | undefined;
+  evidenceLevel?: string | undefined;
+  submissionConfidence?: string | undefined;
   location?: string | undefined;
   severity?: string | undefined;
   status?: string | undefined;
@@ -27,6 +32,7 @@ export interface ReportFindingInput {
   fix?: string | undefined;
   confidence?: number | undefined;
   decisions?: Array<Record<string, unknown>> | undefined;
+  linkedFindings?: Array<Record<string, unknown>> | undefined;
 }
 
 export interface ReportRunResult {
@@ -96,12 +102,16 @@ export async function runReport(
     });
 
     const reports = collectReports(options.findings, session.scratchFiles);
-    const missing = options.findings.filter((finding) => !reports.some((report) => report.findingId === finding.findingId));
+    const missing = options.findings.filter((finding) => !reports.some((report) => report.fileName === reportFileName(finding)));
     if (missing.length > 0) {
       throw new Error(`report run finished without required report file(s): ${missing.map((finding) => reportFileName(finding)).join(", ")}`);
     }
     for (const report of reports) await logger.artifact(report.fileName, report.markdown);
-    recorder.findingReports(reports.map((report) => ({ findingId: report.findingId, markdown: report.markdown })));
+    recorder.findingReports(reports.map((report) => ({
+      ...(report.findingId !== undefined ? { findingId: report.findingId } : {}),
+      ...(report.decisionId !== undefined ? { decisionId: report.decisionId } : {}),
+      markdown: report.markdown,
+    })));
     await logger.event("audit_report_done", { stoppedReason: result.stoppedReason, steps: result.steps.length, reports: reports.length });
     recorder.finish(options.signal?.aborted ? "killed" : "done", undefined, reports.length);
     return { runDir: logger.runDir, reports: reports.length };
@@ -134,9 +144,14 @@ function renderReportSeed(findings: ReportFindingInput[]): string {
   return JSON.stringify(
     findings.map((finding) => ({
       required_file: reportFileName(finding),
+      submission_unit: finding.unit ?? (finding.decisionId !== undefined ? "decision" : "finding"),
+      decision_id: finding.decisionId,
+      report_key: finding.reportKey,
       finding_id: finding.findingId,
       finding_key: finding.findingKey,
       evidence_mode: finding.evidenceMode ?? "real-target-reproduced",
+      evidence_level: finding.evidenceLevel,
+      submission_confidence: finding.submissionConfidence,
       title: finding.title,
       location: finding.location,
       severity: finding.severity,
@@ -148,14 +163,15 @@ function renderReportSeed(findings: ReportFindingInput[]): string {
       fix: finding.fix,
       confidence: finding.confidence,
       confirm_decisions: finding.decisions ?? [],
+      linked_findings: finding.linkedFindings ?? [],
     })),
     null,
     2,
   );
 }
 
-function collectReports(findings: ReportFindingInput[], scratchFiles: Map<string, string>): Array<{ findingId: number; fileName: string; markdown: string }> {
-  const out: Array<{ findingId: number; fileName: string; markdown: string }> = [];
+function collectReports(findings: ReportFindingInput[], scratchFiles: Map<string, string>): Array<{ findingId?: number; decisionId?: number; fileName: string; markdown: string }> {
+  const out: Array<{ findingId?: number; decisionId?: number; fileName: string; markdown: string }> = [];
   for (const finding of findings) {
     const fileName = reportFileName(finding);
     let markdown = scratchFiles.get(fileName);
@@ -167,12 +183,21 @@ function collectReports(findings: ReportFindingInput[], scratchFiles: Map<string
         }
       }
     }
-    if (markdown?.trim()) out.push({ findingId: finding.findingId, fileName, markdown });
+    if (markdown?.trim()) {
+      out.push({
+        ...(finding.findingId !== undefined ? { findingId: finding.findingId } : {}),
+        ...(finding.decisionId !== undefined ? { decisionId: finding.decisionId } : {}),
+        fileName,
+        markdown,
+      });
+    }
   }
   return out;
 }
 
 function reportFileName(finding: ReportFindingInput): string {
+  if (finding.decisionId !== undefined) return `report_decision_${finding.decisionId}.md`;
+  if (finding.reportKey) return `report_${safeReportId(finding.reportKey)}.md`;
   return `report_${safeReportId(finding.findingKey || String(finding.findingId))}.md`;
 }
 
@@ -226,6 +251,7 @@ function reportPathHints(findings: ReportFindingInput[]): string[] {
     add(finding.exploitSketch);
     add(finding.fix);
     if (finding.decisions) add(JSON.stringify(finding.decisions));
+    if (finding.linkedFindings) add(JSON.stringify(finding.linkedFindings));
   }
   return out;
 }

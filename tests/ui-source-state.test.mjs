@@ -60,7 +60,10 @@ test("ui: phase cards count report packages by reproduced decision, not linked f
   };
   const phases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
   assert.equal(phases.confirm.stat, "1/1 reproduced · 1 finding waiting");
-  assert.equal(phases.report.stat, "1/1 report ready · 1 submission");
+  assert.equal(phases.report.stat, "1 waiting for formal report");
+  detail.confirmDecisions[0].has_report = true;
+  const readyPhases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
+  assert.equal(readyPhases.report.stat, "1/1 report ready · 1 submission");
 });
 
 test("ui: verify card treats external-evidence leads as reviewed, not waiting", () => {

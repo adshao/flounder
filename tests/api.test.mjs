@@ -1165,10 +1165,16 @@ test("api: report launch queues only reproduced real-target findings that were n
     const ready = detail.allFindings.find((finding) => finding.finding_key === "kready");
     const dropped = detail.allFindings.find((finding) => finding.finding_key === "kdrop");
     const existing = detail.allFindings.find((finding) => finding.finding_key === "kexisting");
+    const existingDecision = detail.confirmDecisions.find((decision) => decision.bug === "Existing report bug");
     assert.ok(ready);
     assert.ok(dropped);
     assert.ok(existing);
-    assert.equal(existing.has_report, true);
+    assert.ok(existingDecision);
+    assert.equal(existing.has_report, false);
+    assert.equal(existingDecision.has_report, true);
+    const storedDecisionReport = await json(await fetch(base + `/api/confirm-decisions/${existingDecision.id}/report`));
+    assert.equal(storedDecisionReport.source, "db");
+    assert.match(storedDecisionReport.markdown, /^# Existing report bug/);
 
     const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "report" }));
     const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
@@ -1176,7 +1182,10 @@ test("api: report launch queues only reproduced real-target findings that were n
 
     assert.equal(spec.verb, "report");
     assert.equal(spec.reportFindings.length, 1);
-    assert.equal(spec.reportFindings[0].findingKey, "kready");
+    assert.equal(spec.reportFindings[0].unit, "decision");
+    assert.match(spec.reportFindings[0].findingKey, /^decision-/);
+    assert.equal(spec.reportFindings[0].title, "Ready bug");
+    assert.equal(spec.reportFindings[0].linkedFindings[0].finding_key, "kready");
     assert.equal(spec.reportFindings[0].decisions[0].repro_command_id, "cmd1");
     assert.match(spec.reportFindings[0].decisions[0].repro_evidence, /real target effect/);
 
@@ -1186,7 +1195,9 @@ test("api: report launch queues only reproduced real-target findings that were n
 
     assert.equal(regeneratedSpec.verb, "report");
     assert.equal(regeneratedSpec.reportFindings.length, 1);
-    assert.equal(regeneratedSpec.reportFindings[0].findingKey, "kexisting");
+    assert.equal(regeneratedSpec.reportFindings[0].unit, "decision");
+    assert.equal(regeneratedSpec.reportFindings[0].title, "Existing report bug");
+    assert.equal(regeneratedSpec.reportFindings[0].linkedFindings[0].finding_key, "kexisting");
     assert.equal(regeneratedSpec.reportFindings[0].decisions[0].repro_command_id, "cmd-existing");
 
     const regeneratedAll = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "report", regenerateReports: true }));
@@ -1194,7 +1205,7 @@ test("api: report launch queues only reproduced real-target findings that were n
     const regeneratedAllSpec = JSON.parse(regeneratedAllJob.spec_json);
 
     assert.equal(regeneratedAllSpec.verb, "report");
-    assert.deepEqual(regeneratedAllSpec.reportFindings.map((finding) => finding.findingKey).sort(), ["kexisting", "kready"]);
+    assert.deepEqual(regeneratedAllSpec.reportFindings.map((finding) => finding.title).sort(), ["Existing report bug", "Ready bug"]);
 
     const rejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "report", findingIds: [dropped.id] });
     assert.equal(rejected.status, 400);

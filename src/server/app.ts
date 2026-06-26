@@ -305,6 +305,12 @@ const ROUTES: Route[] = [
     handler: findingReport,
   }),
   route({
+    method: "GET", path: "/api/confirm-decisions/:id/report",
+    summary: "Read one decision's final submission report markdown. This is the real-target bug-level report; linked finding reports remain evidence summaries.",
+    params: { id: "confirm decision id" },
+    handler: confirmDecisionReport,
+  }),
+  route({
     method: "GET", path: "/api/projects/:uuid/confirm-decisions",
     summary: "List current-material confirm decisions (one per distinct bug). Filter ?reproduced=yes for bugs reproduced on the real target; pass ?includeStale=true to inspect decisions from older prepared material snapshots.",
     params: { uuid: "project UUID" },
@@ -825,7 +831,7 @@ async function projectGet(c: Ctx): Promise<void> {
       runsTotal: c.store.countRuns(id),
       currentRunsTotal: currentResultRunsRaw.length,
       activeScopeCount: scopeView.hasInventory ? c.store.countScopesByStatus(id, "auditing") : 0,
-      confirmDecisions,
+      confirmDecisions: confirmDecisions.map(confirmDecisionDisplayRow),
       scopes,
       allFindings: findingSummaries,
       prepareSummary: activePrepareRefresh && currentRunsRaw.length === 0 ? null : latestPrepareSummary(runs),
@@ -1028,6 +1034,15 @@ function confirmDecisionMemberKeys(row: Record<string, unknown>): string[] {
     if (embedded) add(embedded);
   }
   return [...keys];
+}
+
+function linkedFindingsForDecision(store: MetadataStore, projectId: number, decision: Record<string, unknown>): Array<Record<string, unknown>> {
+  const keys = new Set(confirmDecisionMemberKeys(decision));
+  if (keys.size === 0) return [];
+  return store.listFindings(projectId).filter((finding) => {
+    const key = stringValue(finding.finding_key).toLowerCase();
+    return key && keys.has(key);
+  });
 }
 
 function isScopeInventoryRun(run: Record<string, unknown>): boolean {
@@ -2094,33 +2109,32 @@ function reportWorklist(
   requiresRealTargetConfirmation = true,
   includeExistingReports = false,
 ): { findings: ReportFindingSpec[]; error?: undefined } | { findings?: undefined; error: string } {
+  if (requiresRealTargetConfirmation) {
+    return decisionReportWorklist(store, projectId, selectedIds, currentRunIds, materialBoundary, includeExistingReports);
+  }
   const selected = selectedIds.length ? new Set(selectedIds) : undefined;
   const rows = reportableFindings(store.listFindings(projectId)).filter((row) => {
     if (selected && !selected.has(Number(row.id))) return false;
     if (isIgnoredFinding(row)) return false;
     if (!selected && !includeExistingReports && rowHasFormalReport(row)) return false;
     if (!rowBelongsToCurrentMaterial(row, currentRunIds ?? new Set(), materialBoundary)) return false;
-    if (!requiresRealTargetConfirmation) return isExecutionConfirmedFindingStatus(String(row.status ?? "").toLowerCase());
-    if (String(row.confirm_status ?? "") !== "reproduced") return false;
-    const decisions = store.listConfirmDecisionsForFinding(projectId, String(row.finding_key ?? ""));
-    return decisions.some((decision) => rowBelongsToCurrentMaterial(decision, currentRunIds ?? new Set(), materialBoundary) && decision.reproduced === "yes" && decision.recommendation !== "drop");
+    return isExecutionConfirmedFindingStatus(String(row.status ?? "").toLowerCase());
   });
   if (selected && rows.length !== selected.size) {
     const found = new Set(rows.map((row) => Number(row.id)));
     const missing = [...selected].filter((id) => !found.has(id));
-    const reason = requiresRealTargetConfirmation
-      ? "is not reproduced on the real target, was dropped, or has no linked confirm decision"
-      : "is not locally execution-confirmed for this source-only target";
+    const reason = "is not locally execution-confirmed for this source-only target";
     return { error: `finding ${missing.join(", ")} ${reason}` };
   }
   if (rows.length === 0) {
-    return { error: requiresRealTargetConfirmation ? "no reproduced real-target findings are missing formal reports" : "no locally execution-confirmed source-only findings are missing formal reports" };
+    return { error: "no locally execution-confirmed source-only findings are missing formal reports" };
   }
   return {
     findings: rows.map((row) => ({
       findingId: Number(row.id),
+      unit: "finding",
       findingKey: String(row.finding_key ?? ""),
-      evidenceMode: requiresRealTargetConfirmation ? "real-target-reproduced" : "source-only-local-confirmed",
+      evidenceMode: "source-only-local-confirmed",
       title: stringValue(row.title),
       location: stringValue(row.location) || undefined,
       severity: stringValue(row.severity) || undefined,
@@ -2131,11 +2145,133 @@ function reportWorklist(
       exploitSketch: stringValue(row.exploit_sketch) || undefined,
       fix: stringValue(row.fix) || undefined,
       confidence: Number.isFinite(Number(row.confidence)) ? Number(row.confidence) : undefined,
-      decisions: requiresRealTargetConfirmation
-        ? store.listConfirmDecisionsForFinding(projectId, String(row.finding_key ?? ""))
-          .filter((decision) => rowBelongsToCurrentMaterial(decision, currentRunIds ?? new Set(), materialBoundary) && decision.reproduced === "yes" && decision.recommendation !== "drop")
-        : [],
+      decisions: [],
     })),
+  };
+}
+
+function decisionReportWorklist(
+  store: MetadataStore,
+  projectId: number,
+  selectedIds: number[] = [],
+  currentRunIds?: Set<number>,
+  materialBoundary?: Record<string, unknown>,
+  includeExistingReports = false,
+): { findings: ReportFindingSpec[]; error?: undefined } | { findings?: undefined; error: string } {
+  const selected = selectedIds.length ? new Set(selectedIds) : undefined;
+  const currentIds = currentRunIds ?? new Set<number>();
+  const allFindings = reportableFindings(store.listFindings(projectId).filter((row) => rowBelongsToCurrentMaterial(row, currentIds, materialBoundary)));
+  const findingsById = new Map(allFindings.map((row) => [Number(row.id), row]));
+  const findingsByKey = new Map<string, Record<string, unknown>>();
+  for (const row of allFindings) {
+    const key = stringValue(row.finding_key).toLowerCase();
+    if (key) findingsByKey.set(key, row);
+  }
+  const selectedCovered = new Set<number>();
+  const decisions = currentConfirmDecisions(store.listConfirmDecisions(projectId).filter((row) => rowBelongsToCurrentMaterial(row, currentIds, materialBoundary)))
+    .filter((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop")
+    .filter((decision) => selected || includeExistingReports || !decisionHasFormalReport(decision))
+    .filter((decision) => {
+      if (!selected) return true;
+      const linked = decisionLinkedFindingRows(decision, findingsByKey).filter((finding) => !isIgnoredFinding(finding));
+      const matched = linked.filter((finding) => selected.has(Number(finding.id)));
+      for (const finding of matched) selectedCovered.add(Number(finding.id));
+      return matched.length > 0;
+    });
+  if (selected) {
+    const missing = [...selected].filter((id) => !selectedCovered.has(id));
+    if (missing.length > 0) {
+      const unknown = missing.filter((id) => !findingsById.has(id));
+      const suffix = unknown.length > 0 ? " is not a current finding for this project" : " is not linked to a reproduced, non-dropped real-target decision";
+      return { error: `finding ${missing.join(", ")}${suffix}` };
+    }
+  }
+  if (decisions.length === 0) return { error: "no reproduced real-target decisions are missing submission reports" };
+
+  return {
+    findings: decisions.map((decision) => {
+      const linkedFindings = decisionLinkedFindingRows(decision, findingsByKey).filter((finding) => !isIgnoredFinding(finding));
+      const primary = linkedFindings[0];
+      const decisionId = Number(decision.id);
+      const severity = stringValue(decision.severity) || maxSeverityFromRows(linkedFindings) || undefined;
+      return {
+        unit: "decision",
+        decisionId,
+        findingId: primary ? Number(primary.id) : undefined,
+        findingKey: `decision-${decisionId}`,
+        reportKey: `decision-${decisionId}`,
+        evidenceMode: "real-target-reproduced",
+        evidenceLevel: stringValue(decision.evidence_level) || "real-target-reproduced",
+        submissionConfidence: stringValue(decision.submission_confidence) || undefined,
+        title: stringValue(decision.bug),
+        location: primary ? stringValue(primary.location) || undefined : undefined,
+        severity,
+        status: primary ? stringValue(primary.status) || undefined : undefined,
+        confirmStatus: "reproduced",
+        description: linkedFindings.map((finding) => stringValue(finding.description)).filter(Boolean).join("\n\n") || undefined,
+        evidence: linkedFindings.map((finding) => stringValue(finding.evidence)).filter(Boolean).join("\n\n") || undefined,
+        exploitSketch: linkedFindings.map((finding) => stringValue(finding.exploit_sketch)).filter(Boolean).join("\n\n") || undefined,
+        fix: linkedFindings.map((finding) => stringValue(finding.fix)).filter(Boolean).join("\n\n") || stringValue(decision.distinct_fix) || undefined,
+        confidence: maxConfidenceFromRows(linkedFindings),
+        decisions: [confirmDecisionDisplayRow(decision)],
+        linkedFindings: linkedFindings.map(reportLinkedFindingRow),
+      };
+    }),
+  };
+}
+
+function decisionLinkedFindingRows(decision: Record<string, unknown>, findingsByKey: Map<string, Record<string, unknown>>): Array<Record<string, unknown>> {
+  const out: Array<Record<string, unknown>> = [];
+  const seen = new Set<number>();
+  for (const key of confirmDecisionMemberKeys(decision)) {
+    const row = findingsByKey.get(key);
+    if (!row) continue;
+    const id = Number(row.id);
+    if (seen.has(id)) continue;
+    seen.add(id);
+    out.push(row);
+  }
+  return out;
+}
+
+function maxSeverityFromRows(rows: Array<Record<string, unknown>>): string | undefined {
+  let best: string | undefined;
+  let bestRank = -1;
+  for (const row of rows) {
+    const severity = stringValue(row.severity).toLowerCase();
+    const severityRank = rank(FINDING_SEVERITY_RANK, severity);
+    if (severityRank <= bestRank) continue;
+    best = severity;
+    bestRank = severityRank;
+  }
+  return best;
+}
+
+function maxConfidenceFromRows(rows: Array<Record<string, unknown>>): number | undefined {
+  let best: number | undefined;
+  for (const row of rows) {
+    const value = Number(row.confidence);
+    if (!Number.isFinite(value)) continue;
+    if (best === undefined || value > best) best = value;
+  }
+  return best;
+}
+
+function reportLinkedFindingRow(row: Record<string, unknown>): Record<string, unknown> {
+  return {
+    id: row.id,
+    finding_key: row.finding_key,
+    title: cleanFindingTitle(row.title),
+    location: row.location,
+    severity: row.severity,
+    status: row.status,
+    confirm_status: row.confirm_status,
+    description: row.description,
+    evidence: row.evidence,
+    exploit_sketch: row.exploit_sketch,
+    fix: row.fix,
+    confidence: row.confidence,
+    has_report: rowHasFormalReport(row),
   };
 }
 
@@ -2366,6 +2502,18 @@ function rowHasFormalReport(row: Record<string, unknown>): boolean {
   return Boolean(reportMarkdown && !reportMarkdown.startsWith("# Security disclosure:"));
 }
 
+function confirmDecisionDisplayRow(row: Record<string, unknown>): Record<string, unknown> {
+  const out = { ...row };
+  delete out.report_markdown;
+  out.has_report = decisionHasFormalReport(row);
+  return out;
+}
+
+function decisionHasFormalReport(row: Record<string, unknown>): boolean {
+  const reportMarkdown = stringValue(row.report_markdown).trimStart();
+  return Boolean(reportMarkdown && !reportMarkdown.startsWith("# Security disclosure:"));
+}
+
 function findingDisplayRow(row: Record<string, unknown>): Record<string, unknown> {
   if (!("title" in row)) return row;
   return { ...row, title: cleanFindingTitle(row.title) };
@@ -2381,6 +2529,18 @@ function findingReport(c: Ctx): void {
   const decisions = Number.isFinite(projectId) && findingKey ? c.store.listConfirmDecisionsForFinding(projectId, findingKey) : [];
   sendJson(c.res, 200, {
     markdown: stored || renderFindingReportMarkdown(display, decisions),
+    source: stored ? "db" : "generated",
+  });
+}
+
+function confirmDecisionReport(c: Ctx): void {
+  const row = c.store.getConfirmDecision(Number(c.params.id));
+  if (!row) return sendJson(c.res, 404, { error: "no such confirm decision" });
+  const projectId = Number(row.project_id);
+  const linkedFindings = Number.isFinite(projectId) ? linkedFindingsForDecision(c.store, projectId, row) : [];
+  const stored = stringValue(row.report_markdown);
+  sendJson(c.res, 200, {
+    markdown: stored || renderDecisionReportMarkdown(row, linkedFindings),
     source: stored ? "db" : "generated",
   });
 }
@@ -2428,6 +2588,46 @@ function renderFindingReportMarkdown(row: Record<string, unknown>, decisions: Ar
       if (novelty) lines.push(`- Novelty: ${novelty}`);
       if (humanGates) lines.push(`- Human gates: ${humanGates}`);
     }
+  }
+  return lines.join("\n").trim();
+}
+
+function renderDecisionReportMarkdown(decision: Record<string, unknown>, linkedFindings: Array<Record<string, unknown>>): string {
+  const title = stringValue(decision.bug) || "Decision report";
+  const lines = [
+    `# ${title}`,
+    "",
+    "- Submission unit: real-target decision",
+    `- Reproduced: ${stringValue(decision.reproduced) || "unknown"}`,
+    `- Recommendation: ${stringValue(decision.recommendation) || "unknown"}`,
+    stringValue(decision.severity) ? `- Severity: ${stringValue(decision.severity)}` : "",
+    stringValue(decision.evidence_level) ? `- Evidence level: ${stringValue(decision.evidence_level)}` : "",
+    stringValue(decision.submission_confidence) ? `- Submission confidence: ${stringValue(decision.submission_confidence)}` : "",
+    stringValue(decision.repro_command_id) ? `- Command evidence: \`${stringValue(decision.repro_command_id)}\`` : "",
+    "",
+  ].filter(Boolean);
+  const evidence = stringValue(decision.repro_evidence);
+  const fix = stringValue(decision.distinct_fix);
+  const corroboration = stringValue(decision.corroboration);
+  const novelty = stringValue(decision.novelty);
+  const humanGates = stringValue(decision.human_gates);
+  if (evidence) lines.push("## Reproduction Evidence", "", evidence, "");
+  if (fix) lines.push("## Distinct Fix", "", fix, "");
+  if (linkedFindings.length > 0) {
+    lines.push("## Linked Findings", "");
+    for (const finding of linkedFindings) {
+      lines.push(`- Finding #${finding.id}: ${stringValue(finding.title) || stringValue(finding.finding_key) || "untitled"}`);
+      if (stringValue(finding.location)) lines.push(`  - Location: \`${stringValue(finding.location)}\``);
+      if (stringValue(finding.severity)) lines.push(`  - Severity: ${stringValue(finding.severity)}`);
+      if (stringValue(finding.description)) lines.push(`  - Summary: ${stringValue(finding.description)}`);
+    }
+    lines.push("");
+  }
+  if (corroboration || novelty || humanGates) {
+    lines.push("## Novelty and Disclosure Notes", "");
+    if (corroboration) lines.push(`- Corroboration: ${corroboration}`);
+    if (novelty) lines.push(`- Novelty: ${novelty}`);
+    if (humanGates) lines.push(`- Human gates: ${humanGates}`);
   }
   return lines.join("\n").trim();
 }
@@ -2626,7 +2826,7 @@ function confirmDecisionsList(c: Ctx): void {
       .map((row) => annotateConfirmDecisionMaterialStaleness(row, currentResultRunIds, materialBoundary, activePrepareRefresh));
     if (!includeStale) rows = currentConfirmDecisions(rows);
     if (reproduced) rows = rows.filter((row) => row.reproduced === reproduced);
-    sendJson(c.res, 200, { confirmDecisions: rows });
+    sendJson(c.res, 200, { confirmDecisions: rows.map(confirmDecisionDisplayRow) });
   });
 }
 
@@ -3020,7 +3220,7 @@ async function daemonRunUpdate(c: Ctx): Promise<void> {
   const body = (await readBody(c.req)) as {
     scopes?: Parameters<MetadataStore["replaceScopes"]>[1];
     findings?: Parameters<MetadataStore["upsertFindings"]>[2];
-    findingReports?: Array<{ findingId?: number; markdown?: string }>;
+    findingReports?: Array<{ findingId?: number; decisionId?: number; markdown?: string }>;
     reason?: string;
     confirmDecisions?: Parameters<MetadataStore["upsertConfirmDecisions"]>[2];
     decisionPath?: string;
@@ -3037,7 +3237,9 @@ async function daemonRunUpdate(c: Ctx): Promise<void> {
   if (body.findings) c.store.upsertFindings(projectId, runId, body.findings, body.reason);
   if (body.findingReports) {
     for (const report of body.findingReports) {
-      if (typeof report.findingId === "number" && typeof report.markdown === "string" && report.markdown.trim()) {
+      if (typeof report.decisionId === "number" && typeof report.markdown === "string" && report.markdown.trim()) {
+        c.store.setConfirmDecisionReport(projectId, report.decisionId, report.markdown);
+      } else if (typeof report.findingId === "number" && typeof report.markdown === "string" && report.markdown.trim()) {
         c.store.setFindingReport(projectId, report.findingId, report.markdown);
       }
     }

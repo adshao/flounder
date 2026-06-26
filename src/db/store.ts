@@ -97,6 +97,9 @@ export interface ConfirmRow {
   reproduced?: string | undefined;
   recommendation?: string | undefined;
   members?: string[] | undefined;
+  severity?: string | undefined;
+  evidenceLevel?: string | undefined;
+  submissionConfidence?: string | undefined;
   decisionPath?: string | undefined;
   distinctFix?: string | undefined;
   reproEvidence?: string | undefined;
@@ -153,7 +156,7 @@ export interface FindingQuery extends FindingFilter {
   offset?: number | undefined;
 }
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS meta(key TEXT PRIMARY KEY, value TEXT NOT NULL);
@@ -258,6 +261,9 @@ CREATE TABLE IF NOT EXISTS confirm_decision(
   reproduced TEXT,
   recommendation TEXT,
   members_json TEXT,
+  severity TEXT,
+  evidence_level TEXT,
+  submission_confidence TEXT,
   distinct_fix TEXT,
   repro_evidence TEXT,
   corroboration TEXT,
@@ -265,6 +271,7 @@ CREATE TABLE IF NOT EXISTS confirm_decision(
   human_gates TEXT,
   merged_from_json TEXT,
   repro_command_id TEXT,
+  report_markdown TEXT,
   decision_path TEXT,
   created_at TEXT NOT NULL
 );
@@ -330,6 +337,60 @@ function confirmMemberKeys(member: string): string[] {
   return [...keys];
 }
 
+const SEVERITY_RANK: Record<string, number> = {
+  info: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+  critical: 4,
+};
+
+function linkedFindingMetadata(
+  findingsByKey: Map<string, { severity?: string }> | undefined,
+  members: string[],
+): Array<{ severity?: string }> {
+  if (!findingsByKey) return [];
+  const out: Array<{ severity?: string }> = [];
+  const seen = new Set<string>();
+  for (const member of members) {
+    for (const key of confirmMemberKeys(member)) {
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const linked = findingsByKey.get(key);
+      if (linked) out.push(linked);
+    }
+  }
+  return out;
+}
+
+function maxSeverity(values: Array<string | undefined>): string | null {
+  let best: string | null = null;
+  let bestRank = -1;
+  for (const raw of values) {
+    const normalized = String(raw ?? "").trim().toLowerCase();
+    const rank = SEVERITY_RANK[normalized];
+    if (rank === undefined || rank <= bestRank) continue;
+    best = normalized;
+    bestRank = rank;
+  }
+  return best;
+}
+
+function decisionEvidenceLevel(reproduced?: string): string {
+  if (reproduced === "yes") return "real-target-reproduced";
+  if (reproduced === "no") return "not-reproduced";
+  if (reproduced === "could-not-set-up") return "could-not-set-up";
+  return "unknown";
+}
+
+function decisionSubmissionConfidence(reproduced?: string, recommendation?: string): string {
+  if (reproduced === "yes" && recommendation === "submit-candidate") return "high";
+  if (reproduced === "yes" && recommendation === "needs-human") return "medium";
+  if (reproduced === "yes") return "medium";
+  if (reproduced === "no" || recommendation === "drop") return "low";
+  return "unknown";
+}
+
 export class MetadataStore {
   private readonly db: InstanceType<typeof DatabaseSync>;
 
@@ -374,6 +435,10 @@ export class MetadataStore {
       "ALTER TABLE confirm_decision ADD COLUMN human_gates TEXT",
       "ALTER TABLE confirm_decision ADD COLUMN merged_from_json TEXT",
       "ALTER TABLE confirm_decision ADD COLUMN repro_command_id TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN severity TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN evidence_level TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN submission_confidence TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN report_markdown TEXT",
     ]) {
       try {
         this.db.exec(alter);
@@ -417,7 +482,61 @@ export class MetadataStore {
     this.transaction(() => {
       this.reconcileFindingReportRunIds();
       this.reconcileRefutedVerifyArtifacts();
+      this.reconcileConfirmDecisionReports();
     });
+  }
+
+  private reconcileConfirmDecisionReports(): void {
+    const rows = this.db
+      .prepare(
+        `SELECT id, project_id, reproduced, recommendation, members_json, severity,
+                evidence_level, submission_confidence
+           FROM confirm_decision`,
+      )
+      .all() as Array<{
+        id: number;
+        project_id: number;
+        reproduced: string | null;
+        recommendation: string | null;
+        members_json: string | null;
+        severity: string | null;
+        evidence_level: string | null;
+        submission_confidence: string | null;
+      }>;
+    if (rows.length === 0) return;
+
+    const findingsByProject = new Map<number, Map<string, { severity?: string }>>();
+    const findingRows = this.db
+      .prepare("SELECT project_id, finding_key, severity FROM finding WHERE finding_key IS NOT NULL AND finding_key <> ''")
+      .all() as Array<{ project_id: number; finding_key: string; severity: string | null }>;
+    for (const finding of findingRows) {
+      let byKey = findingsByProject.get(finding.project_id);
+      if (!byKey) {
+        byKey = new Map();
+        findingsByProject.set(finding.project_id, byKey);
+      }
+      const metadata: { severity?: string } = {};
+      if (finding.severity) metadata.severity = finding.severity;
+      byKey.set(finding.finding_key.toLowerCase(), metadata);
+    }
+
+    const update = this.db.prepare(
+      `UPDATE confirm_decision
+          SET severity = COALESCE(NULLIF(severity, ''), ?),
+              evidence_level = COALESCE(NULLIF(evidence_level, ''), ?),
+              submission_confidence = COALESCE(NULLIF(submission_confidence, ''), ?)
+        WHERE id = ?`,
+    );
+    for (const row of rows) {
+      const members = parseJsonArray(row.members_json).filter((member): member is string => typeof member === "string");
+      const linked = linkedFindingMetadata(findingsByProject.get(row.project_id), members);
+      update.run(
+        row.severity?.trim() ? null : maxSeverity(linked.map((entry) => entry.severity)),
+        row.evidence_level?.trim() ? null : decisionEvidenceLevel(row.reproduced ?? undefined),
+        row.submission_confidence?.trim() ? null : decisionSubmissionConfidence(row.reproduced ?? undefined, row.recommendation ?? undefined),
+        row.id,
+      );
+    }
   }
 
   private reconcileFindingReportRunIds(): void {
@@ -1162,9 +1281,9 @@ export class MetadataStore {
       this.db.prepare("DELETE FROM confirm_decision WHERE run_id = ?").run(runId);
       const stmt = this.db.prepare(
         `INSERT INTO confirm_decision(project_id, run_id, bug, reproduced, recommendation, members_json,
-          distinct_fix, repro_evidence, corroboration, novelty, human_gates, merged_from_json,
-          repro_command_id, decision_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          severity, evidence_level, submission_confidence, distinct_fix, repro_evidence, corroboration,
+          novelty, human_gates, merged_from_json, repro_command_id, report_markdown, decision_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const ts = now();
       // The confirm work-list ids ARE finding content keys, so a decision's members map straight
@@ -1172,8 +1291,15 @@ export class MetadataStore {
       // confirm_status (reproduced -> reproduced, settled-but-not -> not-reproduced). This is what
       // makes confirm finding-grained + resumable (a later confirm skips non-NULL confirm_status).
       const setConfirm = this.db.prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND finding_key = ?");
-      const setReport = this.db.prepare("UPDATE finding SET report_markdown = COALESCE(NULLIF(?, ''), report_markdown) WHERE project_id = ? AND finding_key = ?");
+      const findingsByKey = new Map<string, { severity?: string }>();
+      for (const row of this.db.prepare("SELECT finding_key, severity FROM finding WHERE project_id = ?").all(projectId) as Array<{ finding_key: string | null; severity: string | null }>) {
+        if (!row.finding_key) continue;
+        const metadata: { severity?: string } = {};
+        if (row.severity) metadata.severity = row.severity;
+        findingsByKey.set(row.finding_key.toLowerCase(), metadata);
+      }
       for (const r of rows) {
+        const linked = linkedFindingMetadata(findingsByKey, r.members ?? []);
         stmt.run(
           projectId,
           runId,
@@ -1181,6 +1307,9 @@ export class MetadataStore {
           r.reproduced ?? null,
           r.recommendation ?? null,
           jsonOrNull(r.members),
+          r.severity ?? maxSeverity(linked.map((entry) => entry.severity)),
+          r.evidenceLevel ?? decisionEvidenceLevel(r.reproduced),
+          r.submissionConfidence ?? decisionSubmissionConfidence(r.reproduced, r.recommendation),
           r.distinctFix ?? null,
           r.reproEvidence ?? null,
           r.corroboration ?? null,
@@ -1188,6 +1317,7 @@ export class MetadataStore {
           r.humanGates ?? null,
           jsonOrNull(r.mergedFrom),
           r.reproCommandId ?? null,
+          r.reportMarkdown ?? null,
           r.decisionPath ?? decisionPath ?? null,
           ts,
         );
@@ -1195,7 +1325,6 @@ export class MetadataStore {
         for (const member of r.members ?? []) {
           for (const key of confirmMemberKeys(member)) {
             if (outcome) setConfirm.run(outcome, projectId, key);
-            if (r.reportMarkdown) setReport.run(r.reportMarkdown, projectId, key);
           }
         }
       }
@@ -1204,6 +1333,16 @@ export class MetadataStore {
 
   listConfirmDecisions(projectId: number): Array<Record<string, unknown>> {
     return this.db.prepare("SELECT * FROM confirm_decision WHERE project_id = ? ORDER BY created_at DESC").all(projectId) as Array<Record<string, unknown>>;
+  }
+
+  getConfirmDecision(id: number): Record<string, unknown> | undefined {
+    return this.db.prepare("SELECT * FROM confirm_decision WHERE id = ?").get(id) as Record<string, unknown> | undefined;
+  }
+
+  /** Persist the final submission report for one real-target decision. Finding-level reports
+   * remain independent evidence summaries; this is the decision-level submission package. */
+  setConfirmDecisionReport(projectId: number, decisionId: number, markdown: string): boolean {
+    return this.db.prepare("UPDATE confirm_decision SET report_markdown = ? WHERE project_id = ? AND id = ?").run(markdown, projectId, decisionId).changes > 0;
   }
 
   listConfirmDecisionsForFinding(projectId: number, findingKey: string): Array<Record<string, unknown>> {

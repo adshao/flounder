@@ -21,6 +21,9 @@ export interface ConfirmDecisionInput {
   reproduced?: string | undefined;
   recommendation?: string | undefined;
   members?: string[] | undefined;
+  severity?: string | undefined;
+  evidenceLevel?: string | undefined;
+  submissionConfidence?: string | undefined;
   distinctFix?: string | undefined;
   reproEvidence?: string | undefined;
   corroboration?: string | undefined;
@@ -32,7 +35,8 @@ export interface ConfirmDecisionInput {
 }
 
 export interface FindingReportInput {
-  findingId: number;
+  findingId?: number;
+  decisionId?: number;
   markdown: string;
 }
 
@@ -156,7 +160,11 @@ export class RunRecorder implements RunTracker {
     if (!this.ready() || reports.length === 0) return;
     try {
       for (const report of reports) {
-        this.store!.setFindingReport(this.projectId!, report.findingId, report.markdown);
+        if (typeof report.decisionId === "number") {
+          this.store!.setConfirmDecisionReport(this.projectId!, report.decisionId, report.markdown);
+        } else if (typeof report.findingId === "number") {
+          this.store!.setFindingReport(this.projectId!, report.findingId, report.markdown);
+        }
       }
     } catch (error) {
       this.disable("finding-reports", error);
