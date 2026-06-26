@@ -64,7 +64,7 @@ export interface LaunchSpec {
   fresh?: boolean | undefined; // confirm: ignore a prior interrupted confirm
   inputRunDir?: string | undefined; // confirm: the finished run dir to reproduce
   inputRunDirs?: string[] | undefined; // confirm (aggregate): several run dirs whose confirmed findings are unioned + reproduced together
-  confirmKeys?: string[] | undefined; // confirm: restrict the work list to these finding content keys (the pending/target set the control plane resolved from finding status)
+  confirmKeys?: string[] | undefined; // confirm: restrict the work list to these finding content keys (project defaults pass the full current confirmed-finding context)
   reportFindings?: ReportFindingSpec[] | undefined; // report: confirmed/reproduced bugs to package as formal Markdown reports
   pipeline?: boolean | undefined; // run: project/CLI clue pipeline (prepare if needed -> map/dig -> verify -> confirm -> report)
   verifyFromStart?: boolean | undefined; // pipeline: re-run Verify from the beginning instead of only pending candidates

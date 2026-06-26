@@ -1089,6 +1089,22 @@ export class MetadataStore {
       .all(projectId) as Array<{ id: number; finding_key: string; title: string; run_id: number | null; run_dir: string | null; report_path: string | null }>;
   }
 
+  /** All audit-confirmed findings that belong in a project-level confirm context, including
+   * findings that already have a real-target decision. Confirm needs this complete set so later
+   * batches can consolidate newly pending findings against prior reproduced/not-reproduced rows. */
+  confirmableContext(projectId: number): Array<{ id: number; finding_key: string; title: string; run_id: number | null; run_dir: string | null; report_path: string | null; confirm_status: string | null }> {
+    return this.db
+      .prepare(
+        `SELECT f.id, f.finding_key, f.title, f.run_id, r.run_dir, f.report_path, f.confirm_status
+           FROM finding f LEFT JOIN run r ON r.id = f.run_id
+          WHERE f.project_id = ?
+            AND COALESCE(f.tracking_status, 'open') <> 'ignored'
+            AND f.status IN ('confirmed-differential','confirmed-executable','confirmed-source')
+          ORDER BY f.status, f.id`,
+      )
+      .all(projectId) as Array<{ id: number; finding_key: string; title: string; run_id: number | null; run_dir: string | null; report_path: string | null; confirm_status: string | null }>;
+  }
+
   /** One pending confirmable finding by project + id (for finding-level confirm). */
   getConfirmable(projectId: number, findingId: number): { id: number; finding_key: string; title: string; run_id: number | null; run_dir: string | null; report_path: string | null } | undefined {
     return this.db

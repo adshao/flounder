@@ -77,8 +77,9 @@ export async function runConfirm(
 
   // 2. Load every source run's confirmed findings and union them as the work list, deduped by the
   // SAME content key the DB uses (util/finding-key) so the same bug across batches counts once. When
-  // confirmKeys is given (the control plane's pending/target set), keep ONLY those — that is how a
-  // project-level confirm skips already-decided findings and a finding-level confirm does just one.
+  // confirmKeys is given, keep ONLY those. Project-level confirm passes the full current
+  // confirmed-finding context so consolidation can see previously decided rows; finding-level
+  // confirm can still pass a narrow target set.
   // The seed id is the DB finding key selected by the control plane. For verify-origin updates, the
   // artifact may have a newer content key, so origin selectors map it back to the DB row that needs
   // confirm_status updated.
@@ -105,10 +106,10 @@ export async function runConfirm(
   // RESUME (auto, unless --fresh): an interrupted prior confirm of THIS input run left a
   // decision sheet; carry its already-SETTLED rows (reproduced yes/no) forward and tell
   // the model to skip them, so a re-run continues instead of re-reproducing from scratch.
-  const settled = options.fresh ? [] : await loadSettledFromPriorConfirm(confirmCfg.outputDir, confirmCfg.targetName, inputRunDir, logger.runDir);
+  const settled = options.fresh ? [] : await loadSettledFromPriorConfirm(confirmCfg.outputDir, confirmCfg.targetName, inputRunDir, logger.runDir, runDirs);
   let seed = renderFindingsSeed(priorFindings);
   if (settled.length > 0) {
-    seed += `\n\n=== ALREADY SETTLED in a prior confirm run — copy these rows into confirm_decision.json VERBATIM and do NOT reproduce them again; work ONLY on findings not settled here ===\n${JSON.stringify(settled, null, 1)}`;
+    seed += `\n\n=== ALREADY SETTLED in prior confirm run(s) — carry these rows into confirm_decision.json and do NOT reproduce their existing member ids again. Work on findings not settled here. If an unsettled finding is the same distinct bug as a settled row, add that finding id to that row's members and reuse the prior reproduction evidence; otherwise leave settled rows unchanged. ===\n${JSON.stringify(settled, null, 1)}`;
     await logger.event("audit_confirm_resume", { settled: settled.length });
   }
 
@@ -483,10 +484,10 @@ function asStringList(value: unknown): string[] {
 // by frozen provenance) and return its SETTLED decision rows (reproduced yes/no) — the
 // resume basis. Skips the current run dir; falls through to an older run if the latest has
 // no decision sheet yet (killed before its first checkpoint).
-export async function loadSettledFromPriorConfirm(outputDir: string, targetName: string, inputRunDir: string, currentRunDir: string): Promise<ConfirmDecisionRow[]> {
+export async function loadSettledFromPriorConfirm(outputDir: string, targetName: string, inputRunDir: string, currentRunDir: string, inputRunDirs?: readonly string[]): Promise<ConfirmDecisionRow[]> {
   const prefix = `${targetName}-confirm-`;
   const currentBase = path.basename(currentRunDir);
-  const wantInput = publicPath(inputRunDir);
+  const wantedInputs = new Set((inputRunDirs && inputRunDirs.length > 0 ? inputRunDirs : [inputRunDir]).map((dir) => publicPath(dir)));
   let names: string[] = [];
   try {
     names = await readdir(outputDir);
@@ -494,22 +495,38 @@ export async function loadSettledFromPriorConfirm(outputDir: string, targetName:
     return [];
   }
   const candidates = names.filter((name) => name.startsWith(prefix) && name !== currentBase).sort().reverse();
+  const rows: ConfirmDecisionRow[] = [];
+  const covered = new Set<string>();
+  const memberKeys = (row: ConfirmDecisionRow): string[] => {
+    const keys = row.members.map((member) => member.trim().toLowerCase()).filter(Boolean);
+    return keys.length > 0 ? keys : [row.bug.trim().toLowerCase()].filter(Boolean);
+  };
+  const provenanceInputs = (prov: { inputRunDir?: unknown; runDirs?: unknown }): string[] => {
+    const raw = Array.isArray(prov.runDirs) ? prov.runDirs : [prov.inputRunDir];
+    return [...new Set(raw.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0).map((entry) => entry.trim()))];
+  };
   for (const name of candidates) {
     const dir = path.join(outputDir, name);
     try {
-      const prov = JSON.parse(await readFile(path.join(dir, "confirm_provenance.json"), "utf8")) as { inputRunDir?: unknown };
-      if (prov?.inputRunDir !== wantInput) continue;
+      const prov = JSON.parse(await readFile(path.join(dir, "confirm_provenance.json"), "utf8")) as { inputRunDir?: unknown; runDirs?: unknown };
+      const inputs = provenanceInputs(prov);
+      if (inputs.length === 0 || !inputs.every((candidate) => wantedInputs.has(candidate))) continue;
       const raw: unknown = JSON.parse(await readFile(path.join(dir, "confirm_decision.json"), "utf8"));
       const items = Array.isArray(raw) ? raw : [];
-      const rows = items
+      const settled = items
         .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
         .map(normalizeDecisionRow);
-      return rows.filter((row) => row.reproduced === "yes" || row.reproduced === "no");
+      for (const row of settled.filter((entry) => entry.reproduced === "yes" || entry.reproduced === "no")) {
+        const keys = memberKeys(row);
+        if (keys.length > 0 && keys.every((key) => covered.has(key))) continue;
+        rows.push(row);
+        for (const key of keys) covered.add(key);
+      }
     } catch {
       // unreadable provenance/decision (e.g. killed before first checkpoint) — try the next-older run
     }
   }
-  return [];
+  return rows;
 }
 
 // Collapse the model's rows per the fix-equivalence clusters: each cluster of row ids

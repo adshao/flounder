@@ -18,6 +18,14 @@ async function mkConfirmRun(outDir, name, inputRunDir, rows) {
   return dir;
 }
 
+async function mkAggregateConfirmRun(outDir, name, inputRunDirs, rows) {
+  const dir = path.join(outDir, name);
+  await mkdir(dir, { recursive: true });
+  await writeFile(path.join(dir, "confirm_provenance.json"), JSON.stringify({ inputRunDir: publicPath(inputRunDirs[0]), runDirs: inputRunDirs.map((entry) => publicPath(entry)), frozenFiles: [] }));
+  if (rows) await writeFile(path.join(dir, "confirm_decision.json"), JSON.stringify(rows));
+  return dir;
+}
+
 test("confirm resume: loads SETTLED rows from the latest prior confirm of the same input", async () => {
   const out = await mkdtemp(path.join(os.tmpdir(), "flounder-confirm-resume-"));
   const inputX = "/some/input-run-X";
@@ -49,4 +57,20 @@ test("confirm resume: skips a latest run with no decision sheet (killed before f
   await mkConfirmRun(out, "tgt-confirm-20260102T000000Z", inputX, null); // no decision yet
   const settled = await loadSettledFromPriorConfirm(out, "tgt", inputX, path.join(out, "tgt-confirm-cur"));
   assert.deepEqual(settled.map((r) => r.bug), ["Bug A"]);
+});
+
+test("confirm resume: aggregate input carries settled rows from prior subset confirms", async () => {
+  const out = await mkdtemp(path.join(os.tmpdir(), "flounder-confirm-resume-aggregate-"));
+  const inputA = "/some/input-run-A";
+  const inputB = "/some/input-run-B";
+  const inputC = "/some/input-run-C";
+  await mkConfirmRun(out, "tgt-confirm-20260101T000000Z", inputA, [{ bug: "Bug A", reproduced: "yes", members: ["ka"] }]);
+  await mkAggregateConfirmRun(out, "tgt-confirm-20260102T000000Z", [inputA, inputB], [
+    { bug: "Bug A newer", reproduced: "no", members: ["ka"] },
+    { bug: "Bug B", reproduced: "yes", members: ["kb"] },
+  ]);
+  await mkAggregateConfirmRun(out, "tgt-confirm-20260103T000000Z", [inputA, inputC], [{ bug: "Bug C", reproduced: "yes", members: ["kc"] }]);
+
+  const settled = await loadSettledFromPriorConfirm(out, "tgt", inputA, path.join(out, "tgt-confirm-cur"), [inputA, inputB]);
+  assert.deepEqual(settled.map((r) => r.bug).sort(), ["Bug A newer", "Bug B"]);
 });

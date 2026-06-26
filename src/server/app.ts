@@ -1896,11 +1896,9 @@ async function runLaunch(c: Ctx): Promise<void> {
       progress,
     });
   }
-  // Confirm is FINDING-grained + resumable: when no explicit run dir is given, resolve the work set
-  // from finding STATUS — selected findings (body.findingId/body.findingIds) or all
-  // pending-confirmable findings
-  // (confirmed by the audit, not yet decided on the real target). The confirm then updates each
-  // finding's confirm_status, so a re-run only picks up what's still pending.
+  // Confirm is finding-grained + resumable, but its distinct-bug consolidation must see the
+  // full current confirmed-finding context. The pending rows decide whether there is work to do;
+  // the context rows decide what the confirm agent can consolidate against across batches.
   if (spec.verb === "confirm" && !spec.inputRunDir && !(spec.inputRunDirs && spec.inputRunDirs.length > 0)) {
     const findingIds = selectedFindingIds(body);
     if (findingIds.length > 0) {
@@ -1925,9 +1923,13 @@ async function runLaunch(c: Ctx): Promise<void> {
         .filter((p) => confirmableRunDir(p as unknown as Record<string, unknown>))
         .filter((p) => rowBelongsToCurrentMaterial(p as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary));
       if (pending.length === 0) return sendJson(c.res, 400, { error: "nothing to confirm — every audit-confirmed finding already has a real-target decision (use --fresh to redo)" });
-      spec.inputRunDirs = [...new Set(pending.map((p) => confirmableRunDir(p as unknown as Record<string, unknown>)).filter(Boolean))];
+      const context = c.store.confirmableContext(Number(project.id))
+        .filter((p) => confirmableRunDir(p as unknown as Record<string, unknown>))
+        .filter((p) => rowBelongsToCurrentMaterial(p as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary));
+      const rows = context.length > 0 ? context : pending;
+      spec.inputRunDirs = [...new Set(rows.map((p) => confirmableRunDir(p as unknown as Record<string, unknown>)).filter(Boolean))];
       spec.inputRunDir = spec.inputRunDirs[0];
-      spec.confirmKeys = pending.flatMap((p) => confirmSelectorsForFinding(p as unknown as { id?: unknown; finding_key?: unknown }));
+      spec.confirmKeys = rows.flatMap((p) => confirmSelectorsForFinding(p as unknown as { id?: unknown; finding_key?: unknown }));
     }
   }
   if (spec.verb === "report") {
@@ -3047,12 +3049,19 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
     const pending = c.store.pendingConfirmable(projectId)
       .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
       .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary));
+    if (pending.length === 0) {
+      return sendJson(c.res, 200, { phase, requiresRealTargetConfirmation, inputRunDirs: [], confirmKeys: [] });
+    }
+    const context = c.store.confirmableContext(projectId)
+      .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
+      .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary));
+    const rows = context.length > 0 ? context : pending;
     return sendJson(c.res, 200, {
       phase,
       requiresRealTargetConfirmation,
-      inputRunDirs: [...new Set(pending.map((row) => confirmableRunDir(row as unknown as Record<string, unknown>)).filter(Boolean))],
-      inputRunDir: pending[0] ? confirmableRunDir(pending[0] as unknown as Record<string, unknown>) || undefined : undefined,
-      confirmKeys: pending.flatMap((row) => confirmSelectorsForFinding(row as unknown as { id?: unknown; finding_key?: unknown })),
+      inputRunDirs: [...new Set(rows.map((row) => confirmableRunDir(row as unknown as Record<string, unknown>)).filter(Boolean))],
+      inputRunDir: rows[0] ? confirmableRunDir(rows[0] as unknown as Record<string, unknown>) || undefined : undefined,
+      confirmKeys: rows.flatMap((row) => confirmSelectorsForFinding(row as unknown as { id?: unknown; finding_key?: unknown })),
     });
   }
 

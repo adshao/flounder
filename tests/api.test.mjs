@@ -404,6 +404,21 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
       ], "differential");
       store.upsertFindings(created.id, runId, [
         {
+          findingKey: "kalreadyreproduced",
+          title: "Already reproduced unchecked withdrawal proof",
+          location: "src/Vault.sol:90",
+          severity: "critical",
+          status: "confirmed-executable",
+          confidence: 0.93,
+        },
+      ], "differential");
+      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "pipeline-confirm-run") });
+      store.upsertConfirmDecisions(created.id, confirmRun, [
+        { bug: "prior reproduced withdrawal proof", reproduced: "yes", recommendation: "submit-candidate", members: ["kalreadyreproduced"] },
+      ]);
+      store.finishRun(confirmRun, "done");
+      store.upsertFindings(created.id, runId, [
+        {
           findingKey: "duplicate-suspected-bug",
           title: "Escrow drain is reachable through unchecked withdrawal proof",
           location: "src/Vault.sol:88",
@@ -443,6 +458,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
       body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "confirm" }),
     }));
     assert.ok(confirm.confirmKeys.includes("confirmed-bug"));
+    assert.ok(confirm.confirmKeys.includes("kalreadyreproduced"), "confirm worklist carries prior decided findings as consolidation context");
     assert.ok(confirm.confirmKeys.some((key) => /^origin:\d+:confirmed-bug$/.test(key)), "worklist carries origin selector for verify-artifact recovery");
 
     const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
@@ -1486,7 +1502,20 @@ test("api: project detail summarizes the latest prepare manifest and workspace q
           status: "confirmed-executable",
           confidence: 0.9,
         },
+        {
+          findingKey: "kalreadyreproduced",
+          title: "Prepared source bug already reproduced",
+          location: "src/Target.sol:2",
+          severity: "high",
+          status: "confirmed-executable",
+          confidence: 0.88,
+        },
       ]);
+      const confirmRunId = confirmStore.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "prepared-target-confirm-test"), provider: "openai-codex", model: "gpt-5.5" });
+      confirmStore.upsertConfirmDecisions(created.id, confirmRunId, [
+        { bug: "prior prepared source bug", reproduced: "yes", recommendation: "submit-candidate", members: ["kalreadyreproduced"] },
+      ]);
+      confirmStore.finishRun(confirmRunId, "done");
     } finally {
       confirmStore.close();
     }
@@ -1501,6 +1530,7 @@ test("api: project detail summarizes the latest prepare manifest and workspace q
     assert.equal(confirmSpec.inputRunDir, auditRunDir);
     assert.deepEqual(confirmSpec.inputRunDirs, [auditRunDir]);
     assert.ok(confirmSpec.confirmKeys.includes("confirmed-bug"));
+    assert.ok(confirmSpec.confirmKeys.includes("kalreadyreproduced"), "project confirm carries prior decided findings as consolidation context");
     assert.ok(confirmSpec.confirmKeys.some((key) => /^origin:\d+:confirmed-bug$/.test(key)), "confirm spec carries origin selector for verify-artifact recovery");
   });
 });
