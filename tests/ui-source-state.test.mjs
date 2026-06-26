@@ -18,7 +18,7 @@ async function loadDomainModule() {
   return import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`);
 }
 
-const { projectSourceState } = await loadDomainModule();
+const { phaseState, projectSourceState } = await loadDomainModule();
 
 test("ui: source setup is ready when configured source paths exist", () => {
   assert.deepEqual(projectSourceState(null, ["src"]), { kind: "configured", ok: true });
@@ -38,4 +38,27 @@ test("ui: source setup is ready when prepare produced an audit-ready workspace",
 test("ui: source setup stays missing when prepared workspace is unavailable or not audit-ready", () => {
   assert.deepEqual(projectSourceState({ prepareSummary: { quality: "ready", auditReady: true, workspace: { exists: false } } }, []), { kind: "missing", ok: false });
   assert.deepEqual(projectSourceState({ prepareSummary: { quality: "preparing", auditReady: false, workspace: { exists: true } } }, []), { kind: "missing", ok: false });
+});
+
+test("ui: phase cards count report packages by reproduced decision, not linked findings", () => {
+  const detail = {
+    runs: [],
+    material: {},
+    scopes: [],
+    activeScopeCount: 0,
+    findingsTotal: 3,
+    statusCounts: {},
+    prepareSummary: { realTarget: { requiresConfirmation: true } },
+    allFindings: [
+      { id: 1, finding_key: "kalpha", status: "confirmed-executable", confirm_status: "reproduced", has_report: true },
+      { id: 2, finding_key: "kbeta", status: "confirmed-differential", confirm_status: "reproduced", has_report: true },
+      { id: 3, finding_key: "kgamma", status: "confirmed-differential", confirm_status: null, has_report: false },
+    ],
+    confirmDecisions: [
+      { bug: "same root cause", reproduced: "yes", recommendation: "submit-candidate", members_json: JSON.stringify(["kalpha", "kbeta"]) },
+    ],
+  };
+  const phases = phaseState(detail, { total: 0, audited: 0, deferred: 0, pending: 0 });
+  assert.equal(phases.confirm.stat, "1/1 reproduced · 1 finding waiting");
+  assert.equal(phases.report.stat, "1/1 report ready · 1 submission");
 });

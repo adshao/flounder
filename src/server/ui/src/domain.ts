@@ -70,6 +70,48 @@ export function confirmedDecisions(rows: ConfirmDecision[] | undefined): Confirm
   return (rows ?? []).filter((row) => row.reproduced === "yes");
 }
 
+function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
+  const members = parseJson<unknown[]>(decision.members_json, []);
+  const keys = new Set<string>();
+  const add = (value: string): void => {
+    const key = value.trim().replace(/^\[/, "").replace(/\]$/, "").toLowerCase();
+    if (/^k[0-9a-z]+$/.test(key)) keys.add(key);
+  };
+  for (const member of members) {
+    if (typeof member !== "string") continue;
+    const cleaned = member.trim();
+    add(cleaned);
+    add(cleaned.split(/\s+/)[0] ?? "");
+    const bracketed = cleaned.match(/^\[(k[0-9a-z]+)\]/i)?.[1];
+    if (bracketed) add(bracketed);
+    const embedded = cleaned.match(/\b(k[0-9a-z]+)\b/i)?.[1];
+    if (embedded) add(embedded);
+  }
+  return [...keys];
+}
+
+function reportPackageStats(findings: FindingRow[], decisions: ConfirmDecision[], requiresConfirmation: boolean): { ready: number; total: number; submissions: number } {
+  if (!requiresConfirmation) {
+    const reportable = findings.filter(isExecutionConfirmedFinding);
+    return {
+      ready: reportable.filter((finding) => finding.has_report).length,
+      total: reportable.length,
+      submissions: 0,
+    };
+  }
+  const byKey = new Map(findings.map((finding) => [String(finding.finding_key ?? "").toLowerCase(), finding]));
+  const reproduced = decisions.filter((decision) => decision.reproduced === "yes" && decision.recommendation !== "drop");
+  const ready = reproduced.filter((decision) => {
+    const keys = confirmDecisionMemberKeys(decision);
+    return keys.length > 0 && keys.every((key) => Boolean(byKey.get(key)?.has_report));
+  }).length;
+  return {
+    ready,
+    total: reproduced.length,
+    submissions: reproduced.filter((decision) => decision.recommendation === "submit-candidate").length,
+  };
+}
+
 export function materialRefreshInProgress(material?: ProjectDetail["material"]): boolean {
   return Boolean(material?.activePrepareRefreshStartedAt || material?.currentPrepareStatus === "running");
 }
@@ -324,9 +366,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
     : synthesisStartMs && synthesisEndMs > synthesisStartMs
       ? fmtDur(synthesisEndMs - synthesisStartMs)
       : "";
-  const reportableFindings = findings.filter((finding) => requiresConfirmation ? finding.confirm_status === "reproduced" : isExecutionConfirmedFinding(finding));
-  const formalReports = reportableFindings.filter((finding) => finding.has_report);
-  const submitCandidates = decisions.filter((row) => row.reproduced === "yes" && row.recommendation === "submit-candidate").length;
+  const reportPackages = reportPackageStats(findings, decisions, requiresConfirmation);
 
   return {
     prepare: { status: prep ? prep.status : "none", stat: prep ? (prep.status === "done" ? "Source staged" : prep.status === "running" ? "Preparing source" : prep.status) : "Not started", dur: runDur(prep, prep?.status === "running") },
@@ -391,20 +431,20 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
         : verifyRechecksConfirmed
           ? "Waiting for Verify to finish"
         : decisions.length
-        ? `${repro}/${decisions.length} reproduced${pendingConfirm ? ` · ${pendingConfirm} waiting` : ""}`
+        ? `${repro}/${decisions.length} reproduced${pendingConfirm ? ` · ${pendingConfirm} ${pendingConfirm === 1 ? "finding" : "findings"} waiting` : ""}`
         : pendingConfirm > 0
           ? `${pendingConfirm} waiting for real-target confirmation`
           : "Not started",
       dur: runDur(conf, conf?.status === "running"),
     },
     report: {
-      status: reportRunning ? "running" : formalReports.length > 0 ? (formalReports.length === reportableFindings.length ? "ready" : "partial") : reportableFindings.length > 0 ? "pending" : decisions.length > 0 ? "pending" : "none",
+      status: reportRunning ? "running" : reportPackages.ready > 0 ? (reportPackages.ready === reportPackages.total ? "ready" : "partial") : reportPackages.total > 0 ? "pending" : decisions.length > 0 ? "pending" : "none",
       stat: reportRunning
         ? "Writing formal reports"
-        : formalReports.length > 0
-          ? `${formalReports.length}/${reportableFindings.length} ${reportableFindings.length === 1 ? "report" : "reports"} ready${submitCandidates ? ` · ${submitCandidates} submit` : ""}`
-          : reportableFindings.length > 0
-            ? `${reportableFindings.length} waiting for formal report`
+        : reportPackages.ready > 0
+          ? `${reportPackages.ready}/${reportPackages.total} ${reportPackages.total === 1 ? "report" : "reports"} ready${reportPackages.submissions ? ` · ${reportPackages.submissions} ${reportPackages.submissions === 1 ? "submission" : "submissions"}` : ""}`
+          : reportPackages.total > 0
+            ? `${reportPackages.total} waiting for formal report`
             : decisions.length > 0
               ? "No reproduced bug yet"
               : "Not started",
