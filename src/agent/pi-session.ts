@@ -628,6 +628,8 @@ Use the finding evidence below. Some reports have evidence_mode="real-target-rep
 
 For each missing report, verify the title/root cause/location, attacker capability, impact, reproduction result, and fix/novelty claims against the supplied evidence. When any of those fields is absent or ambiguous, do a targeted source/corpus/artifact inspection before writing. If the inspection still does not establish the detail, keep the report useful by naming the limitation instead of filling it in.
 
+The linked_findings rows are internal evidence inputs only. Do NOT include a "Linked Findings" section, Finding # labels, finding_key values, decision_id, report_key, required_file, or other Flounder-internal identifiers in a maintainer-facing report. Convert linked_findings into source paths, root cause, proof-of-concept details, impact, and fix guidance that the project maintainer can understand without Flounder UI access.
+
 Reports to write:
 ${reportSeed}
 
@@ -650,6 +652,8 @@ If a detail is not established, write that it is not established or list it unde
 Before writing each report, verify these fields against evidence: title/root cause/location, attacker capability, impact, reproduction result, affected version/deployment, recommended fix, and novelty/disclosure state. If any field is missing, stale, or ambiguous in the supplied decision data, use read or bash purpose="inspect" to check the copied source, corpus, PoC files, or artifacts. Use the report to preserve uncertainty: "Not established by the available evidence" is correct when the daemon cannot prove a detail.
 
 Write exactly one Markdown file per requested bug at the specified workspace-root filename. These files are persisted to the product DB and shown to users as the official report. Do not emit done until every required file is written.
+
+The linked_findings rows in the input are internal evidence inputs only. Do NOT include a "Linked Findings" section, Finding # labels, finding_key values, decision_id, report_key, required_file, or other Flounder-internal identifiers in the Markdown. Convert those rows into maintainer-facing technical detail: source paths, affected components, root cause, proof-of-concept notes, impact, and remediation.
 
 Use this template for each file:
 # <clear vulnerability title>

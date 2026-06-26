@@ -3190,6 +3190,19 @@ small {
   color: var(--fg-muted);
 }
 
+.decision-meta-chips {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 6px;
+}
+
+.decision-confidence {
+  color: var(--accent);
+  background: var(--sel-bg);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
 .linked-findings {
   display: flex;
   flex-wrap: wrap;

@@ -2592,37 +2592,89 @@ function renderFindingReportMarkdown(row: Record<string, unknown>, decisions: Ar
   return lines.join("\n").trim();
 }
 
+function uniqueTextValues(rows: Array<Record<string, unknown>>, key: string, limit = 6): string[] {
+  const out: string[] = [];
+  const seen = new Set<string>();
+  for (const row of rows) {
+    const value = stringValue(row[key]).trim();
+    if (!value || seen.has(value)) continue;
+    seen.add(value);
+    out.push(value);
+    if (out.length >= limit) break;
+  }
+  return out;
+}
+
+function pushReportSection(lines: string[], title: string, body: string): void {
+  lines.push(`## ${title}`, "", body.trim() || "Not established by the available evidence.", "");
+}
+
+function pushReportBullets(lines: string[], title: string, bullets: string[]): void {
+  const visible = bullets.map((item) => item.trim()).filter(Boolean);
+  lines.push(`## ${title}`, "");
+  if (visible.length === 0) {
+    lines.push("Not established by the available evidence.", "");
+    return;
+  }
+  for (const item of visible) lines.push(`- ${item}`);
+  lines.push("");
+}
+
 function renderDecisionReportMarkdown(decision: Record<string, unknown>, linkedFindings: Array<Record<string, unknown>>): string {
   const title = stringValue(decision.bug) || "Decision report";
-  const lines = [
-    `# ${title}`,
-    "",
-    "- Submission unit: real-target decision",
-    `- Reproduced: ${stringValue(decision.reproduced) || "unknown"}`,
-    `- Recommendation: ${stringValue(decision.recommendation) || "unknown"}`,
-    stringValue(decision.severity) ? `- Severity: ${stringValue(decision.severity)}` : "",
-    stringValue(decision.evidence_level) ? `- Evidence level: ${stringValue(decision.evidence_level)}` : "",
-    stringValue(decision.submission_confidence) ? `- Submission confidence: ${stringValue(decision.submission_confidence)}` : "",
-    stringValue(decision.repro_command_id) ? `- Command evidence: \`${stringValue(decision.repro_command_id)}\`` : "",
-    "",
-  ].filter(Boolean);
+  const reproduced = stringValue(decision.reproduced) || "unknown";
+  const recommendation = stringValue(decision.recommendation) || "unknown";
+  const severity = stringValue(decision.severity);
+  const evidenceLevel = stringValue(decision.evidence_level);
+  const confidence = stringValue(decision.submission_confidence);
+  const commandId = stringValue(decision.repro_command_id);
   const evidence = stringValue(decision.repro_evidence);
   const fix = stringValue(decision.distinct_fix);
   const corroboration = stringValue(decision.corroboration);
   const novelty = stringValue(decision.novelty);
   const humanGates = stringValue(decision.human_gates);
-  if (evidence) lines.push("## Reproduction Evidence", "", evidence, "");
-  if (fix) lines.push("## Distinct Fix", "", fix, "");
-  if (linkedFindings.length > 0) {
-    lines.push("## Linked Findings", "");
-    for (const finding of linkedFindings) {
-      lines.push(`- Finding #${finding.id}: ${stringValue(finding.title) || stringValue(finding.finding_key) || "untitled"}`);
-      if (stringValue(finding.location)) lines.push(`  - Location: \`${stringValue(finding.location)}\``);
-      if (stringValue(finding.severity)) lines.push(`  - Severity: ${stringValue(finding.severity)}`);
-      if (stringValue(finding.description)) lines.push(`  - Summary: ${stringValue(finding.description)}`);
-    }
-    lines.push("");
-  }
+  const locations = uniqueTextValues(linkedFindings, "location");
+  const descriptions = uniqueTextValues(linkedFindings, "description", 4);
+  const sourceEvidence = uniqueTextValues(linkedFindings, "evidence", 4);
+  const exploitSketches = uniqueTextValues(linkedFindings, "exploit_sketch", 3);
+  const sourceFixes = uniqueTextValues(linkedFindings, "fix", 3);
+
+  const lines: string[] = [
+    `# ${title}`,
+    "",
+  ];
+
+  const summary = descriptions[0]
+    || (evidence ? evidence.split(/\n\s*\n/)[0] : "")
+    || `A real-target confirmation run evaluated "${title}" and recorded reproduction status "${reproduced}" with recommendation "${recommendation}".`;
+  pushReportSection(lines, "Summary", summary);
+  pushReportBullets(lines, "Evidence Basis", [
+    `Reproduction status: ${reproduced}`,
+    `Submit recommendation: ${recommendation}`,
+    evidenceLevel ? `Evidence level: ${evidenceLevel}` : "",
+    commandId ? `Local reproduction command: \`${commandId}\`` : "",
+    locations.length ? `Source locations reviewed: ${locations.map((entry) => `\`${entry}\``).join(", ")}` : "",
+  ]);
+  pushReportBullets(lines, "Severity", [
+    severity ? `Severity: ${severity}` : "",
+    confidence ? `Submission confidence: ${confidence}` : "",
+    evidenceLevel ? `Evidence basis: ${evidenceLevel}` : "",
+  ]);
+  pushReportBullets(lines, "Affected Component", locations.map((entry) => `\`${entry}\``));
+  pushReportSection(lines, "Root Cause", descriptions.join("\n\n"));
+  pushReportSection(lines, "Attack Scenario", exploitSketches.join("\n\n"));
+  pushReportSection(lines, "Impact", evidence || sourceEvidence[0] || "");
+  pushReportSection(lines, "Reproduction Evidence", [
+    commandId ? `Local reproduction command: \`${commandId}\`` : "",
+    evidence,
+  ].filter(Boolean).join("\n\n"));
+  pushReportSection(lines, "Proof of Concept", exploitSketches.join("\n\n") || "Use the local-only reproduction evidence above. Do not broadcast or write to a live network while reproducing.");
+  pushReportSection(lines, "Recommended Fix", [fix, ...sourceFixes].filter(Boolean).join("\n\n"));
+  pushReportSection(lines, "Validation", [
+    "Add a regression test that exercises the affected component and fails without the remediation.",
+    commandId ? `Re-run the local reproduction represented by \`${commandId}\` or an equivalent maintainer-owned local test after applying the fix.` : "Re-run an equivalent maintainer-owned local reproduction after applying the fix.",
+  ].join("\n"));
+  if (sourceEvidence.length > 0) pushReportSection(lines, "Source-Level Technical Detail", sourceEvidence.join("\n\n"));
   if (corroboration || novelty || humanGates) {
     lines.push("## Novelty and Disclosure Notes", "");
     if (corroboration) lines.push(`- Corroboration: ${corroboration}`);

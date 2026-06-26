@@ -2983,8 +2983,42 @@ function recommendationLabel(decision: ConfirmDecision): string {
 function decisionMetaLabel(decision: ConfirmDecision): string {
   return [
     recommendationLabel(decision),
-    decision.severity ? `severity ${decision.severity}` : "",
-    decision.submission_confidence ? `confidence ${decision.submission_confidence}` : "",
+    decision.evidence_level ? decision.evidence_level.replace(/-/g, " ") : "",
+  ].filter(Boolean).join(" · ");
+}
+
+function decisionMetaChips(decision: ConfirmDecision): Array<{ label: string; className: string; title: string }> {
+  const severity = decision.severity?.trim();
+  const confidence = decision.submission_confidence?.trim();
+  return [
+    severity ? { label: severity, className: `severity sev-${severity}`, title: "Decision severity" } : null,
+    confidence ? { label: `confidence ${confidence}`, className: `label decision-confidence confidence-${confidence}`, title: "Submission confidence" } : null,
+  ].filter((entry): entry is { label: string; className: string; title: string } => Boolean(entry));
+}
+
+const DECISION_SEVERITY_RANK: Record<string, number> = { critical: 5, high: 4, medium: 3, low: 2, info: 1 };
+const DECISION_CONFIDENCE_RANK: Record<string, number> = { high: 4, medium: 3, low: 2, unknown: 1 };
+
+function strongestDecisionValue(decisions: ConfirmDecision[], field: "severity" | "submission_confidence", ranks: Record<string, number>): string {
+  let best = "";
+  let bestRank = 0;
+  for (const decision of decisions) {
+    const value = decision[field]?.trim().toLowerCase() ?? "";
+    const rank = ranks[value] ?? 0;
+    if (rank > bestRank) {
+      best = value;
+      bestRank = rank;
+    }
+  }
+  return best;
+}
+
+function decisionCalloutMeta(decisions: ConfirmDecision[]): string {
+  const severity = strongestDecisionValue(decisions, "severity", DECISION_SEVERITY_RANK);
+  const confidence = strongestDecisionValue(decisions, "submission_confidence", DECISION_CONFIDENCE_RANK);
+  return [
+    severity ? `max ${severity}` : "",
+    confidence ? `confidence ${confidence}` : "",
   ].filter(Boolean).join(" · ");
 }
 
@@ -3040,6 +3074,7 @@ function ConfirmDecisionsCard({
         <div className="decision-list">
           {decisions.map((decision) => {
             const linkedFindings = decisionFindings(decision, findings);
+            const metaChips = decisionMetaChips(decision);
             return (
               <div className="decision-row" key={decision.id ?? `${decision.run_id}-${decision.bug}`}>
                 <div className="decision-main">
@@ -3048,6 +3083,13 @@ function ConfirmDecisionsCard({
                   </span>
                   <strong>{decision.bug}</strong>
                   <small>{decisionMetaLabel(decision)}</small>
+                  {metaChips.length ? (
+                    <div className="decision-meta-chips" aria-label="Decision severity and confidence">
+                      {metaChips.map((chip) => (
+                        <span key={`${decision.id}-${chip.label}`} className={chip.className} title={chip.title}>{chip.label}</span>
+                      ))}
+                    </div>
+                  ) : null}
                   {linkedFindings.length ? (
                     <div className="linked-findings" aria-label="Linked findings">
                       {linkedFindings.map((finding) => (
@@ -3074,13 +3116,14 @@ function ConfirmDecisionsCard({
 
 function RealTargetCallout({ decisions, onOpen }: { decisions: ConfirmDecision[]; onOpen: () => void }) {
   const reproduced = decisions.filter((decision) => decision.reproduced === "yes").length;
+  const meta = decisionCalloutMeta(decisions);
   if (!decisions.length) return null;
   return (
     <button className="real-target-callout" type="button" onClick={onOpen}>
       <span className="dot" />
       <span>
         <strong>{plural(reproduced, "real-target reproduction")}</strong>
-        <small>{plural(decisions.length, "decision")} ready. Open final decision reports.</small>
+        <small>{plural(decisions.length, "decision")} ready{meta ? ` · ${meta}` : ""}. Open final decision reports.</small>
       </span>
       <Icon name="arrowright" size={14} />
     </button>

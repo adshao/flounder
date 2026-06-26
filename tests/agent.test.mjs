@@ -286,6 +286,8 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   assert.ok(reportPrompt.includes("## Evidence Basis"), "formal reports should expose the evidence base");
   assert.ok(reportPrompt.includes("source, corpus, PoC files, or artifacts"), "report mode should inspect missing details instead of guessing");
   assert.ok(reportPrompt.includes("If a detail is not established"), "report mode should surface evidence gaps instead of inventing details");
+  assert.ok(reportPrompt.includes('Do NOT include a "Linked Findings" section'), "formal reports should not expose internal linked finding sections");
+  assert.ok(reportPrompt.includes("Finding # labels"), "formal reports should not expose internal finding ids");
 
   assert.ok(AUDIT_CONFIRM_SYSTEM.includes("Do NOT write report_*.md files in CONFIRM mode"), "confirm should not generate formal reports");
   assert.ok(!AUDIT_CONFIRM_SYSTEM.includes("Formal submission reports"), "formal reports belong to the Report phase, not Confirm");
