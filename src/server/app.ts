@@ -3956,7 +3956,7 @@ function resolveCoverage(cfg: Record<string, unknown>, progress?: Coverage, expl
   if (mode === "focused") return { mode, target: 10, maxScopes: cumulativeCoverageLimit(10, progress) };
   if (mode === "standard") return { mode, target: 30, maxScopes: cumulativeCoverageLimit(30, progress) };
   if (mode === "half") return { mode, maxScopes: total > 0 ? Math.max(0, Math.ceil(pending / 2)) : 30 };
-  if (mode === "full") return { mode, maxScopes: total > 0 ? pending : undefined };
+  if (mode === "full") return { mode, maxScopes: total > 0 && pending === 0 ? 0 : undefined };
   if (mode === "custom") return { mode, maxScopes: explicit };
   return { mode, maxScopes: explicit };
 }

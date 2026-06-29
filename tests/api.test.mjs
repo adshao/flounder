@@ -244,6 +244,57 @@ test("api: standard coverage fills the project up to 30 audited scopes instead o
   });
 });
 
+test("api: full coverage continues prepared pending inventory without a scope cap", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", {
+      name: "full-prepared-unbounded",
+      config: { prepareClue: "official source clue" },
+    }));
+    const runDir = path.join(out, "full-prepared-unbounded-prepare");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(workspace, { recursive: true });
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        clue: "official source clue",
+        posture: "blind",
+        real_target: {
+          requires_confirmation: false,
+          mode: "source-only",
+          ground_truth: [],
+          confirm_guidance: { required: false, not_required_reason: "source-only fixture" },
+        },
+        components: [],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir });
+      store.finishRun(prepareRun, "done");
+      store.upsertScopes(created.id, [
+        ...Array.from({ length: 20 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 10 - i })),
+        ...Array.from({ length: 20 }, (_, i) => ({ scopeId: `pending-${i}`, title: `Pending ${i}`, status: "pending", score: 20 - i })),
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run" }));
+    assert.equal(launched.queued, true);
+    const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
+    const spec = JSON.parse(job.spec_json);
+
+    assert.equal(spec.pipeline, true);
+    assert.equal(spec.coverageMode, "full");
+    assert.equal(spec.maxScopes, undefined);
+    assert.deepEqual(spec.sourcePaths, [workspace]);
+    assert.equal(spec.buildRoot, workspace);
+  });
+});
+
 test("api: standard coverage lets pipeline continue after 30 audited scopes but still allows explicit scopes", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
