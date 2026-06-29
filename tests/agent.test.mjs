@@ -186,8 +186,8 @@ test("readScratchScopes accepts scope/spec/value/input map schema", () => {
   assert.equal(scopes.length, 2);
   assert.equal(scopes[0].id, "S-crit");
   assert.equal(scopes[0].obligation, "Spec: The proof input must bind the committed root. Value at risk: Invalid proofs could release escrowed funds. Inputs/trust boundary: Proof bytes, public input, committed root.");
-  assert.equal(scopes[0].score, 10);
-  assert.equal(scopes[1].score, 2);
+  assert.equal(scopes[0].score, 100);
+  assert.equal(scopes[1].score, 20);
 });
 
 test("prepare checkpoint guard blocks optional work after source is staged but manifest components are empty", () => {
@@ -243,6 +243,7 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
     assert.ok(prompt.includes("not completion") || prompt.includes("final completeness pass"), "map prompt should treat early scopes.json writes as checkpoints");
     assert.ok(prompt.includes("expansion pass") || prompt.includes("final completeness pass"), "map prompt should require a final expansion pass before done");
     assert.ok(prompt.includes("complete binding chain"), "map prompt should require value-binding scopes to cover producer, enforcement, and consumer lines");
+    assert.ok(prompt.includes("0-100"), "map prompt should use a 100-point scope score scale");
   }
 
   const deepPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", deep: true });

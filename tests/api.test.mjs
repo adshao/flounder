@@ -2397,7 +2397,7 @@ test("api: project detail previews live scope checkpoints before daemon ingest",
     assert.equal(detailS1.region, "src/A.sol:1-40");
     assert.equal(detailS3.title, "Verifier public input binding");
     assert.equal(detailS3.obligation, "Spec: The proof input must bind the committed root. Value at risk: Invalid proofs could release escrowed funds. Inputs/trust boundary: Proof bytes, public input, committed root.");
-    assert.equal(detailS3.score, 10);
+    assert.equal(detailS3.score, 100);
 
     const scopes = await json(await fetch(base + projectPath + "/scopes"));
     assert.deepEqual(scopes.progress, detail.progress);

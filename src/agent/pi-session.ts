@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { LlmClient } from "../types.js";
-import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, MAP_GRANULARITY_RULES, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
+import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, MAP_GRANULARITY_RULES, MAP_SCORING_RULES, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
 import { describeAction, readScratchScopes, scratchHasFindings, type AgentTool, type ToolContext } from "./tools.js";
 import { flounderAgentDir } from "../provider-auth.js";
 
@@ -475,7 +475,7 @@ export function mapCheckpointDirective(
   const message = [
     "blocked: MAP CHECKPOINT REQUIRED.",
     "scopes.json is still missing or empty after the early mapping window.",
-    "Your next action must write scopes.json at the workspace root using the stable array schema: [{\"id\",\"obligation\",\"region\",\"lenses\",\"exposure\",\"difficulty\",\"score\",\"why\"}].",
+    "Your next action must write scopes.json at the workspace root using the stable array schema: [{\"id\",\"obligation\",\"region\",\"lenses\",\"exposure\",\"difficulty\",\"score\",\"why\"}], with score as an integer 0-100 ordering signal.",
     "Write the broad inventory you have so far; it is a checkpoint, not completion. You can rewrite the full array later as you expand coverage.",
     "Do not read, grep, or run more inspection commands until this checkpoint exists.",
   ].join(" ");
@@ -623,7 +623,7 @@ ${MAP_GRANULARITY_RULES}`
         : "Begin the audit. When you have investigated thoroughly, write findings.json with only actionable suspected/confirmed bugs (or [] if none), then stop."}`;
 }
 
-const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering every concrete scope you identified under the three general lenses: spec conditions, value/asset flow, and trusted-but-unbound inputs. If a scope covers multiple independent gates, proof boundaries, invariants, or attacker-controlled inputs, split it before writing. Partial but broad beats empty; do not collapse the inventory into a shortlist or a 30-scope dig batch. After writing, emit {"done": true}. Output only the write tool call.`;
+const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering every concrete scope you identified under the three general lenses: spec conditions, value/asset flow, and trusted-but-unbound inputs. Score each scope with an integer 0-100 ordering signal; use the full scale to distinguish similarly exposed scopes and do NOT compress into 0-10. If a scope covers multiple independent gates, proof boundaries, invariants, or attacker-controlled inputs, split it before writing. Partial but broad beats empty; do not collapse the inventory into a shortlist or a 30-scope dig batch. After writing, emit {"done": true}. Output only the write tool call.`;
 
 export const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis and command results you have already produced, WRITE findings.json now at the workspace root as your very next action — call the write tool once with ONLY actionable findings: UNMET obligations, concrete suspected bugs, and confirmed bugs that cite an already-passing purpose=confirm command_id. Do NOT include discharged/safe/no-issue obligations, ranked shortlist notes, or obligation ledgers. If you found no actionable bug, write [] exactly. Do NOT invent a confirmation and DO NOT mark anything confirmed by assertion. After writing, emit {"done": true}. Output only the write tool call.`;
 
@@ -804,7 +804,9 @@ Apply THREE lenses (general method, not a hint about this target); be exhaustive
 2. VALUE / ASSET FLOW — every place value or authority is created, destroyed, transferred, or authorized, and the gate on each. Count/length/index values that decide how many asset, message, state-transition, or proof/public-input records are processed are their own scopes; each must be bound to the same legitimate authority, commitment, or proof statement as the records it gates.
 3. TRUSTED-BUT-UNBOUND INPUTS — every attacker-controlled value (witnessed/decoded/assigned/external) later logic trusts; the scope is "what binds this to its required value?". A trusted value with no visible binding is the highest-value scope.
 
-Do not judge importance by gut feel or "looks like a bug". A region whose link to the asset is indirect (e.g. a key/address-integrity check that only matters because breaking it enables a later double-spend) MUST still be listed — those are exactly what a rank-and-pick misses. Assign each scope: exposure (critical|high|medium|low, by asset at risk), difficulty (high|medium|low, how hard to be sure it is correct), score (0-10, only to order the dig phase; low score defers, never drops).
+Do not judge importance by gut feel or "looks like a bug". A region whose link to the asset is indirect (e.g. a key/address-integrity check that only matters because breaking it enables a later double-spend) MUST still be listed — those are exactly what a rank-and-pick misses.
+
+${MAP_SCORING_RULES}
 
 ${MAP_GRANULARITY_RULES}
 

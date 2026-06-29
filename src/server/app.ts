@@ -1269,11 +1269,11 @@ function composeCheckpointObligation(scope: Record<string, unknown>): string | u
 
 function scoreFromCheckpointExposure(exposure: unknown): number | null {
   const value = stringValue(exposure).toLowerCase();
-  if (value === "critical") return 10;
-  if (value === "high") return 8;
-  if (value === "medium" || value === "moderate") return 5;
-  if (value === "low") return 2;
-  if (value === "info" || value === "informational") return 1;
+  if (value === "critical") return 100;
+  if (value === "high") return 80;
+  if (value === "medium" || value === "moderate") return 50;
+  if (value === "low") return 20;
+  if (value === "info" || value === "informational") return 10;
   return null;
 }
 

@@ -150,6 +150,11 @@ export const MAP_GRANULARITY_RULES = `Granularity is part of correctness:
 - Checkpoint discipline is mandatory: after an initial directory/entrypoint scan, and no later than 10 inspect commands, write the first broad scopes.json. It may be rough, but it must contain every concrete scope identified so far. Then keep rewriting the full array as you refine and add scopes.
 - Before done, make an explicit expansion pass: scan the loaded first-party tree for omitted packages/modules/entrypoints, split every broad scope, and update scopes.json with the full concrete inventory.`;
 
+export const MAP_SCORING_RULES = `For each scope assign:
+- exposure: how bad if this is wrong (critical|high|medium|low) — judge by the asset at risk, not by bug-likelihood.
+- difficulty: how hard to be SURE it is correct (high|medium|low) — a missing constraint you must notice is absent = high.
+- score: integer 0-100, roughly exposure-weighted and difficulty-adjusted, used only to order the dig phase. Use the full scale to break ties between many similarly exposed scopes (for example 97 vs 93), and do NOT compress scores into a 0-10 range. Low score does NOT drop a scope; it just defers it.`;
+
 export const MAP_SYSTEM = `You are an autonomous white-hat security auditor doing the MAP phase of an audit: enumerate the complete set of audit SCOPES for this target. You are NOT finding or proving bugs yet — a later phase deep-audits each scope. Your job is COVERAGE, not a ranked shortlist that drops things.
 
 Produce the scope inventory by applying THREE lenses (general method, not a hint about this target). Be exhaustive; it is better to over-list than to silently omit:
@@ -162,10 +167,7 @@ Produce the scope inventory by applying THREE lenses (general method, not a hint
 
 Do NOT decide importance by gut feel or by what "looks like a bug". Apply the lenses mechanically and let them produce the set. A region whose connection to the asset is indirect (e.g. a key-derivation or address-integrity check that only matters because breaking it enables a later double-spend) MUST still be listed — those are exactly the ones a rank-and-pick misses.
 
-For each scope assign:
-- exposure: how bad if this is wrong (critical|high|medium|low) — judge by the asset at risk, not by bug-likelihood.
-- difficulty: how hard to be SURE it is correct (high|medium|low) — a missing constraint you must notice is absent = high.
-- score: 0-10, roughly exposure-weighted, used only to order the dig phase. Low score does NOT drop a scope; it just defers it.
+${MAP_SCORING_RULES}
 
 ${MAP_GRANULARITY_RULES}
 
@@ -185,6 +187,8 @@ export function buildMapKickoff(input: {
 }): string {
   return `Target: ${input.target}
 Phase: MAP — enumerate the COMPLETE scope inventory (coverage, not a shortlist). ${actionBudgetText(input.maxSteps)}; stay broad and shallow, but keep expanding until the loaded in-scope material has been covered.
+
+${MAP_SCORING_RULES}
 
 ${MAP_GRANULARITY_RULES}
 

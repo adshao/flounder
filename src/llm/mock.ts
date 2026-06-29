@@ -51,7 +51,7 @@ function auditActionFor(user: string): string {
             lenses: ["unbound-input"],
             exposure: "critical",
             difficulty: "high",
-            score: 9,
+            score: 95,
             why: "assign_advice writes a prover-controlled value that downstream checks trust, with no visible equality edge.",
           },
           {
@@ -61,7 +61,7 @@ function auditActionFor(user: string): string {
             lenses: ["unbound-input"],
             exposure: "high",
             difficulty: "medium",
-            score: 7,
+            score: 76,
             why: "a second enumerated scope so coverage spans more than one dig batch.",
           },
         ]),

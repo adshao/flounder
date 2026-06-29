@@ -121,7 +121,7 @@ export async function runAuditLoop(input: {
       remaining > finalizeThreshold
         ? ""
         : input.map
-          ? "\nBUDGET LOW — write scopes.json NOW with the COMPLETE scope inventory you have so far (each with id, obligation, region, score), then emit done. Unrecorded scopes are lost."
+          ? "\nBUDGET LOW — write scopes.json NOW with the COMPLETE scope inventory you have so far (each with id, obligation, region, score as integer 0-100), then emit done. Unrecorded scopes are lost."
           : input.deep
             ? "\nBUDGET LOW — make sure findings.json records EVERY obligation and its status (discharged-with-line / UNMET / uncertain). Keep working through the remaining obligations; an UNMET obligation with its exact missing edge is a finding. Unrecorded obligations are lost."
             : "\nALMOST OUT OF STEPS — do not open new investigations. Write findings.json NOW with any confirmed findings AND your best unconfirmed hypotheses (each with location and why it is suspected), then emit done. Unrecorded hypotheses are lost.";

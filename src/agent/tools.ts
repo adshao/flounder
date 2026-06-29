@@ -788,11 +788,11 @@ function composeScopeObligation(row: Record<string, unknown>): string | undefine
 
 function scoreFromExposure(exposure: string | undefined): number {
   const value = (exposure ?? "").trim().toLowerCase();
-  if (value === "critical") return 10;
-  if (value === "high") return 8;
-  if (value === "medium" || value === "moderate") return 5;
-  if (value === "low") return 2;
-  if (value === "info" || value === "informational") return 1;
+  if (value === "critical") return 100;
+  if (value === "high") return 80;
+  if (value === "medium" || value === "moderate") return 50;
+  if (value === "low") return 20;
+  if (value === "info" || value === "informational") return 10;
   return 0;
 }
 
