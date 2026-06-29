@@ -836,11 +836,21 @@ test("api: run launch does not reuse killed prepared workspace", async () => {
     const spec = JSON.parse(job.spec_json);
 
     assert.equal(spec.pipeline, true);
-    assert.equal(spec.coverageMode, "full");
-    assert.equal(spec.maxScopes, undefined);
+    assert.equal(spec.coverageMode, "standard");
+    assert.equal(spec.coverageTarget, 30);
+    assert.equal(spec.maxScopes, 30);
     assert.deepEqual(spec.sourcePaths, []);
     assert.equal(spec.buildRoot, undefined);
     assert.equal(spec.clue, "fresh official source clue");
+
+    const fullLaunch = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run", scopeCoverageMode: "full" }));
+    assert.equal(fullLaunch.queued, true);
+    const fullJob = (await json(await fetch(base + "/api/jobs/" + fullLaunch.jobId))).job;
+    const fullSpec = JSON.parse(fullJob.spec_json);
+    assert.equal(fullSpec.pipeline, true);
+    assert.equal(fullSpec.coverageMode, "full");
+    assert.equal(fullSpec.maxScopes, undefined);
+    assert.deepEqual(fullSpec.sourcePaths, []);
   });
 });
 

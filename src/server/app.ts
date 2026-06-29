@@ -1956,8 +1956,8 @@ async function runLaunch(c: Ctx): Promise<void> {
       spec.buildRoot = prepared.workspaceDir;
       spec.clue = undefined;
       if (!spec.scopeNote && prepared.scopeNote) spec.scopeNote = prepared.scopeNote;
-    } else if (spec.clue && spec.coverageMode === "full") {
-      spec.maxScopes = undefined;
+    } else if (spec.clue && spec.sourcePaths.length === 0) {
+      resetPipelineCoverageForUnknownInventory(spec);
     }
   } else if (spec.verb === "prepare") {
     applyProjectPrepareDefaults(spec, project, runs);
@@ -2048,6 +2048,22 @@ function applyProjectPrepareDefaults(spec: LaunchSpec, project: Record<string, u
     spec.posture = stringValue(previousPrepare?.posture) || "blind";
   }
   if (spec.matchDeployed === undefined) spec.matchDeployed = true;
+}
+
+function resetPipelineCoverageForUnknownInventory(spec: LaunchSpec): void {
+  if (spec.coverageMode === "focused") {
+    spec.coverageTarget = 10;
+    spec.maxScopes = 10;
+  } else if (spec.coverageMode === "standard") {
+    spec.coverageTarget = 30;
+    spec.maxScopes = 30;
+  } else if (spec.coverageMode === "half") {
+    spec.coverageTarget = undefined;
+    spec.maxScopes = 30;
+  } else if (spec.coverageMode === "full") {
+    spec.coverageTarget = undefined;
+    spec.maxScopes = undefined;
+  }
 }
 
 function selectedFindingIds(body: Record<string, unknown>): number[] {
