@@ -98,8 +98,8 @@ const READ_WATERMARK_LIMIT = 300;
 const SETUP_READ_WATERMARKS_KEY = "flounder-setup-read-watermarks";
 const ACTIVITY_READ_WATERMARKS_KEY = "flounder-activity-read-watermarks";
 const COVERAGE_MODES = [
-  { value: "full", label: "Full - finish every pending scope" },
   { value: "standard", label: "Standard - until 30 audited scopes" },
+  { value: "full", label: "Full - finish every pending scope" },
   { value: "half", label: "Half - finish half of pending scopes" },
   { value: "focused", label: "Focused - until 10 audited scopes" },
   { value: "custom", label: "Custom per-run cap" },
@@ -641,7 +641,7 @@ function coverageModeFromConfig(cfg: { scopeCoverageMode?: string; maxScopes?: n
   if (cfg.scopeCoverageMode && COVERAGE_MODES.some((mode) => mode.value === cfg.scopeCoverageMode)) return cfg.scopeCoverageMode as CoverageMode;
   if (cfg.maxScopes === 10) return "focused";
   if (cfg.maxScopes === 30) return "standard";
-  if (cfg.maxScopes == null) return "full";
+  if (cfg.maxScopes == null) return "standard";
   return "custom";
 }
 
@@ -4954,7 +4954,7 @@ function NewProjectModal({ providers, daemons, onClose, onCreated, onError }: { 
   const [advanced, setAdvanced] = useState(false);
   const [phaseOpen, setPhaseOpen] = useState(false);
   const firstDaemon = daemons.find((daemon) => daemonHealth(daemon) === "online") ?? daemons[0];
-  const [form, setForm] = useState({ intent: "", name: "", runAfterCreate: true, daemonId: firstDaemon?.id ? String(firstDaemon.id) : "", providerId: defaultProjectProviderId(providers), dir: "", sourcePaths: ".", buildRoot: ".", corpusPaths: "docs/specs", coverageMode: "full" as CoverageMode, maxScopes: "30", digSamples: "1", mapSteps: "", digSteps: "", digConcurrency: "1" });
+  const [form, setForm] = useState({ intent: "", name: "", runAfterCreate: true, daemonId: firstDaemon?.id ? String(firstDaemon.id) : "", providerId: defaultProjectProviderId(providers), dir: "", sourcePaths: ".", buildRoot: ".", corpusPaths: "docs/specs", coverageMode: "standard" as CoverageMode, maxScopes: "30", digSamples: "1", mapSteps: "", digSteps: "", digConcurrency: "1" });
   const [phaseProviders, setPhaseProviders] = useState<PhaseProviderForm>({ prepare: "", map: "", dig: "", confirm: "" });
   const providerMissing = providers.length === 0;
   const daemonMissing = daemons.length === 0;

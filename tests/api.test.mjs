@@ -163,7 +163,7 @@ test("api: project list supports archive, unarchive, pin, and manual order", asy
   });
 });
 
-test("api: project run defaults leave map/dig turns and scope selection unbounded", async () => {
+test("api: project run defaults leave map/dig turns unbounded and use standard scope coverage", async () => {
   await withServer(async (base) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -179,8 +179,9 @@ test("api: project run defaults leave map/dig turns and scope selection unbounde
 
     assert.equal(spec.pipeline, true);
     assert.equal(spec.clue, "default-run-budget");
-    assert.equal(spec.coverageMode, "full");
-    assert.equal(spec.maxScopes, undefined);
+    assert.equal(spec.coverageMode, "standard");
+    assert.equal(spec.coverageTarget, 30);
+    assert.equal(spec.maxScopes, 30);
     assert.equal(spec.mapSteps, undefined);
     assert.equal(spec.digSteps, undefined);
     assert.equal(spec.maxSteps, undefined);
@@ -250,7 +251,7 @@ test("api: full coverage continues prepared pending inventory without a scope ca
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
     const created = await json(await post("/api/projects", {
       name: "full-prepared-unbounded",
-      config: { prepareClue: "official source clue" },
+      config: { prepareClue: "official source clue", scopeCoverageMode: "full" },
     }));
     const runDir = path.join(out, "full-prepared-unbounded-prepare");
     const workspace = path.join(runDir, "prepare", "workspace");

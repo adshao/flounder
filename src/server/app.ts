@@ -223,7 +223,7 @@ const ROUTES: Route[] = [
       sourcePaths: "string[] — code paths relative to dir",
       buildRoot: "string? — buildable root relative to dir",
       corpusPaths: "string[]? — specs/docs relative to dir",
-      config: "object? — { prepareClue, projectIntent, phaseProviders, scopeCoverageMode, maxScopes, mapSteps, digSteps, digSamples, digConcurrency, sandbox... }. Default coverage is full pending coverage; Standard is an explicit cumulative mode that audits until 30 project scopes are done.",
+      config: "object? — { prepareClue, projectIntent, phaseProviders, scopeCoverageMode, maxScopes, mapSteps, digSteps, digSamples, digConcurrency, sandbox... }. Default coverage is Standard: map/dig turns are unbounded, and each run audits enough pending scopes to reach 30 audited project scopes.",
     },
     handler: projectCreate,
   }),
@@ -3965,7 +3965,7 @@ function normalizeCoverageMode(input: unknown, explicit?: number): CoverageMode 
   if (input === "focused" || input === "standard" || input === "half" || input === "full" || input === "custom") return input;
   if (explicit === 10) return "focused";
   if (explicit === 30) return "standard";
-  if (explicit === undefined) return "full";
+  if (explicit === undefined) return "standard";
   return "custom";
 }
 
