@@ -1,6 +1,6 @@
 {
   "name": "flounders",
-  "version": "0.1.1",
+  "version": "0.1.2",
   "description": "Autonomous white-hat security auditor for AI-driven code review, exploit construction, and execution-grounded verification.",
   "type": "module",
   "license": "AGPL-3.0-only",
