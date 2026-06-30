@@ -13,7 +13,7 @@ import { runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
-import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
+import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
 import { runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
@@ -320,6 +320,8 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   }
   assert.ok(AUDIT_SYSTEM.includes("findings.json is not an audit notebook"), "legacy prompt should keep audit notes out of findings");
   assert.ok(AUDIT_DEEP_SYSTEM.includes("Discharged-with-line obligations are useful reasoning, but they are not findings"), "legacy deep prompt should not emit safe obligations as findings");
+  assert.ok(DISCOVERY_BACKLOG_RULES.includes("followup_scopes.json"), "discovery backlog prompt should expose follow-up scope artifacts");
+  assert.ok(DISCOVERY_BACKLOG_RULES.includes("score is an integer 0-100"), "follow-up scope scores should use the same 100-point ordering scale as map scopes");
 
   const sessionPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs" });
   assert.ok(sessionPrompt.includes(POC_TRUST_RULE), "real pi session prompt is missing the shared PoC trust rule");
