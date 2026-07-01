@@ -3005,10 +3005,33 @@ function compactText(value: string, max = 120): string {
 }
 
 function isCleanFirewallIssue(value: string): boolean {
-  const text = value.toLowerCase();
-  return text.includes("no material whose purpose")
-    && text.includes("vulnerability")
-    && text.includes("no vulnerability mechanism");
+  const text = value
+    .replace(/^.*?\banswer firewall is\b/i, "")
+    .trim()
+    .toLowerCase();
+  if (!text) return false;
+  if (text === "clean" || text.startsWith("clean ")) return true;
+  if (hasUnnegatedFirewallInclusion(text)) return false;
+  if (text.includes("blind")) return true;
+  if (/(^|[.;:]\s*)(no|not|never|without)\b[^.;:]*(material|vulnerability|exploit|poc|proof|incident|post-mortem|bug writeup|opened|staged|fetched|copied|included)/.test(text)) return true;
+  return text.includes("not fetched")
+    || text.includes("not staged")
+    || text.includes("not copied")
+    || text.includes("skipped")
+    || text.includes("excluded")
+    || text.includes("removed");
+}
+
+function hasUnnegatedFirewallInclusion(text: string): boolean {
+  return text
+    .split(/[.;]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .some((part) => {
+      if (!part.includes("included")) return false;
+      return !/\b(no|not|never|without)\b[^.;:]*\bincluded\b/.test(part)
+        && !/\bincluded\b[^.;:]*\b(no|not|never|without)\b/.test(part);
+    });
 }
 
 function prepareIssueBuckets(summary: PrepareSummary): { blockingIssues: string[]; caveats: string[] } {

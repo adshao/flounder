@@ -151,6 +151,8 @@ export function analyzeConfirmBashCommandSafety(command: StructuredReproductionC
   }
   const workspaceDecision = analyzeWorkspacePathSafety(args);
   if (workspaceDecision.blocked) return workspaceDecision;
+  const destructiveDecision = analyzeDestructiveFilesystemCommandSafety(program, args);
+  if (destructiveDecision.blocked) return destructiveDecision;
   const rendered = [program, ...args].join(" ");
   const broadcast = findMatch(rendered, CONFIRM_BROADCAST_PATTERNS);
   if (broadcast && targetsNonLocalNetwork(args)) {
@@ -202,6 +204,8 @@ function analyzeStructuredCommandBaseSafety(command: StructuredReproductionComma
       reason: "Blocked by flounder guardrail: reproduction command arguments must be simple argv entries.",
     };
   }
+  const destructiveDecision = analyzeDestructiveFilesystemCommandSafety(program, args);
+  if (destructiveDecision.blocked) return destructiveDecision;
 
   return { blocked: false };
 }
@@ -217,6 +221,30 @@ function analyzeWorkspacePathSafety(args: string[]): CommandSafetyDecision {
       };
     }
   }
+  return { blocked: false };
+}
+
+function analyzeDestructiveFilesystemCommandSafety(program: string, args: string[]): CommandSafetyDecision {
+  const name = program.toLowerCase();
+  const lower = args.map((arg) => arg.toLowerCase());
+  const block = (matchedAction: string): CommandSafetyDecision => ({
+    blocked: true,
+    reason: "Blocked by flounder guardrail: destructive filesystem commands are not allowed in agent bash.",
+    matchedAction,
+  });
+
+  if (["rm", "rmdir", "unlink", "shred"].includes(name)) return block(name);
+  if (name === "find" && lower.some((arg) => ["-delete", "-exec", "-execdir", "-ok", "-okdir"].includes(arg))) {
+    return block("find");
+  }
+  if (name === "sed" && lower.some((arg) => arg === "-i" || arg.startsWith("-i.") || arg === "--in-place" || arg.startsWith("--in-place="))) {
+    return block("sed");
+  }
+  if (name === "git") {
+    if (lower.includes("clean")) return block("git clean");
+    if (lower.includes("reset") && lower.includes("--hard")) return block("git reset --hard");
+  }
+
   return { blocked: false };
 }
 

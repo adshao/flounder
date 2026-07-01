@@ -460,7 +460,39 @@ test("store: confirm decisions persist decision reports without overwriting link
   assert.equal(decision.human_gates, "venue scope still needs human review");
   assert.equal(decision.severity, "high");
   assert.equal(decision.evidence_level, "real-target-reproduced");
-  assert.equal(decision.submission_confidence, "high");
+  assert.equal(decision.submission_confidence, "medium");
   assert.match(decision.report_markdown, /^# Missing verifier binding/);
+  db.close();
+});
+
+test("store: source-level confirm evidence is not promoted to real-target submission confidence", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const auditRun = db.startRun({ projectId, kind: "run", runDir: "/runs/p-audit-1" });
+  db.upsertFindings(projectId, auditRun, [
+    {
+      findingKey: "ksourceonly",
+      title: "Mock-backed source reproduction",
+      severity: "high",
+      status: "confirmed-executable",
+    },
+  ]);
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/p-confirm-1" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [
+    {
+      bug: "Mock-backed source reproduction",
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      members: ["ksourceonly"],
+      reproEvidence: "Forge harness used published source and constrained mocks; this was source-level execution, not a live fork.",
+      humanGates: "Needs current deployment review and bounty eligibility confirmation.",
+    },
+  ]);
+
+  const [decision] = db.listConfirmDecisions(projectId);
+  assert.equal(decision.evidence_level, "source-only-local-confirmed");
+  assert.equal(decision.submission_confidence, "low");
+  const [finding] = db.listFindings(projectId);
+  assert.equal(finding.confirm_status, null);
   db.close();
 });

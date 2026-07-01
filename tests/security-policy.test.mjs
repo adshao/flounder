@@ -53,6 +53,22 @@ test("arbitrary non-build, non-test, non-inspection commands stay blocked", () =
   assert.equal(analyzeAgentBashCommandSafety(cmd("python3", "-c", "print('unchecked script')")).blocked, true);
 });
 
+test("destructive filesystem commands stay blocked even in network-enabled confirm mode", () => {
+  for (const c of [
+    cmd("rm", "-rf", "sources/reserve-protocol-protocol/sources"),
+    cmd("rmdir", "sources/tmp"),
+    cmd("find", "sources", "-delete"),
+    cmd("find", "sources", "-exec", "rm", "-rf", "{}", ";"),
+    cmd("sed", "-i", "s/a/b/g", "contracts/Target.sol"),
+    cmd("git", "-C", "sources/repo", "clean", "-fdx"),
+    cmd("git", "-C", "sources/repo", "reset", "--hard"),
+  ]) {
+    const decision = analyzeConfirmBashCommandSafety(c);
+    assert.equal(decision.blocked, true, `${c.program} ${c.args.join(" ")} must be blocked`);
+    assert.match(decision.reason, /destructive filesystem/i);
+  }
+});
+
 test("agent bash allows readonly tool discovery, version, and local JSON inspection", () => {
   for (const c of [
     cmd("which", "nargo"),

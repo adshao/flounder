@@ -431,19 +431,160 @@ function maxSeverity(values: Array<string | undefined>): string | null {
   return best;
 }
 
-function decisionEvidenceLevel(reproduced?: string): string {
-  if (reproduced === "yes") return "real-target-reproduced";
-  if (reproduced === "no") return "not-reproduced";
-  if (reproduced === "could-not-set-up") return "could-not-set-up";
-  return "unknown";
+const EVIDENCE_LEVEL_RANK: Record<string, number> = {
+  unknown: 0,
+  "could-not-set-up": 1,
+  "not-reproduced": 1,
+  reasoned: 2,
+  "source-supported": 3,
+  "source-only-local-confirmed": 4,
+  "locally-reproduced": 4,
+  "execution-reproduced": 4,
+  "local-fork-reproduced": 5,
+  "fork-reproduced": 5,
+  "real-target-reproduced": 6,
+};
+
+const CONFIDENCE_RANK: Record<string, number> = {
+  unknown: 0,
+  low: 1,
+  medium: 2,
+  high: 3,
+};
+
+function decisionEvidenceText(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): string {
+  return [row.reproEvidence, row.humanGates, row.corroboration, row.novelty].filter(Boolean).join("\n").toLowerCase();
 }
 
-function decisionSubmissionConfidence(reproduced?: string, recommendation?: string): string {
-  if (reproduced === "yes" && recommendation === "submit-candidate") return "high";
-  if (reproduced === "yes" && recommendation === "needs-human") return "medium";
-  if (reproduced === "yes") return "medium";
-  if (reproduced === "no" || recommendation === "drop") return "low";
-  return "unknown";
+function hasSourceOnlyReproductionCrutch(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): boolean {
+  const text = decisionEvidenceText(row);
+  if (!text) return false;
+  return [
+    /\bsource[- ]level\b/,
+    /\bmock(?:ed|s)?\b/,
+    /\bconstrained mock/,
+    /\blocal execution\b/,
+    /\bpublished source\b/,
+    /\bverified deployed source locally\b/,
+    /\bimported (?:the )?(?:verified |published )?.*source\b/,
+    /\bforge (?:test|tests|poc|harness)\b/,
+    /\blocal (?:forge |foundry |hardhat )?harness\b/,
+    /\bharness\b.*\bnot a live\b/,
+    /\bnot a live\b/,
+    /\brather than a live\b/,
+    /\bno live\b/,
+    /\bwithout (?:a )?live\b/,
+    /\bdid not (?:complete|use|fork)\b/,
+    /\blive fork (?:was )?not completed\b/,
+    /\bexact (?:live |production |deployment )?(?:state|liveness).*not (?:confirmed|established)\b/,
+    /\bproduction (?:impact|exposure|severity|configuration).*depends\b/,
+    /\bdeployment liveness is not established\b/,
+  ].some((pattern) => pattern.test(text));
+}
+
+function hasLocalForkReproduction(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): boolean {
+  const text = decisionEvidenceText(row);
+  return /\b(?:local |mainnet |polygon |ethereum |arbitrum |optimism |base |bsc |avalanche )?fork(?:ed)?\b/.test(text)
+    || /\bforked (?:live|mainnet|polygon|ethereum|arbitrum|optimism|base|bsc|avalanche)\b/.test(text);
+}
+
+function hasRealTargetReproduction(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): boolean {
+  const text = decisionEvidenceText(row);
+  return /\breal[- ]target\b/.test(text)
+    || /\breal target effect\b/.test(text)
+    || /\bactual deployed (?:artifact|contract|code|state)\b/.test(text)
+    || /\bcurrent deployment\b/.test(text);
+}
+
+function inferredDecisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "reproEvidence" | "humanGates" | "corroboration" | "novelty">): string {
+  if (row.reproduced === "no") return "not-reproduced";
+  if (row.reproduced === "could-not-set-up") return "could-not-set-up";
+  if (row.reproduced !== "yes") return "unknown";
+  if (hasSourceOnlyReproductionCrutch(row)) return "source-only-local-confirmed";
+  if (hasLocalForkReproduction(row)) return "local-fork-reproduced";
+  if (hasRealTargetReproduction(row)) return "real-target-reproduced";
+  return "real-target-reproduced";
+}
+
+function shouldDowngradeEvidence(stored: string, inferred: string): boolean {
+  const storedRank = EVIDENCE_LEVEL_RANK[stored] ?? 0;
+  const inferredRank = EVIDENCE_LEVEL_RANK[inferred] ?? 0;
+  return inferred === "source-only-local-confirmed" && storedRank > inferredRank;
+}
+
+function decisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "evidenceLevel" | "reproEvidence" | "humanGates" | "corroboration" | "novelty">): string {
+  const inferred = inferredDecisionEvidenceLevel(row);
+  const explicit = row.evidenceLevel?.trim();
+  if (explicit && !shouldDowngradeEvidence(explicit, inferred)) return explicit;
+  return inferred;
+}
+
+function isRealTargetEvidenceLevel(value?: string): boolean {
+  const normalized = String(value ?? "").trim().toLowerCase();
+  return normalized === "real-target-reproduced" || normalized === "fork-reproduced" || normalized === "local-fork-reproduced";
+}
+
+function hasUnsettledSubmissionGate(row: Pick<ConfirmRow, "humanGates">): boolean {
+  const text = String(row.humanGates ?? "").toLowerCase();
+  return /\b(?:scope|venue|eligib|bounty|live|deployment|production|current|human gate|needs?|not established|not confirmed|review)\b/.test(text);
+}
+
+function inferredDecisionSubmissionConfidence(
+  row: Pick<ConfirmRow, "reproduced" | "recommendation" | "humanGates">,
+  evidenceLevel: string,
+): string {
+  if (row.reproduced === "no" || row.recommendation === "drop") return "low";
+  if (row.reproduced === "could-not-set-up") return "low";
+  if (row.reproduced !== "yes") return "unknown";
+  const realTarget = isRealTargetEvidenceLevel(evidenceLevel);
+  if (row.recommendation === "submit-candidate") {
+    if (!realTarget) return "low";
+    return hasUnsettledSubmissionGate(row) ? "medium" : "high";
+  }
+  if (row.recommendation === "needs-human") return realTarget ? "medium" : "low";
+  return realTarget ? "medium" : "low";
+}
+
+function decisionSubmissionConfidence(
+  row: Pick<ConfirmRow, "reproduced" | "recommendation" | "submissionConfidence" | "humanGates">,
+  evidenceLevel: string,
+): string {
+  const inferred = inferredDecisionSubmissionConfidence(row, evidenceLevel);
+  const explicit = row.submissionConfidence?.trim();
+  if (!explicit) return inferred;
+  const explicitRank = CONFIDENCE_RANK[explicit] ?? 0;
+  const inferredRank = CONFIDENCE_RANK[inferred] ?? 0;
+  if (explicitRank > inferredRank && (!isRealTargetEvidenceLevel(evidenceLevel) || hasUnsettledSubmissionGate(row))) return inferred;
+  return explicit;
+}
+
+function decisionConfirmOutcome(row: Pick<ConfirmRow, "reproduced">, evidenceLevel: string): "reproduced" | "not-reproduced" | null {
+  if (row.reproduced === "yes" && isRealTargetEvidenceLevel(evidenceLevel)) return "reproduced";
+  if (row.reproduced === "no") return "not-reproduced";
+  return null;
+}
+
+function decisionEvidenceInput(row: {
+  reproduced?: string | null;
+  recommendation?: string | null;
+  evidence_level?: string | null;
+  submission_confidence?: string | null;
+  repro_evidence?: string | null;
+  human_gates?: string | null;
+  corroboration?: string | null;
+  novelty?: string | null;
+}): ConfirmRow {
+  return {
+    bug: "",
+    reproduced: row.reproduced ?? undefined,
+    recommendation: row.recommendation ?? undefined,
+    evidenceLevel: row.evidence_level ?? undefined,
+    submissionConfidence: row.submission_confidence ?? undefined,
+    reproEvidence: row.repro_evidence ?? undefined,
+    humanGates: row.human_gates ?? undefined,
+    corroboration: row.corroboration ?? undefined,
+    novelty: row.novelty ?? undefined,
+  };
 }
 
 export class MetadataStore {
@@ -544,14 +685,30 @@ export class MetadataStore {
 
   private reconcileConfirmStatuses(): void {
     const rows = this.db
-      .prepare("SELECT project_id, reproduced, members_json FROM confirm_decision WHERE reproduced IN ('yes','no') AND members_json IS NOT NULL")
-      .all() as Array<{ project_id: number; reproduced: string; members_json: string }>;
+      .prepare(
+        `SELECT project_id, reproduced, members_json, evidence_level, repro_evidence, human_gates,
+                corroboration, novelty
+           FROM confirm_decision
+          WHERE reproduced IN ('yes','no') AND members_json IS NOT NULL`,
+      )
+      .all() as Array<{
+        project_id: number;
+        reproduced: string | null;
+        members_json: string;
+        evidence_level: string | null;
+        repro_evidence: string | null;
+        human_gates: string | null;
+        corroboration: string | null;
+        novelty: string | null;
+      }>;
     if (rows.length === 0) return;
     const update = this.db.prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND finding_key = ? AND confirm_status IS NULL");
     for (const row of rows) {
       const members = jsonParseOrNull(row.members_json);
       if (!Array.isArray(members)) continue;
-      const outcome = row.reproduced === "yes" ? "reproduced" : "not-reproduced";
+      const evidenceLevel = decisionEvidenceLevel(decisionEvidenceInput(row));
+      const outcome = decisionConfirmOutcome({ reproduced: row.reproduced ?? undefined }, evidenceLevel);
+      if (!outcome) continue;
       for (const member of members) {
         if (typeof member !== "string") continue;
         for (const key of confirmMemberKeys(member)) update.run(outcome, row.project_id, key);
@@ -571,7 +728,8 @@ export class MetadataStore {
     const rows = this.db
       .prepare(
         `SELECT id, project_id, reproduced, recommendation, members_json, severity,
-                evidence_level, submission_confidence
+                evidence_level, submission_confidence, repro_evidence, corroboration,
+                novelty, human_gates
            FROM confirm_decision`,
       )
       .all() as Array<{
@@ -583,6 +741,10 @@ export class MetadataStore {
         severity: string | null;
         evidence_level: string | null;
         submission_confidence: string | null;
+        repro_evidence: string | null;
+        corroboration: string | null;
+        novelty: string | null;
+        human_gates: string | null;
       }>;
     if (rows.length === 0) return;
 
@@ -603,18 +765,20 @@ export class MetadataStore {
 
     const update = this.db.prepare(
       `UPDATE confirm_decision
-          SET severity = COALESCE(NULLIF(severity, ''), ?),
-              evidence_level = COALESCE(NULLIF(evidence_level, ''), ?),
-              submission_confidence = COALESCE(NULLIF(submission_confidence, ''), ?)
+          SET severity = ?,
+              evidence_level = ?,
+              submission_confidence = ?
         WHERE id = ?`,
     );
     for (const row of rows) {
       const members = parseJsonArray(row.members_json).filter((member): member is string => typeof member === "string");
       const linked = linkedFindingMetadata(findingsByProject.get(row.project_id), members);
+      const input = decisionEvidenceInput(row);
+      const evidenceLevel = decisionEvidenceLevel(input);
       update.run(
-        row.severity?.trim() ? null : maxSeverity(linked.map((entry) => entry.severity)),
-        row.evidence_level?.trim() ? null : decisionEvidenceLevel(row.reproduced ?? undefined),
-        row.submission_confidence?.trim() ? null : decisionSubmissionConfidence(row.reproduced ?? undefined, row.recommendation ?? undefined),
+        row.severity?.trim() || maxSeverity(linked.map((entry) => entry.severity)),
+        evidenceLevel,
+        decisionSubmissionConfidence(input, evidenceLevel),
         row.id,
       );
     }
@@ -1499,6 +1663,8 @@ export class MetadataStore {
       }
       for (const r of rows) {
         const linked = linkedFindingMetadata(findingsByKey, r.members ?? []);
+        const evidenceLevel = decisionEvidenceLevel(r);
+        const submissionConfidence = decisionSubmissionConfidence(r, evidenceLevel);
         stmt.run(
           projectId,
           runId,
@@ -1507,8 +1673,8 @@ export class MetadataStore {
           r.recommendation ?? null,
           jsonOrNull(r.members),
           r.severity ?? maxSeverity(linked.map((entry) => entry.severity)),
-          r.evidenceLevel ?? decisionEvidenceLevel(r.reproduced),
-          r.submissionConfidence ?? decisionSubmissionConfidence(r.reproduced, r.recommendation),
+          evidenceLevel,
+          submissionConfidence,
           r.distinctFix ?? null,
           r.reproEvidence ?? null,
           r.corroboration ?? null,
@@ -1520,7 +1686,7 @@ export class MetadataStore {
           r.decisionPath ?? decisionPath ?? null,
           ts,
         );
-        const outcome = r.reproduced === "yes" ? "reproduced" : r.reproduced === "no" ? "not-reproduced" : null;
+        const outcome = decisionConfirmOutcome(r, evidenceLevel);
         for (const member of r.members ?? []) {
           for (const key of confirmMemberKeys(member)) {
             if (outcome) setConfirm.run(outcome, projectId, key);

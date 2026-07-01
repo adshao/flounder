@@ -96,10 +96,12 @@ test("ui: real-target decisions rank by submit readiness, severity, and confiden
     { id: 3, bug: "critical submit", reproduced: "yes", recommendation: "submit-candidate", severity: "critical", submission_confidence: "medium", evidence_level: "fork-reproduced" },
     { id: 4, bug: "high non-submit reproduced", reproduced: "yes", recommendation: "needs-human", severity: "high", submission_confidence: "high", evidence_level: "fork-reproduced" },
     { id: 5, bug: "critical drop", reproduced: "yes", recommendation: "drop", severity: "critical", submission_confidence: "high", evidence_level: "fork-reproduced" },
+    { id: 6, bug: "source-only submit", reproduced: "yes", recommendation: "submit-candidate", severity: "critical", submission_confidence: "low", evidence_level: "source-only-local-confirmed" },
   ]).map((decision) => decision.bug);
   assert.deepEqual(ordered, [
     "critical submit",
     "medium submit",
+    "source-only submit",
     "high non-submit reproduced",
     "critical human gate",
     "critical drop",

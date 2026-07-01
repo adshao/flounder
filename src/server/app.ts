@@ -1460,7 +1460,7 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
 
   const posture = stringValue(manifest?.posture);
   const answerFirewall = describeAnswerFirewall(manifest?.answer_firewall, posture);
-  if (answerFirewall !== "clean" && answerFirewall !== "not reported" && !answerFirewall.startsWith("clean ")) {
+  if (!isNonBlockingAnswerFirewall(answerFirewall)) {
     issues.push(`answer firewall is ${answerFirewall}`);
   }
   const realTarget = summarizePrepareRealTarget(manifest?.real_target ?? manifest?.realTarget);
@@ -1546,13 +1546,16 @@ function prepareSummaryQuality(input: {
 
 function isBlockingPrepareIssue(issue: string): boolean {
   const raw = issue.toLowerCase();
+  if (raw.includes("answer firewall is")) {
+    const firewall = issue.replace(/^.*?\banswer firewall is\b/i, "").trim();
+    return !isNonBlockingAnswerFirewall(firewall);
+  }
   return raw.includes("prepare_manifest.json has not been written")
     || raw.includes("prepare_manifest.json could not be parsed")
     || raw.includes("prepare_manifest.json is not a json object")
     || raw.includes("manifest lists no components")
     || raw.includes("prepared workspace is empty")
-    || raw.includes("prepare run ended with status")
-    || raw.includes("answer firewall is");
+    || raw.includes("prepare run ended with status");
 }
 
 function summarizePrepareComponent(component: Record<string, unknown>): Record<string, unknown> {
@@ -1834,6 +1837,10 @@ function describeAnswerFirewall(value: unknown, posture = ""): string {
   if (typeof value === "string" && value.trim()) {
     const text = value.trim();
     if (text.toLowerCase() === "clean") return "clean";
+    const notes = splitAnswerFirewallNotes(text);
+    if (notes.length > 1 && notes.every(isCleanFirewallNote)) {
+      return `clean · ${notes.length} guardrail note${notes.length === 1 ? "" : "s"}`;
+    }
     return isCleanFirewallNote(text) ? `clean · ${text}` : text;
   }
   if (Array.isArray(value)) {
@@ -1855,13 +1862,37 @@ function describeAnswerFirewall(value: unknown, posture = ""): string {
   return "not reported";
 }
 
+function splitAnswerFirewallNotes(text: string): string[] {
+  return text.split(";").map((part) => part.trim()).filter(Boolean);
+}
+
+function isNonBlockingAnswerFirewall(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed || trimmed === "not reported") return true;
+  return isCleanFirewallNote(trimmed);
+}
+
 function isCleanFirewallNote(text: string): boolean {
   const lower = text.toLowerCase();
+  if (lower === "clean" || lower.startsWith("clean ")) return true;
+  if (hasUnnegatedAnswerFirewallInclusion(lower)) return false;
   if (lower.includes("blind")) return true;
-  if (lower.includes("included")) return false;
-  if ((lower.includes("not fetched") || lower.includes("not staged") || lower.includes("skipped") || lower.includes("excluded")) && !lower.includes("included")) return true;
-  if ((lower.includes("no material") || lower.includes("no vulnerability") || lower.includes("not copied") || lower.includes("removed")) && !lower.includes("included")) return true;
-  return lower === "clean" || lower.startsWith("clean ");
+  if (/(^|[.;:]\s*)(no|not|never|without)\b[^.;:]*(material|vulnerability|exploit|poc|proof|incident|post-mortem|bug writeup|opened|staged|fetched|copied|included)/.test(lower)) return true;
+  if (lower.includes("not fetched") || lower.includes("not staged") || lower.includes("not copied")) return true;
+  if (lower.includes("skipped") || lower.includes("excluded") || lower.includes("removed")) return true;
+  return false;
+}
+
+function hasUnnegatedAnswerFirewallInclusion(lower: string): boolean {
+  return lower
+    .split(/[.;]\s*/)
+    .map((part) => part.trim())
+    .filter(Boolean)
+    .some((part) => {
+      if (!part.includes("included")) return false;
+      return !/\b(no|not|never|without)\b[^.;:]*\bincluded\b/.test(part)
+        && !/\bincluded\b[^.;:]*\b(no|not|never|without)\b/.test(part);
+    });
 }
 
 function summarizePrepareGaps(value: unknown): string[] {
@@ -2314,11 +2345,11 @@ function decisionReportWorklist(
     const missing = [...selected].filter((id) => !selectedCovered.has(id));
     if (missing.length > 0) {
       const unknown = missing.filter((id) => !findingsById.has(id));
-      const suffix = unknown.length > 0 ? " is not a current finding for this project" : " is not linked to a reproduced, non-dropped real-target decision";
+      const suffix = unknown.length > 0 ? " is not a current finding for this project" : " is not linked to a reproduced, non-dropped decision";
       return { error: `finding ${missing.join(", ")}${suffix}` };
     }
   }
-  if (decisions.length === 0) return { error: "no reproduced real-target decisions are missing submission reports" };
+  if (decisions.length === 0) return { error: "no reproduced decisions are missing submission reports" };
 
   return {
     findings: decisions.map((decision) => {
@@ -2326,14 +2357,15 @@ function decisionReportWorklist(
       const primary = linkedFindings[0];
       const decisionId = Number(decision.id);
       const severity = stringValue(decision.severity) || maxSeverityFromRows(linkedFindings) || undefined;
+      const evidenceLevel = stringValue(decision.evidence_level) || "unknown";
       return {
         unit: "decision",
         decisionId,
         findingId: primary ? Number(primary.id) : undefined,
         findingKey: `decision-${decisionId}`,
         reportKey: `decision-${decisionId}`,
-        evidenceMode: "real-target-reproduced",
-        evidenceLevel: stringValue(decision.evidence_level) || "real-target-reproduced",
+        evidenceMode: isRealTargetDecisionEvidence(evidenceLevel) ? "real-target-reproduced" : "source-only-local-confirmed",
+        evidenceLevel,
         submissionConfidence: stringValue(decision.submission_confidence) || undefined,
         title: stringValue(decision.bug),
         location: primary ? stringValue(primary.location) || undefined : undefined,
@@ -2364,6 +2396,11 @@ function decisionLinkedFindingRows(decision: Record<string, unknown>, findingsBy
     out.push(row);
   }
   return out;
+}
+
+function isRealTargetDecisionEvidence(value: string): boolean {
+  const normalized = value.trim().toLowerCase();
+  return normalized === "real-target-reproduced" || normalized === "fork-reproduced" || normalized === "local-fork-reproduced";
 }
 
 function maxSeverityFromRows(rows: Array<Record<string, unknown>>): string | undefined {
@@ -2776,9 +2813,10 @@ function renderDecisionReportMarkdown(decision: Record<string, unknown>, linkedF
     "",
   ];
 
+  const confirmationNoun = isRealTargetDecisionEvidence(evidenceLevel) ? "real-target confirmation run" : "confirmation run";
   const summary = descriptions[0]
     || (evidence ? evidence.split(/\n\s*\n/)[0] : "")
-    || `A real-target confirmation run evaluated "${title}" and recorded reproduction status "${reproduced}" with recommendation "${recommendation}".`;
+    || `A ${confirmationNoun} evaluated "${title}" and recorded reproduction status "${reproduced}" with recommendation "${recommendation}".`;
   pushReportSection(lines, "Summary", summary);
   pushReportBullets(lines, "Evidence Basis", [
     `Reproduction status: ${reproduced}`,

@@ -2321,6 +2321,135 @@ test("api: clean prepare firewall notes and optional material gaps do not block 
   });
 });
 
+test("api: clean answer-firewall exclusion notes with negated included wording do not block audits", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "reserve-style-clean-firewall" }));
+    const runDir = path.join(out, "reserve-style-clean-firewall-prepare");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(path.join(workspace, "sources", "reserve"), { recursive: true });
+    await writeFile(path.join(workspace, "sources", "reserve", "README.md"), "official staged source\n");
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "partial",
+        posture: "blind",
+        scope_declaration: "Public bounty target source and official materials only.",
+        answer_firewall: [
+          "Blind posture honored: no third-party exploit PoCs or target-specific bug writeups were opened or staged.",
+          "A generic Immunefi writeups-list search result appeared but was not fetched.",
+          "No vulnerability hypotheses, exploit mechanisms, or security conclusions are included.",
+        ],
+        real_target: {
+          requires_confirmation: false,
+          mode: "source-only",
+          reason: "Fixture keeps real-target confirmation out of scope.",
+          ground_truth: [],
+          confirm_guidance: {
+            required: false,
+            allowed_network_actions: "none",
+            recommended_method: "Run local source-level checks against staged source.",
+            not_required_reason: "No deployed target is in scope for this fixture.",
+          },
+        },
+        components: [
+          {
+            identity: "reserve/source",
+            platform: "github",
+            revision: "abc123",
+            source: "https://example.invalid/reserve.git",
+            staged_path: "sources/reserve",
+            in_scope: true,
+            match: "n/a",
+          },
+        ],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.equal(detail.prepareSummary.quality, "limited");
+    assert.equal(detail.prepareSummary.auditReady, true);
+    assert.equal(detail.prepareSummary.blocked, false);
+    assert.deepEqual(detail.prepareSummary.blockingIssues, []);
+    assert.deepEqual(detail.prepareSummary.issues, []);
+    assert.equal(detail.prepareSummary.answerFirewall, "clean · 3 guardrail notes");
+  });
+});
+
+test("api: semicolon-joined clean answer-firewall notes do not block audits", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "reserve-style-clean-firewall-string" }));
+    const runDir = path.join(out, "reserve-style-clean-firewall-string-prepare");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(path.join(workspace, "sources", "reserve"), { recursive: true });
+    await writeFile(path.join(workspace, "sources", "reserve", "README.md"), "official staged source\n");
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "partial",
+        posture: "blind",
+        scope_declaration: "Public bounty target source and official materials only.",
+        answer_firewall:
+          "Blind posture honored: no third-party exploit PoCs or target-specific bug writeups were opened or staged.; " +
+          "A generic Immunefi writeups-list search result appeared but was not fetched.; " +
+          "No vulnerability hypotheses, exploit mechanisms, or security conclusions are included.",
+        real_target: {
+          requires_confirmation: false,
+          mode: "source-only",
+          reason: "Fixture keeps real-target confirmation out of scope.",
+          ground_truth: [],
+          confirm_guidance: {
+            required: false,
+            allowed_network_actions: "none",
+            recommended_method: "Run local source-level checks against staged source.",
+            not_required_reason: "No deployed target is in scope for this fixture.",
+          },
+        },
+        components: [
+          {
+            identity: "reserve/source",
+            platform: "github",
+            revision: "abc123",
+            source: "https://example.invalid/reserve.git",
+            staged_path: "sources/reserve",
+            in_scope: true,
+            match: "n/a",
+          },
+        ],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.equal(detail.prepareSummary.quality, "limited");
+    assert.equal(detail.prepareSummary.auditReady, true);
+    assert.equal(detail.prepareSummary.blocked, false);
+    assert.deepEqual(detail.prepareSummary.blockingIssues, []);
+    assert.deepEqual(detail.prepareSummary.issues, []);
+    assert.equal(detail.prepareSummary.answerFirewall, "clean · 3 guardrail notes");
+  });
+});
+
 test("api: blind prepare manifests get a clean answer-firewall fallback", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

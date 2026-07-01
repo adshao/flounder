@@ -138,6 +138,7 @@ const DECISION_EVIDENCE_RANK: Record<string, number> = {
   "local-fork-reproduced": 4,
   "execution-reproduced": 3,
   "locally-reproduced": 3,
+  "source-only-local-confirmed": 3,
   "source-supported": 2,
   "reasoned": 1,
 };
@@ -149,9 +150,11 @@ function rankToken(value?: string | null): string {
 function confirmDecisionPriority(decision: ConfirmDecision): number {
   const recommendation = rankToken(decision.recommendation);
   const reproduced = rankToken(decision.reproduced);
+  const evidenceLevel = rankToken(decision.evidence_level);
+  const realTargetEvidence = evidenceLevel === "real-target-reproduced" || evidenceLevel === "fork-reproduced" || evidenceLevel === "local-fork-reproduced";
   const group = recommendation === "drop"
     ? 0
-    : reproduced === "yes" && recommendation === "submit-candidate"
+    : reproduced === "yes" && recommendation === "submit-candidate" && realTargetEvidence
       ? 5
       : reproduced === "yes"
         ? 4
