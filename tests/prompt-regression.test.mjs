@@ -207,6 +207,20 @@ test("confirm prompt bounds novelty search after reproduction", () => {
   assert.match(AUDIT_CONFIRM_SYSTEM, /do not keep searching/i);
 });
 
+test("confirm prompt makes bounty adjudication platform-neutral and conservative", () => {
+  assert.match(AUDIT_CONFIRM_SYSTEM, /Do not hard-code or assume any bounty platform/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /policy_kind/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /bug_bounty/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /engagement_profile/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /adjudication/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /payout_estimate/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /impact_inventory\.json/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /live exposure/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /write that gate as unknown\/needs-human/i);
+  assert.match(AUDIT_CONFIRM_SYSTEM, /Never invent a collectible bounty/i);
+  assert.doesNotMatch(AUDIT_CONFIRM_SYSTEM, /Immunefi/i);
+});
+
 test("default prompts do not hard-code known-bug answers or local target identifiers", async () => {
   const registry = await loadRegistry();
   const corpus = defaultPromptCorpus();

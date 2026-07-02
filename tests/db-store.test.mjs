@@ -446,6 +446,18 @@ test("store: confirm decisions persist decision reports without overwriting link
       reproCommandId: "cmd_1",
       novelty: "novel",
       humanGates: "venue scope still needs human review",
+      engagementProfile: {
+        policy_kind: "bug_bounty",
+        platform: "custom bounty portal",
+        selected_by: "Official policy page was supplied with the target.",
+      },
+      adjudication: {
+        gates: [
+          { id: "scope", status: "pass", evidence: "Asset is listed in scope." },
+          { id: "live_impact", status: "unknown", evidence: "Live funded exposure was not established." },
+        ],
+        payout_estimate: { status: "unknown", confidence: "low", basis: "Live impact gate is unresolved." },
+      },
       reportMarkdown: "# Missing verifier binding\n\n## Summary\nFormal report.",
     },
   ]);
@@ -458,10 +470,51 @@ test("store: confirm decisions persist decision reports without overwriting link
   assert.equal(decision.repro_command_id, "cmd_1");
   assert.equal(decision.novelty, "novel");
   assert.equal(decision.human_gates, "venue scope still needs human review");
+  assert.equal(JSON.parse(decision.engagement_profile_json).policy_kind, "bug_bounty");
+  assert.equal(JSON.parse(decision.adjudication_json).gates[1].status, "unknown");
   assert.equal(decision.severity, "high");
   assert.equal(decision.evidence_level, "real-target-reproduced");
   assert.equal(decision.submission_confidence, "medium");
   assert.match(decision.report_markdown, /^# Missing verifier binding/);
+  db.close();
+});
+
+test("store: structured adjudication gates keep bounty confidence conservative", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const auditRun = db.startRun({ projectId, kind: "run", runDir: "/runs/p-audit-1" });
+  db.upsertFindings(projectId, auditRun, [
+    {
+      findingKey: "kbounty",
+      title: "Live-funded bounty candidate",
+      severity: "critical",
+      status: "confirmed-executable",
+    },
+  ]);
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/p-confirm-1" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [
+    {
+      bug: "Live-funded bounty candidate",
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      members: ["kbounty"],
+      reproEvidence: "purpose=confirm command cmd_2 reproduced the real target effect on a local fork of the current deployment",
+      reproCommandId: "cmd_2",
+      novelty: "novel",
+      engagementProfile: { policy_kind: "bug_bounty", confidence: "medium" },
+      adjudication: {
+        gates: [
+          { id: "scope", status: "pass", evidence: "Listed asset." },
+          { id: "live_impact", status: "needs-human", evidence: "Funds at risk still need exact on-chain sizing." },
+        ],
+        payout_estimate: { status: "unknown", basis: "Do not estimate until live impact is sized." },
+      },
+    },
+  ]);
+
+  const [decision] = db.listConfirmDecisions(projectId);
+  assert.equal(decision.evidence_level, "local-fork-reproduced");
+  assert.equal(decision.submission_confidence, "medium");
   db.close();
 });
 

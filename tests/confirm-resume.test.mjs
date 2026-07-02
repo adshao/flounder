@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
+import { enforceBountySubmitReadiness, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
 import { publicPath } from "../dist/util/paths.js";
 
 // `flounder confirm` auto-resumes a prior interrupted confirm of the same input run: it finds
@@ -73,4 +73,54 @@ test("confirm resume: aggregate input carries settled rows from prior subset con
 
   const settled = await loadSettledFromPriorConfirm(out, "tgt", inputA, path.join(out, "tgt-confirm-cur"), [inputA, inputB]);
   assert.deepEqual(settled.map((r) => r.bug).sort(), ["Bug A newer", "Bug B"]);
+});
+
+test("confirm bounty submit readiness requires impact inventory and closed gates", () => {
+  const base = {
+    bug: "Pool drain",
+    members: ["kpool"],
+    reproduced: "yes",
+    recommendation: "submit-candidate",
+    humanGates: "",
+    engagementProfile: {
+      policy_kind: "bug_bounty",
+      required_gates: ["scope", "live_impact", "known_issue", "payout"],
+    },
+    adjudication: {
+      scope_status: "pass",
+      live_impact_status: "pass",
+      known_issue_status: "novel",
+      payout_estimate: { status: "estimated", basis: "Program tier plus inventory evidence." },
+    },
+  };
+
+  const noInventory = enforceBountySubmitReadiness([base]);
+  assert.equal(noInventory[0].recommendation, "needs-human");
+  assert.match(noInventory[0].humanGates, /impact_inventory\.json/);
+
+  const openLiveGate = enforceBountySubmitReadiness([
+    {
+      ...base,
+      adjudication: {
+        ...base.adjudication,
+        live_impact_status: "unknown",
+      },
+    },
+  ], { impactInventory: { items: [{ bug: "Pool drain", members: ["kpool"], status: "funded" }] } });
+  assert.equal(openLiveGate[0].recommendation, "needs-human");
+  assert.match(openLiveGate[0].humanGates, /live_impact gate/);
+
+  const ready = enforceBountySubmitReadiness([base], {
+    impactInventory: {
+      items: [
+        {
+          bug: "Pool drain",
+          members: ["kpool"],
+          status: "funded",
+          affected_deployments: [{ network: "chain", address: "0x1", is_live: true, is_funded: true, funds_at_risk_usd: "100000" }],
+        },
+      ],
+    },
+  });
+  assert.equal(ready[0].recommendation, "submit-candidate");
 });

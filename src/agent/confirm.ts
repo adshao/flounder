@@ -2,7 +2,6 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { AuditorConfig } from "../config.js";
-import { loadSource } from "../ingest/source.js";
 import { listWorkspaceFiles, normalizeRelativePath, prepareSandboxWorkspace, writeSandboxFiles, type SandboxWorkspace } from "../security/sandbox.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { writeLastRunPointer } from "../trace/last-run.js";
@@ -36,6 +35,10 @@ interface ConfirmProvenance {
   frozenAt: string;
   frozenFiles: Array<{ path: string; sha256: string; bytes: number }>;
 }
+
+type ConfirmStructuredValue = Record<string, unknown> | unknown[];
+
+export const IMPACT_INVENTORY_FILE = "impact_inventory.json";
 
 export async function runConfirm(
   cfg: AuditorConfig,
@@ -145,20 +148,20 @@ export async function runConfirm(
 
   // 3. Workspace: copy the build root (reproducible) and the FROZEN report + per-finding
   // disclosures as corpus, so the model can read each finding's claimed exploit/fix.
-  const source = await loadSource(confirmCfg.sourcePaths);
-  if (source.length === 0) throw new Error("flounder confirm requires at least one readable source file (use --source)");
   const workspaceRoots = confirmCfg.buildRoot ? [confirmCfg.buildRoot] : confirmCfg.sourcePaths;
   const workspace = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, "confirm/workspace");
+  const baselineFiles = await listWorkspaceFiles(workspace.absolute);
+  if (baselineFiles.size === 0) throw new Error("flounder confirm requires at least one readable source file (use --source)");
   const frozenDocs = (await Promise.all(runDirs.map((dir) => loadFrozenReportDocs(dir)))).flat();
   const corpusManifest = await copyDocsIntoWorkspace(workspace, frozenDocs);
 
   const session: AgentSession = newSession();
   session.workspace = workspace;
-  session.baselineFiles = await listWorkspaceFiles(workspace.absolute);
+  session.baselineFiles = baselineFiles;
   session.buildCacheDir = path.join(projectHistoryDir(historyLocation(confirmCfg)), "build-cache");
 
   const memory = new ProjectMemory(path.join(projectHistoryDir(historyLocation(confirmCfg)), "memory.jsonl"));
-  const ctx: ToolContext = { cfg: confirmCfg, source, corpus: frozenDocs, memory, logger, session, onCommandRun: recordCommandProgress };
+  const ctx: ToolContext = { cfg: confirmCfg, source: [], corpus: frozenDocs, memory, logger, session, onCommandRun: recordCommandProgress };
   const tools = buildTools();
 
   await logger.event("audit_confirm_start", {
@@ -178,12 +181,12 @@ export async function runConfirm(
     tools,
     logger,
     cwd: workspace.absolute,
-    fileManifest: renderFileManifest(source, corpusManifest),
+    fileManifest: renderConfirmFileManifest(baselineFiles, corpusManifest),
     confirm: seed,
     // Project the decision rows to SQLite each turn so a UI shows live reproduction
     // progress (reproduced X / N) during the run, not only at the end.
     onConfirmCheckpoint: (raw) => {
-      const liveRows = toLiveConfirmRows(raw);
+      const liveRows = enforceBountySubmitReadiness(toLiveConfirmRows(raw), { impactInventory: readImpactInventory(session) });
       recorder.confirmDecisions(liveRows);
       confirmProgress.rows = liveRows.length;
       confirmProgress.reproducedYes = liveRows.filter((row) => row.reproduced === "yes").length;
@@ -206,6 +209,7 @@ export async function runConfirm(
   // PoC) and merge rows a single fix neutralizes. This is the framework's call, not the
   // model's — "distinct bugs" is decided by execution, not by the model's grouping alone.
   let rows = readConfirmDecision(session);
+  const impactInventory = readImpactInventory(session);
   // Resume safety net: guarantee every prior-settled row survives even if the model
   // dropped it from confirm_decision.json (it was told to carry them verbatim).
   if (settled.length > 0) {
@@ -233,12 +237,23 @@ export async function runConfirm(
     });
     rows = mergeRowsByClusters(rows, equivalence.clusters);
   }
+  rows = enforceBountySubmitReadiness(rows, { impactInventory });
   await logger.artifact("confirm_equivalence.json", equivalence);
   await logger.artifact("confirm_decision.json", rows);
+  if (impactInventory) await logger.artifact(IMPACT_INVENTORY_FILE, impactInventory);
   await logger.artifact("confirm_transcript.json", { stoppedReason: result.stoppedReason, steps: result.steps });
   await logger.artifact(
     "confirm_report.md",
-    renderConfirmReport({ target: confirmCfg.targetName, provider: confirmCfg.provider, model: confirmCfg.auditModel, inputRunDir, provenance, priorFindings: priorFindings.length, rows }),
+    renderConfirmReport({
+      target: confirmCfg.targetName,
+      provider: confirmCfg.provider,
+      model: confirmCfg.auditModel,
+      inputRunDir,
+      provenance,
+      priorFindings: priorFindings.length,
+      rows,
+      ...(impactInventory ? { impactInventory } : {}),
+    }),
   );
   await logger.event("audit_confirm_done", {
     stoppedReason: result.stoppedReason,
@@ -275,6 +290,8 @@ export async function runConfirm(
       corroboration: row.corroboration,
       novelty: row.novelty,
       humanGates: row.humanGates,
+      engagementProfile: row.engagementProfile,
+      adjudication: row.adjudication,
       mergedFrom: row.mergedFrom,
       reproCommandId: row.reproCommandId,
     })),
@@ -381,8 +398,9 @@ async function copyDocsIntoWorkspace(workspace: SandboxWorkspace, docs: Doc[]): 
   return files.map((file) => file.path);
 }
 
-function renderFileManifest(source: Doc[], corpusEntries: string[]): string {
-  const lines = source.slice(0, 600).map((doc) => `- ${doc.path} (${doc.content ? doc.content.split("\n").length : 0} lines)`);
+function renderConfirmFileManifest(sourceFiles: Set<string>, corpusEntries: string[]): string {
+  const source = [...sourceFiles].sort();
+  const lines = source.slice(0, 600).map((filePath) => `- ${filePath}`);
   const more = source.length > 600 ? `\n…and ${source.length - 600} more files` : "";
   let out = `${lines.join("\n")}${more}`;
   if (corpusEntries.length > 0) {
@@ -403,6 +421,8 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
   corroboration?: string;
   novelty?: string;
   humanGates?: string;
+  engagementProfile?: unknown;
+  adjudication?: unknown;
   reproCommandId?: string;
 }> {
   const rows: Array<{
@@ -415,6 +435,8 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
     corroboration?: string;
     novelty?: string;
     humanGates?: string;
+    engagementProfile?: unknown;
+    adjudication?: unknown;
     reproCommandId?: string;
   }> = [];
   for (const entry of raw) {
@@ -431,6 +453,8 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
       corroboration?: string;
       novelty?: string;
       humanGates?: string;
+      engagementProfile?: unknown;
+      adjudication?: unknown;
       reproCommandId?: string;
     } = { bug: obj.bug };
     if (typeof obj.reproduced === "string") row.reproduced = obj.reproduced;
@@ -444,6 +468,10 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
     if (typeof obj.novelty === "string") row.novelty = obj.novelty;
     if (typeof obj.human_gates === "string") row.humanGates = obj.human_gates;
     else if (typeof obj.humanGates === "string") row.humanGates = obj.humanGates;
+    const engagementProfile = normalizeStructuredValue(obj.engagement_profile ?? obj.engagementProfile);
+    if (engagementProfile) row.engagementProfile = engagementProfile;
+    const adjudication = normalizeStructuredValue(obj.adjudication);
+    if (adjudication) row.adjudication = adjudication;
     if (typeof obj.repro_command_id === "string") row.reproCommandId = obj.repro_command_id;
     else if (typeof obj.reproCommandId === "string") row.reproCommandId = obj.reproCommandId;
     rows.push(row);
@@ -462,6 +490,8 @@ export interface ConfirmDecisionRow {
   corroboration: string;
   novelty: string;
   humanGates: string;
+  engagementProfile?: unknown;
+  adjudication?: unknown;
   recommendation: "submit-candidate" | "needs-human" | "drop" | "unknown";
   // Structured fields the fix-equivalence matrix needs (present when the row's PoC is a
   // source-level test with a declared fix). Not rendered; consumed by consolidation.
@@ -513,6 +543,175 @@ function readConfirmDecision(session: AgentSession): ConfirmDecisionRow[] {
   return items.filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item)).map(normalizeDecisionRow);
 }
 
+function readImpactInventory(session: AgentSession): ConfirmStructuredValue | undefined {
+  let entry = session.scratchFiles.get(IMPACT_INVENTORY_FILE);
+  if (entry === undefined) {
+    for (const [key, value] of session.scratchFiles) {
+      if (key.endsWith(`/${IMPACT_INVENTORY_FILE}`)) {
+        entry = value;
+        break;
+      }
+    }
+  }
+  return entry === undefined ? undefined : normalizeStructuredValue(entry);
+}
+
+type ConfirmDecisionLike = {
+  bug: string;
+  members?: string[];
+  reproduced?: string;
+  recommendation?: string;
+  humanGates?: string;
+  engagementProfile?: unknown;
+  adjudication?: unknown;
+};
+
+export function enforceBountySubmitReadiness<T extends ConfirmDecisionLike>(rows: T[], options: { impactInventory?: unknown } = {}): T[] {
+  return rows.map((row) => {
+    if (row.recommendation !== "submit-candidate") return row;
+    const blocker = bountySubmitBlocker(row, options.impactInventory);
+    if (!blocker) return row;
+    const humanGates = appendHumanGate(row.humanGates, `Framework blocked submit-candidate: ${blocker}`);
+    return { ...row, recommendation: "needs-human", humanGates } as T;
+  });
+}
+
+function bountySubmitBlocker(row: ConfirmDecisionLike, impactInventory: unknown): string | undefined {
+  if (!isBountyLikePolicy(row.engagementProfile, row.adjudication)) return undefined;
+  if (row.reproduced !== "yes") return "the row is not reproduced on the real target";
+  if (!impactInventoryCoversRow(row, impactInventory)) return `${IMPACT_INVENTORY_FILE} has no entry covering this reproduced bounty-like row`;
+  for (const gate of ["scope", "live_impact", "known_issue", "payout"] as const) {
+    const status = bountyGateStatus(row.adjudication, gate);
+    if (!isPassingBountyGateStatus(status, gate)) return `${gate} gate is ${status ? JSON.stringify(status) : "missing"}`;
+  }
+  return undefined;
+}
+
+function isBountyLikePolicy(engagementProfile: unknown, adjudication: unknown): boolean {
+  const profile = asRecord(engagementProfile);
+  const adjudicationRecord = asRecord(adjudication);
+  const policyKind = normalizedWord(stringValue(profile?.policy_kind ?? profile?.policyKind ?? profile?.kind));
+  if (policyKind.includes("bug_bounty") || policyKind.includes("bounty") || policyKind.includes("contest")) return true;
+  const requiredRaw = profile?.required_gates ?? profile?.requiredGates;
+  const requiredGates = Array.isArray(requiredRaw) ? requiredRaw.map((entry) => normalizedWord(stringValue(entry))) : [];
+  const adjudicationHasPayout = Boolean(adjudicationRecord && ("payout_estimate" in adjudicationRecord || "payoutEstimate" in adjudicationRecord));
+  if (policyKind === "custom" && (requiredGates.some((gate) => gate.includes("payout") || gate.includes("reward")) || adjudicationHasPayout)) return true;
+  return requiredGates.some((gate) => gate.includes("payout") || gate.includes("reward")) && adjudicationHasPayout;
+}
+
+function bountyGateStatus(adjudication: unknown, gate: "scope" | "live_impact" | "known_issue" | "payout"): string | undefined {
+  const record = asRecord(adjudication);
+  if (!record) return undefined;
+  const direct = directGateStatus(record, gate);
+  if (direct) return direct;
+  const gates = Array.isArray(record.gates) ? record.gates.map(asRecord).filter((entry): entry is Record<string, unknown> => Boolean(entry)) : [];
+  const needles = gateNeedles(gate);
+  for (const entry of gates) {
+    const id = normalizedWord(stringValue(entry.id ?? entry.key ?? entry.name ?? entry.gate));
+    if (needles.some((needle) => id.includes(needle))) {
+      const status = stringValue(entry.status ?? entry.result ?? entry.state);
+      if (status) return status;
+    }
+  }
+  return undefined;
+}
+
+function directGateStatus(record: Record<string, unknown>, gate: "scope" | "live_impact" | "known_issue" | "payout"): string | undefined {
+  const keys: Record<typeof gate, string[]> = {
+    scope: ["scope_status", "scopeStatus", "asset_status", "assetStatus", "eligibility_status", "eligibilityStatus"],
+    live_impact: ["live_impact_status", "liveImpactStatus", "funds_status", "fundsStatus", "exposure_status", "exposureStatus"],
+    known_issue: ["known_issue_status", "knownIssueStatus", "novelty_status", "noveltyStatus", "duplicate_status", "duplicateStatus"],
+    payout: ["payout_status", "payoutStatus", "reward_status", "rewardStatus"],
+  };
+  for (const key of keys[gate]) {
+    const status = stringValue(record[key]);
+    if (status) return status;
+  }
+  if (gate === "payout") {
+    const payout = asRecord(record.payout_estimate ?? record.payoutEstimate ?? record.reward_estimate ?? record.rewardEstimate);
+    const status = stringValue(payout?.status);
+    if (status) return status;
+  }
+  return undefined;
+}
+
+function gateNeedles(gate: "scope" | "live_impact" | "known_issue" | "payout"): string[] {
+  switch (gate) {
+    case "scope": return ["scope", "venue", "eligib", "asset"];
+    case "live_impact": return ["live", "impact", "fund", "exposure", "deployment"];
+    case "known_issue": return ["known", "novel", "duplicate", "disclos"];
+    case "payout": return ["payout", "reward", "collectible", "bounty"];
+  }
+}
+
+function isPassingBountyGateStatus(status: string | undefined, gate: "scope" | "live_impact" | "known_issue" | "payout"): boolean {
+  const normalized = normalizedWord(status);
+  if (!normalized) return false;
+  if (isNegativeGateStatus(normalized)) return false;
+  if (matchesStatus(normalized, ["pass", "passed", "satisfied", "confirmed", "established", "eligible", "ok", "yes"])) return true;
+  if (gate === "scope" && matchesStatus(normalized, ["in_scope", "eligible"])) return true;
+  if (gate === "live_impact" && matchesStatus(normalized, ["funded", "live", "live_funded", "affected_live_deployment"])) return true;
+  if (gate === "known_issue" && matchesStatus(normalized, ["novel", "not_duplicate", "not_disclosed", "no_known_issue", "not_known"])) return true;
+  if (gate === "payout" && matchesStatus(normalized, ["estimated", "collectible"])) return true;
+  return false;
+}
+
+function isNegativeGateStatus(normalized: string): boolean {
+  return matchesStatus(normalized, [
+    "fail",
+    "failed",
+    "unknown",
+    "needs_human",
+    "blocked",
+    "missing",
+    "unsettled",
+    "not_applicable",
+    "unfunded",
+    "not_funded",
+    "not_live",
+    "no_live",
+    "no_funds",
+    "not_novel",
+    "not_estimated",
+    "already_disclosed",
+    "duplicate",
+    "disclosed",
+  ]);
+}
+
+function matchesStatus(normalized: string, tokens: string[]): boolean {
+  return tokens.some((token) => normalized === token || normalized.startsWith(`${token}_`));
+}
+
+function impactInventoryCoversRow(row: ConfirmDecisionLike, impactInventory: unknown): boolean {
+  const inventory = asRecord(impactInventory);
+  const inventoryItems = inventory?.items;
+  const itemsRaw = Array.isArray(inventoryItems)
+    ? inventoryItems
+    : Array.isArray(impactInventory)
+      ? impactInventory
+      : [];
+  if (itemsRaw.length === 0) return false;
+  const rowMembers = new Set((row.members ?? []).map((member) => normalizedWord(member)).filter(Boolean));
+  const rowBug = normalizedWord(row.bug);
+  for (const raw of itemsRaw) {
+    const item = asRecord(raw);
+    if (!item) continue;
+    const bug = normalizedWord(stringValue(item.bug ?? item.title));
+    if (bug && rowBug && bug === rowBug) return true;
+    const members = Array.isArray(item.members) ? item.members.map((member) => normalizedWord(stringValue(member))).filter(Boolean) : [];
+    if (members.some((member) => rowMembers.has(member))) return true;
+  }
+  return false;
+}
+
+function appendHumanGate(existing: string | undefined, note: string): string {
+  const trimmed = existing?.trim();
+  if (!trimmed) return note;
+  if (trimmed.includes(note)) return trimmed;
+  return `${trimmed} ${note}`;
+}
+
 function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow {
   const str = (value: unknown): string => (typeof value === "string" ? value.trim() : value === undefined || value === null ? "" : JSON.stringify(value));
   const members = Array.isArray(raw.members) ? raw.members.map((m) => str(m)).filter(Boolean) : str(raw.members) ? [str(raw.members)] : [];
@@ -522,6 +721,8 @@ function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow 
   const reproCommandId = str(raw.repro_command_id) || str(raw.reproCommandId);
   const fixPatch = parseFixPatch(raw.fix_patch ?? raw.fixPatch);
   const patched = asStringList(raw.patched_success_patterns ?? raw.patchedSuccessPatterns);
+  const engagementProfile = normalizeStructuredValue(raw.engagement_profile ?? raw.engagementProfile);
+  const adjudication = normalizeStructuredValue(raw.adjudication);
   return {
     bug: str(raw.bug) || str(raw.title) || "(unnamed)",
     members,
@@ -531,6 +732,8 @@ function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow 
     corroboration: str(raw.corroboration),
     novelty: str(raw.novelty),
     humanGates: str(raw.human_gates) || str(raw.humanGates),
+    ...(engagementProfile ? { engagementProfile } : {}),
+    ...(adjudication ? { adjudication } : {}),
     recommendation,
     ...(reproCommandId ? { reproCommandId } : {}),
     ...(fixPatch ? { fixPatch } : {}),
@@ -552,6 +755,53 @@ function asStringList(value: unknown): string[] {
   if (typeof value === "string") return value.trim() ? [value.trim()] : [];
   if (!Array.isArray(value)) return [];
   return value.map((entry) => (typeof entry === "string" ? entry.trim() : "")).filter(Boolean).slice(0, 16);
+}
+
+function normalizeStructuredValue(value: unknown): ConfirmStructuredValue | undefined {
+  let raw = value;
+  if (typeof raw === "string") {
+    const trimmed = raw.trim();
+    if (!trimmed || (!trimmed.startsWith("{") && !trimmed.startsWith("["))) return undefined;
+    try {
+      raw = JSON.parse(trimmed);
+    } catch {
+      return undefined;
+    }
+  }
+  const normalized = sanitizeJsonValue(raw);
+  return normalized && typeof normalized === "object" ? (normalized as ConfirmStructuredValue) : undefined;
+}
+
+function asRecord(value: unknown): Record<string, unknown> | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as Record<string, unknown>) : undefined;
+}
+
+function stringValue(value: unknown): string {
+  return typeof value === "string"
+    ? value.trim()
+    : value === undefined || value === null
+      ? ""
+      : typeof value === "number" || typeof value === "boolean"
+        ? String(value)
+        : "";
+}
+
+function normalizedWord(value: unknown): string {
+  return stringValue(value).toLowerCase().replace(/[^a-z0-9]+/g, "_").replace(/^_+|_+$/g, "");
+}
+
+function sanitizeJsonValue(value: unknown, depth = 0): unknown {
+  if (value === undefined) return undefined;
+  if (value === null || typeof value === "string" || typeof value === "number" || typeof value === "boolean") return value;
+  if (depth > 8) return String(value);
+  if (Array.isArray(value)) return value.map((entry) => sanitizeJsonValue(entry, depth + 1)).filter((entry) => entry !== undefined);
+  if (typeof value !== "object") return String(value);
+  const out: Record<string, unknown> = {};
+  for (const [key, entry] of Object.entries(value as Record<string, unknown>)) {
+    const normalized = sanitizeJsonValue(entry, depth + 1);
+    if (normalized !== undefined) out[key] = normalized;
+  }
+  return out;
 }
 
 // Find the latest prior confirm run of THIS input run (same output dir + target, matched
@@ -620,6 +870,8 @@ function mergeRows(members: ConfirmDecisionRow[]): ConfirmDecisionRow {
   const reproRank: Record<ConfirmDecisionRow["reproduced"], number> = { yes: 3, "could-not-set-up": 2, no: 1, unknown: 0 };
   const recRank: Record<ConfirmDecisionRow["recommendation"], number> = { "submit-candidate": 3, "needs-human": 2, drop: 1, unknown: 0 };
   const strongest = <T extends string>(values: T[], rank: Record<T, number>, fallback: T): T => values.reduce((best, value) => (rank[value] > rank[best] ? value : best), fallback);
+  const engagementProfile = members.map((m) => m.engagementProfile).find(Boolean);
+  const adjudication = members.map((m) => m.adjudication).find(Boolean);
   return {
     bug: members.map((m) => m.bug).join(" / "),
     members: uniq(members.flatMap((m) => [...m.members, m.bug])),
@@ -629,6 +881,8 @@ function mergeRows(members: ConfirmDecisionRow[]): ConfirmDecisionRow {
     corroboration: uniq(members.map((m) => m.corroboration)).join(" | "),
     novelty: uniq(members.map((m) => m.novelty)).join(" | "),
     humanGates: uniq(members.map((m) => m.humanGates)).join(" | "),
+    ...(engagementProfile ? { engagementProfile } : {}),
+    ...(adjudication ? { adjudication } : {}),
     recommendation: strongest(members.map((m) => m.recommendation), recRank, "unknown"),
     mergedFrom: members.map((m) => m.bug),
   };
@@ -642,6 +896,7 @@ function renderConfirmReport(input: {
   provenance: ConfirmProvenance;
   priorFindings: number;
   rows: ConfirmDecisionRow[];
+  impactInventory?: unknown;
 }): string {
   const out: string[] = [];
   out.push(`# Confirm results: ${input.target}`, "");
@@ -660,6 +915,16 @@ function renderConfirmReport(input: {
     for (const file of input.provenance.frozenFiles) out.push(`- \`${file.path}\` — sha256 \`${file.sha256}\` (${file.bytes} bytes)`);
     out.push("");
   }
+  const bountyLikeRows = input.rows.filter((row) => isBountyLikePolicy(row.engagementProfile, row.adjudication));
+  if (input.impactInventory) {
+    out.push("## Impact / Exposure Inventory", "");
+    out.push(`- Artifact: \`${IMPACT_INVENTORY_FILE}\``);
+    out.push(`- Summary: ${formatStructuredSummary(input.impactInventory)}`);
+    out.push("");
+  } else if (bountyLikeRows.length > 0) {
+    out.push("## Impact / Exposure Inventory", "");
+    out.push(`_${IMPACT_INVENTORY_FILE} was not written; bounty-like reproduced rows cannot be treated as submit-ready until live exposure is established or explicitly ruled out._`, "");
+  }
   out.push("## Decision sheet", "");
   if (input.rows.length === 0) {
     out.push("_The confirm session produced no decision rows (confirm_decision.json missing or empty)._", "");
@@ -675,9 +940,19 @@ function renderConfirmReport(input: {
     if (row.corroboration) out.push(`- Corroboration (web — a lead, not proof): ${row.corroboration}`);
     if (row.novelty) out.push(`- Novelty: ${row.novelty}`);
     if (row.humanGates) out.push(`- Human gates (not settled by execution): ${row.humanGates}`);
+    if (row.engagementProfile) out.push(`- Engagement profile: ${formatStructuredSummary(row.engagementProfile)}`);
+    if (row.adjudication) out.push(`- Eligibility / payout adjudication: ${formatStructuredSummary(row.adjudication)}`);
     out.push("");
   }
   return out.join("\n");
+}
+
+function formatStructuredSummary(value: unknown): string {
+  try {
+    return `\`${JSON.stringify(value)}\``;
+  } catch {
+    return String(value);
+  }
 }
 
 function historyLocation(cfg: AuditorConfig): { outputDir: string; targetName: string; historyDir?: string } {

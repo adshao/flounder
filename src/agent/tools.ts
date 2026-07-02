@@ -496,7 +496,7 @@ function confirmCommandTargetLink(command: ReproductionCommand, session: AgentSe
   for (const fileArg of fileArgs) {
     if (baselineHasPathLike(baseline, fileArg)) return { linked: true, reason: `test target ${fileArg} is part of the pristine target source` };
     const scratch = session.scratchFiles.get(fileArg);
-    if (scratch && scratchLinksToBaseline(fileArg, scratch, baseline)) {
+    if (scratch && scratchLinksToBaseline(fileArg, scratch, baseline, command)) {
       return { linked: true, reason: `test target ${fileArg} imports pristine target source` };
     }
   }
@@ -509,6 +509,7 @@ function confirmCommandTargetLink(command: ReproductionCommand, session: AgentSe
 
 function commandFileArgs(command: ReproductionCommand, session: AgentSession): string[] {
   const out: string[] = [];
+  const roots = commandRootCandidates(command);
   const skipValueAfter = new Set([
     "--test-dir",
     "-C",
@@ -517,45 +518,188 @@ function commandFileArgs(command: ReproductionCommand, session: AgentSession): s
     "--package",
     "-p",
     "--match-test",
-    "--match-path",
+    "--match-contract",
+    "--match",
     "-R",
     "--root",
     "--contracts",
     "--lib-paths",
     "--cache-path",
     "--out",
+    "--build-info-path",
+    "--evm-version",
+    "--fork-url",
+    "--fork-block-number",
+    "--fork-retries",
+    "--fork-retry-backoff",
+    "--rpc-url",
+    "--etherscan-api-key",
+    "--use",
+    "--sender",
+    "--initial-balance",
+    "--gas-limit",
+    "--chain-id",
+    "--gas-price",
+    "--block-base-fee-per-gas",
+    "--block-coinbase",
+    "--block-difficulty",
+    "--block-gas-limit",
+    "--block-number",
+    "--block-timestamp",
+    "--memory-limit",
   ]);
+  const fileValueAfter = new Set(["--match-path"]);
   for (let idx = 0; idx < command.args.length; idx += 1) {
     const arg = command.args[idx] ?? "";
+    const option = splitLongOptionValue(arg);
+    if (option) {
+      if (fileValueAfter.has(option.name)) addCommandFileArg(out, option.value, roots, session);
+      continue;
+    }
+    if (arg === "--remappings" || arg === "--remapping") {
+      while (idx + 1 < command.args.length && looksLikeRemappingValue(command.args[idx + 1] ?? "")) idx += 1;
+      continue;
+    }
+    if (fileValueAfter.has(arg)) {
+      addCommandFileArg(out, command.args[idx + 1] ?? "", roots, session);
+      idx += 1;
+      continue;
+    }
     if (skipValueAfter.has(arg)) {
       idx += 1;
       continue;
     }
     if (arg.startsWith("-")) continue;
-    const normalized = normalizeRelativePath(arg);
-    if (!normalized) continue;
-    if (session.scratchFiles.has(normalized) || session.baselineFiles?.has(normalized) || /\.[A-Za-z0-9]+$/.test(path.posix.basename(normalized))) {
-      out.push(normalized);
-    }
+    addCommandFileArg(out, arg, [], session);
   }
-  return out;
+  return [...new Set(out)];
 }
 
 export function commandFileArgsForTest(command: ReproductionCommand, session: Pick<AgentSession, "scratchFiles" | "baselineFiles">): string[] {
   return commandFileArgs(command, session as AgentSession);
 }
 
-function scratchLinksToBaseline(filePath: string, content: string, baseline: Set<string>): boolean {
+export function confirmCommandTargetLinkForTest(command: ReproductionCommand, session: Pick<AgentSession, "scratchFiles" | "baselineFiles">): { linked: boolean; reason: string } {
+  return confirmCommandTargetLink(command, session as AgentSession);
+}
+
+function addCommandFileArg(out: string[], value: string, roots: string[], session: Pick<AgentSession, "scratchFiles" | "baselineFiles">): void {
+  if (looksLikeNonFileValue(value)) return;
+  const normalized = normalizeRelativePath(value);
+  if (!normalized || hasGlobSyntax(normalized)) return;
+  const rooted = roots
+    .map((root) => normalizeRelativePath(path.posix.join(root, normalized)))
+    .filter((candidate): candidate is string => Boolean(candidate));
+  const knownRooted = rooted.filter((candidate) => commandFileArgKnown(candidate, session));
+  if (knownRooted.length > 0) {
+    out.push(...knownRooted);
+    return;
+  }
+  if (commandFileArgKnown(normalized, session) || hasFileExtension(normalized)) out.push(normalized);
+}
+
+function commandFileArgKnown(candidate: string, session: Pick<AgentSession, "scratchFiles" | "baselineFiles">): boolean {
+  return session.scratchFiles.has(candidate) || Boolean(session.baselineFiles && baselineHasPathLike(session.baselineFiles, candidate));
+}
+
+function commandRootCandidates(command: ReproductionCommand): string[] {
+  const out: string[] = [];
+  for (let idx = 0; idx < command.args.length; idx += 1) {
+    const arg = command.args[idx] ?? "";
+    const option = splitLongOptionValue(arg);
+    if (option?.name === "--root") {
+      const normalized = normalizeRelativePath(option.value);
+      if (normalized) out.push(normalized);
+      continue;
+    }
+    if (arg === "--root" || arg === "-C") {
+      const normalized = normalizeRelativePath(command.args[idx + 1] ?? "");
+      if (normalized) out.push(normalized);
+      idx += 1;
+    }
+  }
+  const cwd = normalizeRelativePath(command.cwd ?? "");
+  if (cwd) out.push(cwd);
+  return [...new Set(out)];
+}
+
+function splitLongOptionValue(arg: string): { name: string; value: string } | undefined {
+  if (!arg.startsWith("--")) return undefined;
+  const eq = arg.indexOf("=");
+  if (eq <= 2) return undefined;
+  return { name: arg.slice(0, eq), value: arg.slice(eq + 1) };
+}
+
+function looksLikeNonFileValue(value: string): boolean {
+  return /^[a-z][a-z0-9+.-]*:\/\//i.test(value) || /^\d+(?:\.\d+)+$/.test(value);
+}
+
+function hasGlobSyntax(value: string): boolean {
+  return /[*?\[\]{}]/.test(value);
+}
+
+function hasFileExtension(value: string): boolean {
+  return /\.[A-Za-z0-9]+$/.test(path.posix.basename(value));
+}
+
+function scratchLinksToBaseline(filePath: string, content: string, baseline: Set<string>, command?: ReproductionCommand): boolean {
   const dir = path.posix.dirname(filePath);
   const specifiers = sourceSpecifiers(content);
+  const remappings = command ? commandRemappings(command) : [];
   for (const specifier of specifiers) {
     if (specifier.startsWith("source/") && baselineHasPathLike(baseline, specifier)) return true;
     if (specifier.startsWith("./") || specifier.startsWith("../")) {
       const resolved = normalizeRelativePath(path.posix.join(dir, specifier));
       if (resolved && baselineHasPathLike(baseline, resolved)) return true;
     }
+    for (const remapped of remappedSpecifierCandidates(specifier, remappings)) {
+      if (baselineHasPathLike(baseline, remapped)) return true;
+    }
   }
   return false;
+}
+
+function commandRemappings(command: ReproductionCommand): Array<{ prefix: string; target: string }> {
+  const out: Array<{ prefix: string; target: string }> = [];
+  for (let idx = 0; idx < command.args.length; idx += 1) {
+    const arg = command.args[idx] ?? "";
+    const option = splitLongOptionValue(arg);
+    if (option && (option.name === "--remappings" || option.name === "--remapping")) {
+      addRemapping(out, option.value);
+      continue;
+    }
+    if (arg === "--remappings" || arg === "--remapping") {
+      while (idx + 1 < command.args.length && looksLikeRemappingValue(command.args[idx + 1] ?? "")) {
+        idx += 1;
+        addRemapping(out, command.args[idx] ?? "");
+      }
+    }
+  }
+  return out;
+}
+
+function addRemapping(out: Array<{ prefix: string; target: string }>, value: string): void {
+  const eq = value.indexOf("=");
+  if (eq <= 0) return;
+  const prefix = value.slice(0, eq);
+  const target = normalizeRelativePath(value.slice(eq + 1));
+  if (!target) return;
+  out.push({ prefix, target });
+}
+
+function looksLikeRemappingValue(value: string): boolean {
+  return !value.startsWith("-") && value.includes("=");
+}
+
+function remappedSpecifierCandidates(specifier: string, remappings: Array<{ prefix: string; target: string }>): string[] {
+  const out: string[] = [];
+  for (const remapping of remappings) {
+    if (!specifier.startsWith(remapping.prefix)) continue;
+    const suffix = specifier.slice(remapping.prefix.length);
+    const resolved = normalizeRelativePath(path.posix.join(remapping.target, suffix));
+    if (resolved) out.push(resolved);
+  }
+  return out;
 }
 
 function sourceSpecifiers(content: string): string[] {
@@ -603,6 +747,7 @@ export function isReportFile(normalizedPath: string): boolean {
     || normalizedPath === "followup_scopes.json"
     || normalizedPath === "prepare_manifest.json"
     || normalizedPath === "confirm_decision.json"
+    || normalizedPath === "impact_inventory.json"
     || /^report_[a-z0-9_.-]+\.md$/.test(normalizedPath);
 }
 

@@ -100,6 +100,8 @@ export interface ConfirmSettledRow {
   corroboration: string;
   novelty: string;
   humanGates: string;
+  engagementProfile?: unknown;
+  adjudication?: unknown;
   recommendation: "submit-candidate" | "needs-human" | "drop" | "unknown";
   reproCommandId?: string;
 }

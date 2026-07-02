@@ -205,17 +205,32 @@ export async function runAuditSession(input: {
         break;
       }
     }
-    if (raw === undefined) return;
-    try {
-      const parsed: unknown = JSON.parse(raw);
-      if (Array.isArray(parsed)) {
-        await input.logger.artifact("confirm_decision.json", parsed);
-        try {
-          input.onConfirmCheckpoint?.(parsed);
-        } catch {
-          // live projection is best-effort
+    if (raw !== undefined) {
+      try {
+        const parsed: unknown = JSON.parse(raw);
+        if (Array.isArray(parsed)) {
+          await input.logger.artifact("confirm_decision.json", parsed);
+          try {
+            input.onConfirmCheckpoint?.(parsed);
+          } catch {
+            // live projection is best-effort
+          }
         }
+      } catch {
+        // partial / mid-write JSON — skip this checkpoint
       }
+    }
+    let impactRaw: string | undefined;
+    for (const [key, value] of input.ctx.session.scratchFiles) {
+      if (key === "impact_inventory.json" || key.endsWith("/impact_inventory.json")) {
+        impactRaw = value;
+        break;
+      }
+    }
+    if (impactRaw === undefined) return;
+    try {
+      const parsed: unknown = JSON.parse(impactRaw);
+      if (parsed && typeof parsed === "object") await input.logger.artifact("impact_inventory.json", parsed);
     } catch {
       // partial / mid-write JSON — skip this checkpoint
     }
@@ -671,7 +686,7 @@ ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim
 Begin: resolve the clue, stage the target/security-critical source and any project-owned answer-free docs you can find, mainnet-match or source-pin each source component, write prepare_manifest.json early, record real_target confirmation requirements, record gaps honestly, and stop only after the manifest has nonempty component rows for staged source plus either concrete real-target ground_truth or a source-only not_required_reason. Missing docs/specs are best-effort caveats, not blockers.`;
 }
 
-const CONFIRM_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, fork, fetch, or run anything else. Based ONLY on what you have already reproduced, WRITE confirm_decision.json now at the workspace root as your very next action — call the write tool once with a JSON array, one row per DISTINCT bug: {"bug","members":[...],"distinct_fix","reproduced":"yes"|"no"|"could-not-set-up","repro_evidence","repro_command_id","fix_patch":{"path","old","new"},"patched_success_patterns":[...],"corroboration","novelty","human_gates","recommendation":"submit-candidate"|"needs-human"|"drop"}. Mark "reproduced":"yes" ONLY for a bug you actually reproduced on the real target with a passing command_id; otherwise "no"/"could-not-set-up" with the crutch/blocker named. Include repro_command_id + fix_patch + patched_success_patterns for any source-level PoC so the framework can verify consolidation by execution. Partial but honest beats empty. After writing, emit {"done": true}. Output only the write tool call.`;
+const CONFIRM_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, fork, fetch, or run anything else. Based ONLY on what you have already reproduced, finish the confirm artifacts now. If a bounty-like reproduced row already has live exposure evidence in scratch, first write/update impact_inventory.json; otherwise write confirm_decision.json as your next action. The confirm_decision.json content is a JSON array, one row per DISTINCT bug: {"bug","members":[...],"distinct_fix","reproduced":"yes"|"no"|"could-not-set-up","repro_evidence","repro_command_id","fix_patch":{"path","old","new"},"patched_success_patterns":[...],"corroboration","novelty","human_gates","engagement_profile":{"policy_kind":"bug_bounty|contest|private_audit|incident|source_review|unknown|custom","selected_by","confidence","policy_sources":[...],"required_gates":[...]},"adjudication":{"gates":[{"id","status","evidence"}],"scope_status","live_impact_status","known_issue_status","payout_estimate":{"status":"not-applicable|unknown|estimated","eligible_min_usd","eligible_max_usd","expected_collectible_usd","confidence","basis"}},"recommendation":"submit-candidate"|"needs-human"|"drop"}. Mark "reproduced":"yes" ONLY for a bug you actually reproduced on the real target with a passing command_id; otherwise "no"/"could-not-set-up" with the crutch/blocker named. Do not invent a bounty or collectible payout: if scope, live impact, novelty, tier math, or live exposure inventory is not established, mark that gate unknown/needs-human and leave expected_collectible_usd unset or unknown. If you do not have live exposure evidence for a bounty-like reproduced row, mark live_impact unknown/needs-human and name that blocker. Include repro_command_id + fix_patch + patched_success_patterns for any source-level PoC so the framework can verify consolidation by execution. Partial but honest beats empty. After confirm_decision.json is written, emit {"done": true}. Output only one write tool call per turn.`;
 
 // Confirm session prompt = the confirm mission/rules (shared with the loop driver's
 // system prompt) plus this run's frozen findings and context. It deliberately does
@@ -693,7 +708,7 @@ ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim
 Loaded source files:
 ${input.fileManifest}
 
-Consolidate the findings into distinct bugs, reproduce each distinct bug against real ground truth, check novelty/corroboration online (leads only, never proof), then write confirm_decision.json and emit done.`;
+Consolidate the findings into distinct bugs, reproduce each distinct bug against real ground truth, classify the engagement policy, adjudicate scope/live-impact/known-issue/payout gates when the policy is bounty-like, write impact_inventory.json for bounty-like reproduced rows, check novelty/corroboration online (leads only, never proof), then write confirm_decision.json and emit done.`;
 }
 
 function buildReportFinalizePrompt(reportSeed: string, missingFiles: string[]): string {
@@ -702,7 +717,7 @@ function buildReportFinalizePrompt(reportSeed: string, missingFiles: string[]): 
 You must now finish the missing formal report files by calling the write tool. Missing files:
 ${missingFiles.map((file) => `- ${file}`).join("\n")}
 
-Use the finding evidence below. Some reports have evidence_mode="real-target-reproduced" and include reproduced decision data. Source-only audits may have evidence_mode="source-only-local-confirmed"; those findings do not require a real-target decision because Prepare established that no deployed target or live service is in scope. If exact source details are still needed, you may make a small number of read or bash purpose="inspect" checks before writing. If a detail is not established, say "Not established by the available evidence" or list it as a human gate. Do NOT invent impact, versions, exploitability, affected deployments, novelty, fix validation, or proof details.
+Use the finding evidence below. Some reports have evidence_mode="real-target-reproduced" and include reproduced decision data. Source-only audits may have evidence_mode="source-only-local-confirmed"; those findings do not require a real-target decision because Prepare established that no deployed target or live service is in scope. If decision rows include engagement_profile or adjudication, use them exactly as evidence for policy, scope, live impact, known-issue, and payout discussion; do not add a payout estimate that confirm did not establish. If exact source details are still needed, you may make a small number of read or bash purpose="inspect" checks before writing. If a detail is not established, say "Not established by the available evidence" or list it as a human gate. Do NOT invent impact, versions, exploitability, affected deployments, novelty, bounty eligibility, payout, fix validation, or proof details.
 
 For each missing report, verify the title/root cause/location, attacker capability, impact, reproduction result, and fix/novelty claims against the supplied evidence. When any of those fields is absent or ambiguous, do a targeted source/corpus/artifact inspection before writing. If the inspection still does not establish the detail, keep the report useful by naming the limitation instead of filling it in.
 
@@ -727,7 +742,7 @@ No-fabrication rule: every concrete statement in the report must be supported by
 - command output you produced in this report run.
 If a detail is not established, write that it is not established or list it under human gates. Never fill gaps with plausible security-report language.
 
-Before writing each report, verify these fields against evidence: title/root cause/location, attacker capability, impact, reproduction result, affected version/deployment, recommended fix, and novelty/disclosure state. If any field is missing, stale, or ambiguous in the supplied decision data, use read or bash purpose="inspect" to check the copied source, corpus, PoC files, or artifacts. Use the report to preserve uncertainty: "Not established by the available evidence" is correct when the daemon cannot prove a detail.
+Before writing each report, verify these fields against evidence: title/root cause/location, attacker capability, impact, reproduction result, affected version/deployment, recommended fix, novelty/disclosure state, and any engagement/payout claims. If any field is missing, stale, or ambiguous in the supplied decision data, use read or bash purpose="inspect" to check the copied source, corpus, PoC files, or artifacts. Use the report to preserve uncertainty: "Not established by the available evidence" is correct when the daemon cannot prove a detail.
 
 Write exactly one Markdown file per requested bug at the specified workspace-root filename. These files are persisted to the product DB and shown to users as the official report. Do not emit done until every required file is written.
 
@@ -770,7 +785,7 @@ Specific remediation guidance and any tested patch result. If a fix was not test
 How maintainers should verify the fix and what regression test should be added.
 
 ## Novelty and Disclosure Notes
-Corroboration, novelty result, remaining human gates, scope/venue notes, and recommended next action.
+Corroboration, novelty result, remaining human gates, scope/venue notes, engagement policy, payout eligibility if established, and recommended next action.
 
 Reports to write:
 ${input.report}

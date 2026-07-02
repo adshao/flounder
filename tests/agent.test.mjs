@@ -7,7 +7,7 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
-import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest } from "../dist/agent/tools.js";
+import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
@@ -811,6 +811,59 @@ test("confirm target-link parsing ignores Foundry project root flags but keeps e
   assert.deepEqual(explicitFileArgs, ["poc/standalone.t.sol"]);
 });
 
+test("confirm target-link parsing resolves Foundry rooted match paths without treating runner flags as files", () => {
+  const testPath = "sources/deployed-v2/20220609-stable-pool-v2/test/StablePoolV2LiveForkNonconvergent.t.sol";
+  const session = {
+    scratchFiles: new Map([[testPath, "import '../sources/contracts/StableMath.sol';\ncontract Repro {}\n"]]),
+    baselineFiles: new Set(["sources/deployed-v2/20220609-stable-pool-v2/sources/contracts/StableMath.sol"]),
+  };
+  const command = {
+    program: "forge",
+    args: [
+      "test",
+      "--root",
+      "sources/deployed-v2/20220609-stable-pool-v2",
+      "--match-path",
+      "test/StablePoolV2LiveForkNonconvergent.t.sol",
+      "--fork-url",
+      "https://ethereum.publicnode.com",
+      "--use",
+      "0.7.6",
+      "--remappings",
+      "@balancer-labs/=sources/@balancer-labs/",
+      "-vv",
+    ],
+  };
+
+  assert.deepEqual(commandFileArgsForTest(command, session), [testPath]);
+  const targetLink = confirmCommandTargetLinkForTest(command, session);
+  assert.equal(targetLink.linked, true);
+});
+
+test("confirm target-link parsing follows command-line remappings from scratch tests to pristine source", () => {
+  const session = {
+    scratchFiles: new Map([[
+      "poc/test/StablePoolV2LiveForkNonconvergent.t.sol",
+      "import 'stablev2/contracts/StableMath.sol';\ncontract Repro {}\n",
+    ]]),
+    baselineFiles: new Set(["sources/deployed-v2/20220609-stable-pool-v2/sources/contracts/StableMath.sol"]),
+  };
+  const command = {
+    program: "forge",
+    args: [
+      "test",
+      "poc/test/StablePoolV2LiveForkNonconvergent.t.sol",
+      "--remappings",
+      "stablev2/=sources/deployed-v2/20220609-stable-pool-v2/sources/",
+      "-vv",
+    ],
+  };
+
+  assert.deepEqual(commandFileArgsForTest(command, session), ["poc/test/StablePoolV2LiveForkNonconvergent.t.sol"]);
+  const targetLink = confirmCommandTargetLinkForTest(command, session);
+  assert.equal(targetLink.linked, true);
+});
+
 test("failed bash command events include an output preview for the UI", async () => {
   const dir = await tempDir();
   try {
@@ -883,6 +936,12 @@ test("prepare/confirm report files may cite public URLs while generated PoC file
       content: JSON.stringify([{ bug: "x", novelty: "already-disclosed: https://example.com/advisory" }]),
     }, ctx);
     assert.match(confirm.observation, /wrote confirm_decision\.json/);
+
+    const impact = await tool("write").run({
+      path: "impact_inventory.json",
+      content: JSON.stringify({ items: [{ bug: "x", status: "unknown", blockers: ["needs live balance sizing"] }] }),
+    }, ctx);
+    assert.match(impact.observation, /wrote impact_inventory\.json/);
 
     const poc = await tool("write").run({
       path: "exploit.test.mjs",

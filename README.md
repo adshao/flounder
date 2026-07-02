@@ -359,7 +359,7 @@ A run artifact directory contains:
 - discovery health and backlog (`run_health.json`, `coverage_gaps.json`, `resource_requests.json`, `followup_scopes.json`)
 - live/replay trace (`events.jsonl`, `audit_transcript.json`, `calls/*.json`)
 - private report drafts (`audit_report.md`, `report_<id>.md`)
-- confirm decision sheets (`confirm_decision.json`, `confirm_report.md`, `confirm_equivalence.json`)
+- confirm decision sheets (`confirm_decision.json`, `confirm_report.md`, `confirm_equivalence.json`, and bounty-like `impact_inventory.json` when live exposure evidence is attempted)
 
 The dashboard stores metadata, run health, discovery backlog rows, and artifact paths in SQLite so an agent can inspect progress without scraping run directories.
 

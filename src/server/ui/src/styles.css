@@ -2160,7 +2160,35 @@ small {
 }
 
 .backlog-card {
-  align-items: flex-start;
+  display: grid;
+  grid-template-columns: auto minmax(0, 1fr) auto;
+  align-items: start;
+}
+
+.backlog-card .grow {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.backlog-card strong {
+  display: block;
+  line-height: 1.35;
+}
+
+.backlog-card small {
+  display: -webkit-box;
+  overflow: hidden;
+  text-overflow: clip;
+  white-space: normal;
+  overflow-wrap: anywhere;
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 2;
+}
+
+.backlog-card .resource-actions {
+  align-self: start;
+  flex-wrap: nowrap;
 }
 
 .resource-list-more {
@@ -3404,6 +3432,48 @@ small {
   border-color: var(--border);
 }
 
+.decision-policy {
+  color: var(--accent);
+  background: var(--sel-bg);
+  border-color: color-mix(in srgb, var(--accent) 32%, transparent);
+}
+
+.decision-payout {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+}
+
+.decision-gate {
+  color: var(--fg-muted);
+  background: var(--canvas-inset);
+  border-color: var(--border);
+}
+
+.decision-gate-pass {
+  color: var(--success);
+  background: color-mix(in srgb, var(--success) 12%, transparent);
+  border-color: color-mix(in srgb, var(--success) 38%, transparent);
+}
+
+.decision-gate-open {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 12%, transparent);
+  border-color: color-mix(in srgb, var(--warning) 34%, transparent);
+}
+
+.decision-gate-fail {
+  color: var(--danger);
+  background: color-mix(in srgb, var(--danger) 10%, transparent);
+  border-color: color-mix(in srgb, var(--danger) 32%, transparent);
+}
+
+.decision-gate-unknown {
+  color: var(--fg-muted);
+  background: var(--canvas-inset);
+  border-color: var(--border);
+}
+
 .linked-findings {
   display: flex;
   flex-wrap: wrap;
@@ -4003,6 +4073,15 @@ small {
 
   .candidate-row {
     grid-template-columns: 22px minmax(0, 1fr);
+  }
+
+  .backlog-card {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .backlog-card .resource-actions {
+    grid-column: 1;
+    justify-content: flex-start;
   }
 
   .activity-head {

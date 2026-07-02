@@ -234,7 +234,7 @@ What it does, in one session:
 2. **Reproduce** each finding against **real ground truth** — the model decides what that is for the target (a mainnet fork of the deployed contract and its real verifier, a real released package, a local node) and writes the reproduction itself. A finding is marked `reproduced` only if it triggers on the real target, using only attacker-real capabilities, with the effect **exhibited** as a concrete observable (a drained balance, a forged output, an accepted invalid input) — never a printed string, never an argument.
 3. **Consolidate** by execution: a fix-equivalence matrix cross-applies each bug's fix against the others' PoCs and merges any a single fix neutralizes — *distinct bugs decided by execution, not by similar titles*.
 4. **Check novelty** online (advisories, issues, post-mortems) — used only as a *lead* and as a *disqualifier* for already-disclosed bugs, never as proof.
-5. **Decide**: `confirm_decision.json` + `confirm_report.md`, one row per distinct bug — reproduced?, evidence, novelty/corroboration, and a `submit-candidate` / `needs-human` / `drop` recommendation.
+5. **Decide**: `confirm_decision.json` + `confirm_report.md`, one row per distinct bug — reproduced?, evidence, novelty/corroboration, and a `submit-candidate` / `needs-human` / `drop` recommendation. For bounty-like engagements with reproduced bugs, confirm also writes `impact_inventory.json`: a structured live exposure / affected deployment inventory used to support or block the live-impact and payout gates.
 
 The three rules the prompt enforces: **execution is the only truth**; **the web is a lead, never proof**; **only attacker-real capabilities** (the same faithful-PoC rule the `run` refutation applies). A finding that only reproduced under a substituted trusted component, an unreachable precondition, or assumed state does **not** clear the bar — it is recorded `not-reproduced` with the exact crutch named.
 
@@ -322,6 +322,7 @@ Each `flounder confirm` writes:
 
 - `confirm_provenance.json`: sha256 + timestamp of the run findings, frozen before any network access.
 - `confirm_decision.json`: the decision sheet — one row per distinct bug (reproduced?, evidence, novelty, recommendation).
+- `impact_inventory.json`: bounty-like live exposure / affected deployment evidence when confirm reproduced a bug and attempted payout-impact adjudication.
 - `confirm_report.md`: the human-readable decision sheet.
 - `confirm_equivalence.json`: the fix-equivalence matrix (which fixes block which PoCs) and the resulting clusters.
 - `confirm_transcript.json`, `events.jsonl`, `calls/*.json`: the open-world session trace.

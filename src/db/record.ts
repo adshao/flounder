@@ -30,6 +30,8 @@ export interface ConfirmDecisionInput {
   corroboration?: string | undefined;
   novelty?: string | undefined;
   humanGates?: string | undefined;
+  engagementProfile?: unknown;
+  adjudication?: unknown;
   mergedFrom?: string[] | undefined;
   reproCommandId?: string | undefined;
   reportMarkdown?: string | undefined;

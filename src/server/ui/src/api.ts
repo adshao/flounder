@@ -204,6 +204,10 @@ export interface ConfirmDecision {
   corroboration?: string | null;
   novelty?: string | null;
   human_gates?: string | null;
+  engagement_profile_json?: string | null;
+  adjudication_json?: string | null;
+  engagement_profile?: Record<string, unknown> | unknown[] | null;
+  adjudication?: Record<string, unknown> | unknown[] | null;
   merged_from_json?: string | null;
   repro_command_id?: string | null;
   decision_path?: string | null;

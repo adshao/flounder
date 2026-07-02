@@ -93,6 +93,34 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     const runPatch = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/runs/:id");
     assert.match(runPatch.body.scopeCoverageMode, /project-cumulative/);
     assert.match(runPatch.body.coverageTarget, /until 30/);
+    const runArtifact = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/runs/:id/artifact");
+    assert.match(runArtifact.query.name, /impact_inventory\.json/);
+  });
+});
+
+test("api: run artifacts expose confirm impact inventory", async () => {
+  await withServer(async (base, out) => {
+    const created = await (await fetch(base + "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "impact-inventory-artifact", sourcePaths: ["./src"] }),
+    })).json();
+
+    const runDir = path.join(out, "impact-inventory-run");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "impact_inventory.json"), JSON.stringify({
+      items: [{ bug: "Pool drain", members: ["kpool"], status: "funded" }],
+    }));
+
+    const store = MetadataStore.openForOutput(out);
+    const runId = store.startRun({ projectId: created.id, kind: "confirm", runDir, provider: "openai-codex", model: "gpt-5.5" });
+    store.finishRun(runId, "done");
+    store.close();
+
+    const artifact = await fetch(base + `/api/runs/${runId}/artifact?name=impact_inventory.json`);
+    assert.equal(artifact.status, 200);
+    const inventory = JSON.parse(await artifact.text());
+    assert.equal(inventory.items[0].bug, "Pool drain");
   });
 });
 

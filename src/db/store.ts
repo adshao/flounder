@@ -108,6 +108,8 @@ export interface ConfirmRow {
   corroboration?: string | undefined;
   novelty?: string | undefined;
   humanGates?: string | undefined;
+  engagementProfile?: unknown;
+  adjudication?: unknown;
   mergedFrom?: string[] | undefined;
   reproCommandId?: string | undefined;
   reportMarkdown?: string | undefined;
@@ -324,6 +326,8 @@ CREATE TABLE IF NOT EXISTS confirm_decision(
   corroboration TEXT,
   novelty TEXT,
   human_gates TEXT,
+  engagement_profile_json TEXT,
+  adjudication_json TEXT,
   merged_from_json TEXT,
   repro_command_id TEXT,
   report_markdown TEXT,
@@ -452,11 +456,11 @@ const CONFIDENCE_RANK: Record<string, number> = {
   high: 3,
 };
 
-function decisionEvidenceText(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): string {
-  return [row.reproEvidence, row.humanGates, row.corroboration, row.novelty].filter(Boolean).join("\n").toLowerCase();
+function decisionEvidenceText(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): string {
+  return [row.reproEvidence, row.humanGates, row.corroboration, row.novelty, structuredText(row.adjudication)].filter(Boolean).join("\n").toLowerCase();
 }
 
-function hasSourceOnlyReproductionCrutch(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): boolean {
+function hasSourceOnlyReproductionCrutch(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): boolean {
   const text = decisionEvidenceText(row);
   if (!text) return false;
   return [
@@ -482,13 +486,13 @@ function hasSourceOnlyReproductionCrutch(row: Pick<ConfirmRow, "reproEvidence" |
   ].some((pattern) => pattern.test(text));
 }
 
-function hasLocalForkReproduction(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): boolean {
+function hasLocalForkReproduction(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): boolean {
   const text = decisionEvidenceText(row);
   return /\b(?:local |mainnet |polygon |ethereum |arbitrum |optimism |base |bsc |avalanche )?fork(?:ed)?\b/.test(text)
     || /\bforked (?:live|mainnet|polygon|ethereum|arbitrum|optimism|base|bsc|avalanche)\b/.test(text);
 }
 
-function hasRealTargetReproduction(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty">): boolean {
+function hasRealTargetReproduction(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): boolean {
   const text = decisionEvidenceText(row);
   return /\breal[- ]target\b/.test(text)
     || /\breal target effect\b/.test(text)
@@ -496,7 +500,7 @@ function hasRealTargetReproduction(row: Pick<ConfirmRow, "reproEvidence" | "huma
     || /\bcurrent deployment\b/.test(text);
 }
 
-function inferredDecisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "reproEvidence" | "humanGates" | "corroboration" | "novelty">): string {
+function inferredDecisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): string {
   if (row.reproduced === "no") return "not-reproduced";
   if (row.reproduced === "could-not-set-up") return "could-not-set-up";
   if (row.reproduced !== "yes") return "unknown";
@@ -512,7 +516,7 @@ function shouldDowngradeEvidence(stored: string, inferred: string): boolean {
   return inferred === "source-only-local-confirmed" && storedRank > inferredRank;
 }
 
-function decisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "evidenceLevel" | "reproEvidence" | "humanGates" | "corroboration" | "novelty">): string {
+function decisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "evidenceLevel" | "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): string {
   const inferred = inferredDecisionEvidenceLevel(row);
   const explicit = row.evidenceLevel?.trim();
   if (explicit && !shouldDowngradeEvidence(explicit, inferred)) return explicit;
@@ -524,13 +528,14 @@ function isRealTargetEvidenceLevel(value?: string): boolean {
   return normalized === "real-target-reproduced" || normalized === "fork-reproduced" || normalized === "local-fork-reproduced";
 }
 
-function hasUnsettledSubmissionGate(row: Pick<ConfirmRow, "humanGates">): boolean {
+function hasUnsettledSubmissionGate(row: Pick<ConfirmRow, "humanGates" | "adjudication">): boolean {
   const text = String(row.humanGates ?? "").toLowerCase();
-  return /\b(?:scope|venue|eligib|bounty|live|deployment|production|current|human gate|needs?|not established|not confirmed|review)\b/.test(text);
+  return hasStructuredBlockingGate(row.adjudication)
+    || /\b(?:scope|venue|eligib|bounty|live|deployment|production|current|human gate|needs?|not established|not confirmed|unknown|unclear|unverified|pending|review)\b/.test(text);
 }
 
 function inferredDecisionSubmissionConfidence(
-  row: Pick<ConfirmRow, "reproduced" | "recommendation" | "humanGates">,
+  row: Pick<ConfirmRow, "reproduced" | "recommendation" | "humanGates" | "adjudication">,
   evidenceLevel: string,
 ): string {
   if (row.reproduced === "no" || row.recommendation === "drop") return "low";
@@ -546,7 +551,7 @@ function inferredDecisionSubmissionConfidence(
 }
 
 function decisionSubmissionConfidence(
-  row: Pick<ConfirmRow, "reproduced" | "recommendation" | "submissionConfidence" | "humanGates">,
+  row: Pick<ConfirmRow, "reproduced" | "recommendation" | "submissionConfidence" | "humanGates" | "adjudication">,
   evidenceLevel: string,
 ): string {
   const inferred = inferredDecisionSubmissionConfidence(row, evidenceLevel);
@@ -556,6 +561,33 @@ function decisionSubmissionConfidence(
   const inferredRank = CONFIDENCE_RANK[inferred] ?? 0;
   if (explicitRank > inferredRank && (!isRealTargetEvidenceLevel(evidenceLevel) || hasUnsettledSubmissionGate(row))) return inferred;
   return explicit;
+}
+
+function structuredText(value: unknown): string {
+  if (value === undefined || value === null) return "";
+  if (typeof value === "string") return value;
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
+}
+
+function hasStructuredBlockingGate(value: unknown): boolean {
+  const root = typeof value === "string" ? jsonParseOrNull(value) : value;
+  if (!root || typeof root !== "object" || Array.isArray(root)) return false;
+  const obj = root as Record<string, unknown>;
+  const gateArrays = [obj.gates, obj.required_gates, obj.requiredGates].filter(Array.isArray) as unknown[][];
+  for (const gates of gateArrays) {
+    for (const gate of gates) {
+      if (!gate || typeof gate !== "object" || Array.isArray(gate)) continue;
+      const status = String((gate as Record<string, unknown>).status ?? "").trim().toLowerCase().replace(/[^a-z0-9]+/g, "-");
+      if (!status) continue;
+      if (["pass", "passed", "yes", "ok", "satisfied", "not-required", "not-applicable", "in-scope", "eligible", "confirmed"].includes(status)) continue;
+      return true;
+    }
+  }
+  return false;
 }
 
 function decisionConfirmOutcome(row: Pick<ConfirmRow, "reproduced">, evidenceLevel: string): "reproduced" | "not-reproduced" | null {
@@ -573,6 +605,8 @@ function decisionEvidenceInput(row: {
   human_gates?: string | null;
   corroboration?: string | null;
   novelty?: string | null;
+  engagement_profile_json?: string | null;
+  adjudication_json?: string | null;
 }): ConfirmRow {
   return {
     bug: "",
@@ -584,6 +618,8 @@ function decisionEvidenceInput(row: {
     humanGates: row.human_gates ?? undefined,
     corroboration: row.corroboration ?? undefined,
     novelty: row.novelty ?? undefined,
+    engagementProfile: row.engagement_profile_json ? jsonParseOrNull(row.engagement_profile_json) : undefined,
+    adjudication: row.adjudication_json ? jsonParseOrNull(row.adjudication_json) : undefined,
   };
 }
 
@@ -634,6 +670,8 @@ export class MetadataStore {
       "ALTER TABLE confirm_decision ADD COLUMN corroboration TEXT",
       "ALTER TABLE confirm_decision ADD COLUMN novelty TEXT",
       "ALTER TABLE confirm_decision ADD COLUMN human_gates TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN engagement_profile_json TEXT",
+      "ALTER TABLE confirm_decision ADD COLUMN adjudication_json TEXT",
       "ALTER TABLE confirm_decision ADD COLUMN merged_from_json TEXT",
       "ALTER TABLE confirm_decision ADD COLUMN repro_command_id TEXT",
       "ALTER TABLE confirm_decision ADD COLUMN severity TEXT",
@@ -1645,8 +1683,9 @@ export class MetadataStore {
       const stmt = this.db.prepare(
         `INSERT INTO confirm_decision(project_id, run_id, bug, reproduced, recommendation, members_json,
           severity, evidence_level, submission_confidence, distinct_fix, repro_evidence, corroboration,
-          novelty, human_gates, merged_from_json, repro_command_id, report_markdown, decision_path, created_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+          novelty, human_gates, engagement_profile_json, adjudication_json, merged_from_json, repro_command_id,
+          report_markdown, decision_path, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const ts = now();
       // The confirm work-list ids ARE finding content keys, so a decision's members map straight
@@ -1680,6 +1719,8 @@ export class MetadataStore {
           r.corroboration ?? null,
           r.novelty ?? null,
           r.humanGates ?? null,
+          jsonOrNull(r.engagementProfile),
+          jsonOrNull(r.adjudication),
           jsonOrNull(r.mergedFrom),
           r.reproCommandId ?? null,
           r.reportMarkdown ?? null,

@@ -377,6 +377,50 @@ function latestCoverageTimelineRun(runs: RunRow[]): RunRow | undefined {
   }) ?? runs.find((run) => run.kind === "run" || run.kind === "map");
 }
 
+function boundedDurationMs(startMs: number, endMs: number): number {
+  return startMs > 0 && endMs > startMs ? endMs - startMs : 0;
+}
+
+function runEndMs(run: RunRow, nowMs: number): number {
+  if (run.status === "running") return nowMs;
+  return startedAtMs(run.ended_at);
+}
+
+function coveragePhaseDurations(runs: RunRow[], nowMs = Date.now()): { mapMs: number; digMs: number } {
+  let mapMs = 0;
+  let digMs = 0;
+
+  for (const run of runs) {
+    if (isVerifyRun(run) || !["run", "audit", "map"].includes(run.kind)) continue;
+    const startMs = startedAtMs(run.started_at);
+    if (!startMs) continue;
+
+    const endMs = runEndMs(run, nowMs);
+    const digStartMs = startedAtMs(run.dig_started_at);
+    const synthStartMs = startedAtMs(stages(run).synthesis?.startedAt);
+
+    if (run.kind === "map") {
+      mapMs += boundedDurationMs(startMs, endMs);
+      continue;
+    }
+
+    if (run.kind === "run") {
+      if (digStartMs > startMs) {
+        mapMs += boundedDurationMs(startMs, digStartMs);
+      } else if (!digStartMs && run.status === "done" && run.scopes_total != null && run.run_scopes_target == null) {
+        mapMs += boundedDurationMs(startMs, endMs);
+      }
+    }
+
+    const effectiveDigStartMs = digStartMs > 0 ? digStartMs : run.kind === "audit" ? startMs : 0;
+    if (!effectiveDigStartMs) continue;
+    const effectiveDigEndMs = synthStartMs > effectiveDigStartMs ? synthStartMs : endMs;
+    digMs += boundedDurationMs(effectiveDigStartMs, effectiveDigEndMs);
+  }
+
+  return { mapMs, digMs };
+}
+
 function confirmProgressStat(run: RunRow | undefined): string {
   const progress = stages(run).confirm;
   if (!progress) return "";
@@ -491,30 +535,10 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const verifyStat = verifyProgress
     ? `Verifying ${verifyProgress.done}/${verifyProgress.target} findings${detail.findingsTotal ? ` · ${detail.findingsTotal} in project` : ""}`
     : "";
-  const auditRun = audit ?? coverageTimelineRun ?? auditLatest;
-  const auditRunStages = stages(auditRun);
-  const startMs = auditRun?.started_at ? new Date(auditRun.started_at).getTime() : 0;
-  const runEndMs = auditRun?.ended_at ? new Date(auditRun.ended_at).getTime() : 0;
-  const synthesisBeginMs = auditRunStages.synthesis?.startedAt ? new Date(auditRunStages.synthesis.startedAt).getTime() : 0;
-  const digEndMs = synthesisBeginMs > 0 ? synthesisBeginMs : runEndMs;
-  const boundMs = auditRun?.dig_started_at ? new Date(auditRun.dig_started_at).getTime() : 0;
   const finishedSelectedDigBatch = completedScopeBatch(coverageTimelineRun ?? auditLatest);
-  const mapDur = mapRunning
-    ? runDur(audit, true)
-    : progress.total > 0 && auditRun?.kind === "map"
-      ? runDur(auditRun, false)
-      : progress.total > 0 && startMs && boundMs > startMs
-        ? fmtDur(boundMs - startMs)
-        : "";
-  const digDur = digRunning
-    ? boundMs
-      ? fmtDur(Date.now() - boundMs)
-      : runDur(audit, true)
-    : progress.audited > 0
-      ? boundMs && digEndMs > boundMs
-        ? fmtDur(digEndMs - boundMs)
-        : runDur(auditLatest, false)
-      : "";
+  const phaseDurations = coveragePhaseDurations(runs);
+  const mapDur = progress.total > 0 || mapRunning ? fmtDur(phaseDurations.mapMs) : "";
+  const digDur = progress.audited > 0 || digRunning ? fmtDur(phaseDurations.digMs) : "";
   const synthesisStartMs = synthesis?.startedAt ? new Date(synthesis.startedAt).getTime() : 0;
   const synthesisEndMs = synthesis?.at ? new Date(synthesis.at).getTime() : 0;
   const synthesisDur = finalizingAudit && synthesisStartMs

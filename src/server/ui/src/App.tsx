@@ -3532,19 +3532,136 @@ function badgeLabel(value: string): string {
   return badgeToken(value).split("-").map((part) => part ? `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}` : "").filter(Boolean).join(" ");
 }
 
+type DecisionChip = { label: string; className: string; title: string };
+type DecisionObject = Record<string, unknown>;
+
+function decisionObject(value: unknown): DecisionObject | undefined {
+  return value && typeof value === "object" && !Array.isArray(value) ? (value as DecisionObject) : undefined;
+}
+
+function decisionStructuredObject(decision: ConfirmDecision, objectKey: "engagement_profile" | "adjudication", jsonKey: "engagement_profile_json" | "adjudication_json"): DecisionObject | undefined {
+  return decisionObject(decision[objectKey]) ?? decisionObject(parseJson<unknown>(decision[jsonKey], null));
+}
+
+function stringField(obj: DecisionObject | undefined, keys: string[]): string {
+  if (!obj) return "";
+  for (const key of keys) {
+    const value = obj[key];
+    if (typeof value === "string" && value.trim()) return value.trim();
+    if (typeof value === "number" || typeof value === "boolean") return String(value);
+  }
+  return "";
+}
+
+function recordField(obj: DecisionObject | undefined, keys: string[]): DecisionObject | undefined {
+  if (!obj) return undefined;
+  for (const key of keys) {
+    const value = decisionObject(obj[key]);
+    if (value) return value;
+  }
+  return undefined;
+}
+
+function recordArrayField(obj: DecisionObject | undefined, keys: string[]): DecisionObject[] {
+  if (!obj) return [];
+  for (const key of keys) {
+    const value = obj[key];
+    if (Array.isArray(value)) return value.map(decisionObject).filter((entry): entry is DecisionObject => Boolean(entry));
+  }
+  return [];
+}
+
+function gateStatusKind(value: string): "pass" | "open" | "fail" | "unknown" {
+  const token = badgeToken(value);
+  if (!token) return "unknown";
+  if (["pass", "passed", "yes", "ok", "satisfied", "not-required", "not-applicable", "in-scope", "eligible", "confirmed"].includes(token)) return "pass";
+  if (["fail", "failed", "no", "blocked", "out-of-scope", "ineligible", "already-disclosed", "duplicate", "not-reproduced"].includes(token)) return "fail";
+  if (["unknown", "unclear", "pending", "needs-human", "not-established", "unverified", "partial", "review"].includes(token)) return "open";
+  return "unknown";
+}
+
+function gateChip(label: string, status: string, title: string): DecisionChip | null {
+  if (!status) return null;
+  const kind = gateStatusKind(status);
+  const className = kind === "pass"
+    ? "label decision-gate decision-gate-pass"
+    : kind === "fail"
+      ? "label decision-gate decision-gate-fail"
+      : kind === "open"
+        ? "label decision-gate decision-gate-open"
+        : "label decision-gate decision-gate-unknown";
+  return { label: `${label} ${kind === "unknown" ? badgeLabel(status) : kind}`, className, title };
+}
+
+function gateStatus(adjudication: DecisionObject | undefined, needles: string[], fallbackKeys: string[]): string {
+  const gates = recordArrayField(adjudication, ["gates", "required_gates", "requiredGates"]);
+  for (const gate of gates) {
+    const name = [stringField(gate, ["id", "kind", "name", "gate"]), stringField(gate, ["description", "label"])].join(" ").toLowerCase();
+    if (!needles.some((needle) => name.includes(needle))) continue;
+    const status = stringField(gate, ["status", "result", "state"]);
+    if (status) return status;
+  }
+  return stringField(adjudication, fallbackKeys);
+}
+
+function usdNumber(value: unknown): number | undefined {
+  if (typeof value === "number" && Number.isFinite(value)) return value;
+  if (typeof value !== "string") return undefined;
+  const n = Number(value.replace(/[^0-9.]+/g, ""));
+  return Number.isFinite(n) ? n : undefined;
+}
+
+function formatUsd(value: unknown): string {
+  const n = usdNumber(value);
+  if (n === undefined) return typeof value === "string" && value.trim() ? value.trim() : "";
+  if (n >= 1_000_000) return `$${(n / 1_000_000).toFixed(n >= 10_000_000 ? 0 : 1)}M`;
+  if (n >= 1_000) return `$${(n / 1_000).toFixed(n >= 10_000 ? 0 : 1)}k`;
+  return `$${Math.round(n).toLocaleString()}`;
+}
+
+function payoutChip(adjudication: DecisionObject | undefined): DecisionChip | null {
+  const estimate = recordField(adjudication, ["payout_estimate", "payoutEstimate", "expected_payout", "expectedPayout"]);
+  if (!estimate) return null;
+  const exact = formatUsd(estimate.expected_collectible_usd ?? estimate.expectedCollectibleUsd ?? estimate.collectible_usd ?? estimate.collectibleUsd);
+  const min = formatUsd(estimate.eligible_min_usd ?? estimate.eligibleMinUsd ?? estimate.min_usd ?? estimate.minUsd);
+  const max = formatUsd(estimate.eligible_max_usd ?? estimate.eligibleMaxUsd ?? estimate.max_usd ?? estimate.maxUsd);
+  const status = stringField(estimate, ["status", "confidence", "basis"]);
+  const label = exact ? `Payout ${exact}` : min && max ? `Payout ${min}-${max}` : "Payout unknown";
+  const open = !exact && !(min && max);
+  return {
+    label,
+    className: open ? "label decision-gate decision-gate-open" : "label decision-payout",
+    title: status || "Conservative expected collectible bounty; unknown means the required gates are not proven.",
+  };
+}
+
+function decisionAdjudicationChips(decision: ConfirmDecision): DecisionChip[] {
+  const engagement = decisionStructuredObject(decision, "engagement_profile", "engagement_profile_json");
+  const adjudication = decisionStructuredObject(decision, "adjudication", "adjudication_json");
+  const policy = stringField(engagement, ["policy_kind", "policyKind", "kind"]) || stringField(adjudication, ["policy_kind", "policyKind"]);
+  return [
+    policy ? { label: `Policy ${badgeLabel(policy)}`, className: "label decision-policy", title: "Agent-selected engagement policy for this decision." } : null,
+    gateChip("Scope", gateStatus(adjudication, ["scope", "venue", "eligib"], ["scope_status", "scopeStatus"]), "Bounty or engagement scope gate."),
+    gateChip("Funds", gateStatus(adjudication, ["fund", "impact", "exposure", "live"], ["live_impact_status", "liveImpactStatus", "funds_status", "fundsStatus"]), "Live funded impact or exposure gate."),
+    gateChip("Known", gateStatus(adjudication, ["known", "novel", "duplicate", "disclos"], ["known_issue_status", "knownIssueStatus", "novelty_status", "noveltyStatus"]), "Known issue, duplicate, or prior disclosure gate."),
+    payoutChip(adjudication),
+  ].filter((entry): entry is DecisionChip => Boolean(entry));
+}
+
 function SeverityBadge({ value }: { value?: string | null }) {
   if (!value?.trim()) return null;
   const token = badgeToken(value);
   return <span className={`severity sev-${token}`}>{badgeLabel(value)}</span>;
 }
 
-function decisionMetaChips(decision: ConfirmDecision): Array<{ label: string; className: string; title: string }> {
+function decisionMetaChips(decision: ConfirmDecision): DecisionChip[] {
   const severity = decision.severity?.trim();
   const confidence = decision.submission_confidence?.trim();
   return [
     decision.recommendation ? { label: decisionRecommendationLabel(decision), className: `label decision-recommendation ${decisionRecommendationClass(decision)}`, title: "Submit recommendation" } : null,
     severity ? { label: badgeLabel(severity), className: `severity sev-${badgeToken(severity)}`, title: "Decision severity" } : null,
     confidence ? { label: `${badgeLabel(confidence)} confidence`, className: `label decision-confidence decision-confidence-${badgeToken(confidence)}`, title: "Submission confidence" } : null,
+    ...decisionAdjudicationChips(decision),
   ].filter((entry): entry is { label: string; className: string; title: string } => Boolean(entry));
 }
 
@@ -5805,6 +5922,8 @@ function findingReportMarkdown(finding: FindingRow): string {
 }
 
 function decisionReportMarkdown(decision: ConfirmDecision): string {
+  const engagement = decisionStructuredObject(decision, "engagement_profile", "engagement_profile_json");
+  const adjudication = decisionStructuredObject(decision, "adjudication", "adjudication_json");
   const lines = [
     `# ${decision.bug || "Submission report"}`,
     "",
@@ -5819,6 +5938,12 @@ function decisionReportMarkdown(decision: ConfirmDecision): string {
   ].filter(Boolean);
   if (decision.repro_evidence) lines.push("## Reproduction Evidence", "", decision.repro_evidence, "");
   if (decision.distinct_fix) lines.push("## Distinct Fix", "", decision.distinct_fix, "");
+  if (engagement || adjudication) {
+    lines.push("## Engagement and Eligibility", "");
+    if (engagement) lines.push(`- Engagement profile: ${jsonInline(engagement)}`);
+    if (adjudication) lines.push(`- Eligibility / payout adjudication: ${jsonInline(adjudication)}`);
+    lines.push("");
+  }
   if (decision.corroboration || decision.novelty || decision.human_gates) {
     lines.push("## Novelty and Disclosure Notes", "");
     if (decision.corroboration) lines.push(`- Corroboration: ${decision.corroboration}`);
@@ -5826,6 +5951,14 @@ function decisionReportMarkdown(decision: ConfirmDecision): string {
     if (decision.human_gates) lines.push(`- Human gates: ${decision.human_gates}`);
   }
   return lines.join("\n").trim();
+}
+
+function jsonInline(value: unknown): string {
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return String(value);
+  }
 }
 
 function redactReportMarkdown(markdown: string): string {

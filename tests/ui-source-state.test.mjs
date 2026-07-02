@@ -136,7 +136,7 @@ test("ui: confirm phase surfaces latest confirm run errors", () => {
   assert.equal(phases.confirm.stat, "Confirm blocked");
 });
 
-test("ui: phase durations stay anchored to the primary coverage run after follow-up audit starts confirm", () => {
+test("ui: phase durations accumulate coverage runs and ignore confirm", () => {
   const detail = {
     runs: [
       {
@@ -192,9 +192,83 @@ test("ui: phase durations stay anchored to the primary coverage run after follow
   };
   const phases = phaseState(detail, { total: 127, audited: 30, deferred: 0, pending: 97 });
   assert.equal(phases.map.dur, "49m 12s");
-  assert.equal(phases.dig.dur, "7h 11m");
+  assert.equal(phases.dig.dur, "7h 31m");
   assert.equal(phases.dig.status, "done");
   assert.equal(phases.synthesis.dur, "13m 31s");
+});
+
+test("ui: running continuation dig adds to prior map and dig duration", () => {
+  const originalNow = Date.now;
+  Date.now = () => new Date("2026-06-30T14:11:00.000Z").getTime();
+  try {
+    const detail = {
+      runs: [
+        {
+          id: 109,
+          kind: "run",
+          status: "running",
+          started_at: "2026-06-30T13:00:00.000Z",
+          dig_started_at: "2026-06-30T13:00:00.000Z",
+          ended_at: null,
+          run_scopes_done: 4,
+          run_scopes_target: 62,
+        },
+        {
+          id: 108,
+          kind: "confirm",
+          status: "done",
+          started_at: "2026-06-30T12:31:29.845Z",
+          ended_at: "2026-06-30T12:50:00.000Z",
+        },
+        {
+          id: 107,
+          kind: "audit",
+          status: "done",
+          started_at: "2026-06-30T12:12:15.724Z",
+          dig_started_at: "2026-06-30T12:12:15.725Z",
+          ended_at: "2026-06-30T12:31:29.835Z",
+          run_scopes_done: 2,
+          run_scopes_target: 2,
+        },
+        {
+          id: 106,
+          kind: "run",
+          status: "done",
+          started_at: "2026-06-30T03:40:22.921Z",
+          dig_started_at: "2026-06-30T04:29:34.935Z",
+          ended_at: "2026-06-30T12:12:11.394Z",
+          run_scopes_done: 30,
+          run_scopes_target: 30,
+          scopes_total: 129,
+          scopes_audited: 30,
+          stages_json: JSON.stringify({
+            synthesis: {
+              scopes: 127,
+              pool: 19,
+              status: "done",
+              startedAt: "2026-06-30T11:41:31.513Z",
+              at: "2026-06-30T11:55:03.175Z",
+              produced: 1,
+            },
+          }),
+        },
+      ],
+      material: {},
+      scopes: [{ id: 1, status: "auditing" }],
+      activeScopeCount: 1,
+      findingsTotal: 30,
+      statusCounts: { "confirmed-executable": 16, suspected: 12 },
+      prepareSummary: { realTarget: { requiresConfirmation: true } },
+      allFindings: [],
+      confirmDecisions: [],
+    };
+    const phases = phaseState(detail, { total: 92, audited: 34, deferred: 0, pending: 58 });
+    assert.equal(phases.map.dur, "49m 12s");
+    assert.equal(phases.dig.dur, "8h 42m");
+    assert.equal(phases.dig.status, "running");
+  } finally {
+    Date.now = originalNow;
+  }
 });
 
 test("ui: running confirm surfaces command progress before decision rows exist", () => {
