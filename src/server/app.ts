@@ -3873,6 +3873,7 @@ function summarizeDaemonCapabilities(capabilities: unknown): Record<string, unkn
   const providersRaw = capabilities && typeof capabilities === "object" && !Array.isArray(capabilities)
     ? (capabilities as { providers?: unknown }).providers
     : undefined;
+  const sandbox = summarizeDaemonSandbox(capabilities);
   const providers = Array.isArray(providersRaw)
     ? providersRaw.flatMap((entry) => {
         if (typeof entry === "string") return [{ provider: entry, configured: true, required: true }];
@@ -3891,7 +3892,23 @@ function summarizeDaemonCapabilities(capabilities: unknown): Record<string, unkn
     providers,
     providerCount: providers.length,
     configuredProviderCount: providers.filter((entry) => entry.configured).length,
+    ...(sandbox ? { sandbox } : {}),
   };
+}
+
+function summarizeDaemonSandbox(capabilities: unknown): Record<string, unknown> | undefined {
+  if (!capabilities || typeof capabilities !== "object" || Array.isArray(capabilities)) return undefined;
+  const sandbox = (capabilities as { sandbox?: unknown }).sandbox;
+  if (!sandbox || typeof sandbox !== "object" || Array.isArray(sandbox)) return undefined;
+  const read = sandbox as Record<string, unknown>;
+  const out: Record<string, unknown> = {};
+  if (typeof read.ok === "boolean") out.ok = read.ok;
+  if (typeof read.backend === "string" && read.backend.trim()) out.backend = read.backend.trim();
+  if (typeof read.image === "string" && read.image.trim()) out.image = read.image.trim();
+  if (typeof read.allowHostFallback === "boolean") out.allowHostFallback = read.allowHostFallback;
+  if (typeof read.autoBuild === "boolean") out.autoBuild = read.autoBuild;
+  if (typeof read.message === "string" && read.message.trim()) out.message = read.message.trim();
+  return Object.keys(out).length ? out : undefined;
 }
 
 function normalizeProjectStatusFilter(value: string | null | undefined): ProjectStatusFilter | undefined {

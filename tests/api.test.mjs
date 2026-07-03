@@ -3884,6 +3884,15 @@ test("api: daemon lists return provider-auth summaries by default", async () => 
             { provider: "openai-codex", configured: true, required: true, oauthLogin: true, expectedEnvVars: ["SHOULD_NOT_BE_DEFAULT"] },
             { provider: "anthropic", configured: false, required: true, oauthLogin: true, expectedEnvVars: ["ANTHROPIC_API_KEY"] },
           ],
+          sandbox: {
+            ok: true,
+            backend: "oci",
+            image: "flounder-sandbox:latest",
+            allowHostFallback: false,
+            autoBuild: true,
+            message: "Default sandbox image will be built automatically.",
+            expectedEnvVars: ["SHOULD_NOT_BE_DEFAULT"],
+          },
         },
       }),
     });
@@ -3891,6 +3900,14 @@ test("api: daemon lists return provider-auth summaries by default", async () => 
     const summary = await json(await fetch(base + "/api/daemons"));
     assert.equal(summary.daemons[0].capabilities.configuredProviderCount, 1);
     assert.deepEqual(summary.daemons[0].capabilities.providers[0], { provider: "openai-codex", configured: true, required: true, oauthLogin: true });
+    assert.deepEqual(summary.daemons[0].capabilities.sandbox, {
+      ok: true,
+      backend: "oci",
+      image: "flounder-sandbox:latest",
+      allowHostFallback: false,
+      autoBuild: true,
+      message: "Default sandbox image will be built automatically.",
+    });
     assert.equal(JSON.stringify(summary).includes("SHOULD_NOT_BE_DEFAULT"), false);
 
     const raw = await json(await fetch(base + "/api/daemons?include=capabilities"));
