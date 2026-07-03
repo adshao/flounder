@@ -184,16 +184,21 @@ For repository development or local builds, use Node 24 LTS from `.nvmrc` /
    pi already has `openai-codex` in `~/.pi/agent/auth.json`, Flounder imports
    that provider entry into `~/.flounder/agent/auth.json` on login/check.
 
-4. Ensure the execution sandbox is available on the daemon machine. For real
-   audits, install and start Docker or a Docker-compatible runtime, then build
-   the default sandbox image from the Flounder repo:
+4. Ensure the execution sandbox is available on the daemon machine. Default
+   `auto` mode prefers Apple's `container` runtime on Apple silicon macOS when
+   the selected image and sealed network are ready, then falls back to
+   Docker-backed OCI when the image is available. For the Docker-backed path,
+   install and start Docker or a Docker-compatible runtime, then build the
+   default sandbox image from the Flounder repo:
 
    ```bash
    npm run sandbox:build
    ```
 
-   Default `auto` mode uses the OCI image when it exists and otherwise fails
-   closed. If Docker/OCI is unavailable, only use
+   On Apple silicon macOS daemon hosts, install/start Apple's `container`
+   runtime and build or pull the selected image into that runtime to let `auto`
+   select it; `--sandbox-backend apple-container` requires that path explicitly.
+   If no sandbox engine is available, only use
    `--sandbox-backend host --allow-host-execution` for trusted local smoke tests
    after warning the user that host mode lacks kernel-level filesystem and
    network isolation.
@@ -435,9 +440,10 @@ Open only the references needed for the current task:
 - No daemon online: create/connect a daemon before launching jobs.
 - Daemon online but provider check fails: run `flounder daemon provider login`
   or set daemon-local provider credentials, then check again.
-- Sandbox says no OCI image is available: install/start Docker on the daemon and
-  run `npm run sandbox:build`, or ask for explicit trusted-local approval before
-  using `--sandbox-backend host --allow-host-execution`.
+- Sandbox says no backend is available: on Apple silicon macOS, install/start
+  Apple's `container` runtime and build or pull the image into that runtime, or
+  install/start Docker on the daemon and run `npm run sandbox:build`. Host
+  fallback still needs explicit trusted-local approval.
 - Project has no provider profile or daemon: configure those before creating a
   run.
 - Run is queued and no daemon can claim it: check the project's selected daemon.
@@ -482,7 +488,8 @@ Open only the references needed for the current task:
 | --- | --- | --- |
 | No daemon can claim a queued job | Project is pinned to an offline daemon | Start that daemon or edit the project daemon. |
 | Provider auth missing | Credentials live on daemon, not server | Run `flounder daemon provider login <provider>` and then `check`. |
-| OCI sandbox unavailable | Default image missing or Docker stopped | Start Docker and run `npm run sandbox:build`; host fallback needs explicit trusted-local approval. |
+| Docker-backed OCI sandbox unavailable | Default image missing or Docker stopped | Start Docker and run `npm run sandbox:build`; host fallback needs explicit trusted-local approval. |
+| Apple container sandbox unavailable | Apple `container` is not installed/started, the selected image is missing from that runtime, or the internal sealed network cannot be created | Run `container system start` and build or pull the image into Apple's runtime; `auto` falls back to Docker when that path is not ready. |
 | `prepareSummary.quality=limited` | Source is usable but has caveats | Continue unless blocking issues exist; preserve caveats for confirm/report. |
 | `prepareSummary.quality=invalid/missing` | No usable staged source or contaminated material | Repair prepare inputs before audit. |
 | Verify rejects selected findings for material drift | New Prepare changed the current material boundary | Re-select current findings or pass the explicit expert override only after checking drift. |

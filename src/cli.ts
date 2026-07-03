@@ -13,6 +13,7 @@ import { importRunToProjectHistory, projectHistoryManifestPath } from "./trace/h
 import { MetadataStore } from "./db/store.js";
 import { startUiServer } from "./server/app.js";
 import { runDaemon } from "./server/daemon.js";
+import { isSandboxBackend } from "./security/sandbox.js";
 import { knownRuntimeProviders, loginProvider, printProviderCheck, providerAuthStatus } from "./provider-auth.js";
 
 async function main(argv: string[]): Promise<void> {
@@ -243,7 +244,7 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   cfg.maxTokens = readIntFlag(args, "--max-tokens") ?? cfg.maxTokens;
   cfg.reproductionCommandTimeoutMs = readIntFlag(args, "--repro-timeout-ms") ?? cfg.reproductionCommandTimeoutMs;
   const sandboxBackend = readFlag(args, "--sandbox-backend");
-  if (sandboxBackend === "auto" || sandboxBackend === "oci" || sandboxBackend === "host") cfg.sandboxBackend = sandboxBackend;
+  if (isSandboxBackend(sandboxBackend)) cfg.sandboxBackend = sandboxBackend;
   cfg.sandboxImage = readFlag(args, "--sandbox-image") ?? cfg.sandboxImage;
   if (args.includes("--allow-host-execution")) cfg.sandboxAllowHostFallback = true;
   const prepareNetwork = readFlag(args, "--prepare-network");
@@ -297,7 +298,7 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
     cfg.reproductionCommandTimeoutMs = Math.max(1000, Math.floor(rawReproductionCommandTimeoutMs));
   }
   const rawSandboxBackend = raw.sandboxBackend ?? raw.sandbox_backend;
-  if (rawSandboxBackend === "auto" || rawSandboxBackend === "oci" || rawSandboxBackend === "host") cfg.sandboxBackend = rawSandboxBackend;
+  if (isSandboxBackend(rawSandboxBackend)) cfg.sandboxBackend = rawSandboxBackend;
   const rawSandboxImage = raw.sandboxImage ?? raw.sandbox_image;
   if (typeof rawSandboxImage === "string" && rawSandboxImage.trim()) cfg.sandboxImage = rawSandboxImage.trim();
   const rawAllowHost = raw.sandboxAllowHostFallback ?? raw.sandbox_allow_host_fallback ?? raw.allowHostExecution ?? raw.allow_host_execution;
@@ -1062,9 +1063,9 @@ Shared options:
   --max-steps <n>         cap agent turns for a breadth pass / pinned audit (default: UNBOUNDED — the model stops when done)
   --no-prepare            skip the toolchain warm-up (deps fetch/build)
   --prepare-timeout-ms <n>  per-command timeout for the warm-up, default 600000
-  --sandbox-backend <b>   auto|oci|host; default auto uses the OCI sandbox and refuses implicit host fallback
+  --sandbox-backend <b>   auto|oci|apple-container|host; default auto prefers Apple container on Apple silicon when ready, otherwise Docker-backed OCI
   --sandbox-image <img>   OCI image for sandboxed commands (default flounder-sandbox:latest; build with npm run sandbox:build)
-  --allow-host-execution  trusted-local opt-in only: let auto fall back to host execution when no OCI sandbox is available
+  --allow-host-execution  trusted-local opt-in only: let auto fall back to host execution when no sandbox backend is available
   --prepare-network <m>   none|enabled; dependency warm-up/build commands default to enabled
   --confirm-network <m>   none|enabled; open-world prepare/confirm bash commands default to enabled
   --sandbox-memory-mb <n> memory limit for OCI sandbox commands

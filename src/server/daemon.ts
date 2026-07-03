@@ -393,6 +393,7 @@ async function requireSandboxReady(
 function shouldAutoBuildDefaultSandbox(readiness: SandboxReadiness): boolean {
   return !readiness.ok
     && readiness.backend !== "host"
+    && readiness.backend !== "apple-container"
     && !readiness.allowHostFallback
     && isDefaultSandboxImage(readiness.image);
 }

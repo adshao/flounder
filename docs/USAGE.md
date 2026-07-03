@@ -108,13 +108,23 @@ For live model runs, configure provider credentials on each daemon machine. Subs
 
 ## Execution Sandbox
 
-Model-generated commands run in a copied workspace through `src/security/sandbox.ts`. The current OCI runner is Docker-backed: install and start Docker, or a Docker-compatible runtime that provides the `docker` CLI, before running real execution-confirming audits. Build the default image with:
+Model-generated commands run in a copied workspace through `src/security/sandbox.ts`. The default backend is `auto`: on Apple silicon macOS it first uses Apple's `container` runtime when the selected image and sealed network are ready; otherwise it uses Docker-backed OCI when the image is available. If no sandbox engine is ready, it refuses execution with a policy error instead of silently falling back to the host.
+
+For the Docker-backed path, install and start Docker, or a Docker-compatible runtime that provides the `docker` CLI, before running real execution-confirming audits. Build the default Docker image with:
 
 ```bash
 npm run sandbox:build
 ```
 
-The default backend is `auto`: Flounder checks for the OCI image `flounder-sandbox:latest`, runs sandboxed commands in it when available, and otherwise refuses execution with a policy error. It does not silently fall back to host execution. Use `--sandbox-backend oci` to require the container path and fail if the image is missing. Use `--sandbox-image <image>` to provide a target-specific image with extra toolchains.
+Use `--sandbox-backend oci` to require the Docker-backed container path and fail if the image is missing. Use `--sandbox-image <image>` to provide a target-specific image with extra toolchains.
+
+On Apple silicon macOS systems, `auto` tries Apple's `container` runtime before Docker. Install and start `container` on the daemon machine, build or pull the selected image into that runtime, then either let `auto` pick it or require it explicitly:
+
+```bash
+flounder run --source ./src --build-root . --sandbox-backend apple-container --sandbox-image flounder-sandbox:latest
+```
+
+This backend maps the copied workspace, cache mount, isolated environment, CPU/memory limits, read-only root filesystem, capability drop, and tmpfs mounts through `container run`. For sealed `network=none` commands it creates or reuses an internal host-only, no-DNS `flounder-sealed` network. The Docker image auto-build helper does not populate the Apple container runtime; if `auto` cannot use Apple `container`, it continues to the Docker-backed OCI path.
 
 The bundled image is only the default baseline. It cannot cover every compiler, prover, framework, package manager, or blockchain toolchain a real audit may need. For specialized targets, build or pull a reviewed image outside the audit loop and pass it explicitly:
 
@@ -132,7 +142,7 @@ flounder run --source ./src --build-root . --sandbox-backend host --allow-host-e
 
 Host execution keeps the copied workspace, isolated `HOME`, temp directories, and package-cache environment, but it cannot provide kernel-level network or filesystem isolation and it inherits the host process/toolchain boundary. Do not use it for untrusted targets, malicious dependencies, or real model-generated exploit code unless the operator deliberately accepts that risk. The same opt-in can be supplied by setting `FLOUNDER_ALLOW_HOST_EXECUTION=1`; the backend and image can be set with `FLOUNDER_SANDBOX_BACKEND` and `FLOUNDER_SANDBOX_IMAGE`.
 
-Network policy is phase-specific. Sealed `run --source` / `map` / `audit` inspection and confirmation commands use `--network none` in OCI. Dependency warm-up and explicit `purpose=build` commands default to `--prepare-network enabled` so package registries can be used. `flounder prepare` and `flounder confirm` default to `--confirm-network enabled` because they are the open-world phases; the command-safety policy still forbids broadcast, value-moving, destructive, credential, and persistence behavior.
+Network policy is phase-specific. Sealed `run --source` / `map` / `audit` inspection and confirmation commands use Docker `--network none` in the Docker-backed OCI backend, and an internal host-only, no-DNS `flounder-sealed` network in the Apple container backend. Dependency warm-up and explicit `purpose=build` commands default to `--prepare-network enabled` so package registries can be used. `flounder prepare` and `flounder confirm` default to `--confirm-network enabled` because they are the open-world phases; the command-safety policy still forbids broadcast, value-moving, destructive, credential, and persistence behavior.
 
 ## Materials
 

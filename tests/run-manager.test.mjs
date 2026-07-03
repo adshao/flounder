@@ -95,7 +95,7 @@ test("buildArgs/specToConfig: sandbox isolation settings round-trip through laun
     verb: "run",
     target: "p",
     sourcePaths: ["./s"],
-    sandboxBackend: "oci",
+    sandboxBackend: "apple-container",
     sandboxImage: "audit-sandbox:v1",
     sandboxAllowHostFallback: true,
     sandboxPrepareNetwork: "enabled",
@@ -104,7 +104,7 @@ test("buildArgs/specToConfig: sandbox isolation settings round-trip through laun
     sandboxCpus: 1.5,
   };
   assert.deepEqual(buildArgs(spec).slice(-15), [
-    "--sandbox-backend", "oci",
+    "--sandbox-backend", "apple-container",
     "--sandbox-image", "audit-sandbox:v1",
     "--allow-host-execution",
     "--prepare-network", "enabled",
@@ -115,7 +115,7 @@ test("buildArgs/specToConfig: sandbox isolation settings round-trip through laun
   ]);
 
   const cfg = specToConfig(spec, "runs");
-  assert.equal(cfg.sandboxBackend, "oci");
+  assert.equal(cfg.sandboxBackend, "apple-container");
   assert.equal(cfg.sandboxImage, "audit-sandbox:v1");
   assert.equal(cfg.sandboxAllowHostFallback, true);
   assert.equal(cfg.sandboxPrepareNetwork, "enabled");

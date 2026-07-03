@@ -9,6 +9,7 @@ import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
 import { deriveScopeNote } from "../scope-note.js";
 import { analyzeCommandSafety } from "../security/policy.js";
+import { isSandboxBackend } from "../security/sandbox.js";
 
 // Budget policy for pi tools that invoke the sealed run/map/audit verbs, kept in step with
 // the CLI: UNBOUNDED by default. A real map/dig audit's decisive obligation can surface late,
@@ -74,7 +75,7 @@ function applyMaterialConfig(cfg: AuditorConfig, params: ToolParams): void {
 
 function applySandboxConfig(cfg: AuditorConfig, params: ToolParams): void {
   const backend = str(params, "sandboxBackend");
-  if (backend === "auto" || backend === "oci" || backend === "host") cfg.sandboxBackend = backend;
+  if (isSandboxBackend(backend)) cfg.sandboxBackend = backend;
   cfg.sandboxImage = str(params, "sandboxImage") ?? cfg.sandboxImage;
   const allowHost = bool(params, "sandboxAllowHostFallback");
   if (allowHost !== undefined) cfg.sandboxAllowHostFallback = allowHost;
@@ -169,7 +170,7 @@ const sharedParams = {
   thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh." })),
   outputDir: Type.Optional(Type.String({ description: "Artifact output directory." })),
   historyDir: Type.Optional(Type.String({ description: "Project history directory. Defaults to outputDir/history." })),
-  sandboxBackend: Type.Optional(Type.String({ description: "auto|oci|host." })),
+  sandboxBackend: Type.Optional(Type.String({ description: "auto|oci|apple-container|host." })),
   sandboxImage: Type.Optional(Type.String({ description: "OCI image for sandboxed commands." })),
   sandboxAllowHostFallback: Type.Optional(Type.Boolean({ description: "Trusted-local opt-in for host fallback when OCI is unavailable." })),
   sandboxPrepareNetwork: Type.Optional(Type.String({ description: "none|enabled for prepare/build warm-up commands." })),

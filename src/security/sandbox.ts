@@ -16,9 +16,11 @@ export interface SandboxWorkspace {
   relative: string;
 }
 
-export type SandboxBackend = "auto" | "oci" | "host";
+export const SANDBOX_BACKENDS = ["auto", "oci", "apple-container", "host"] as const;
+export type SandboxBackend = typeof SANDBOX_BACKENDS[number];
 export type SandboxNetworkMode = "none" | "enabled";
 export const DEFAULT_SANDBOX_IMAGE = "flounder-sandbox:latest";
+const APPLE_CONTAINER_SEALED_NETWORK = "flounder-sealed";
 
 export interface SandboxExecutionOptions {
   backend?: SandboxBackend;
@@ -180,6 +182,14 @@ export function isDefaultSandboxImage(image: string): boolean {
   return image === DEFAULT_SANDBOX_IMAGE;
 }
 
+export function isSandboxBackend(value: unknown): value is SandboxBackend {
+  return typeof value === "string" && (SANDBOX_BACKENDS as readonly string[]).includes(value);
+}
+
+export function autoPrefersAppleContainer(platform = process.platform, arch = process.arch): boolean {
+  return platform === "darwin" && arch === "arm64";
+}
+
 export async function checkSandboxReadiness(input: SandboxExecutionOptions = {}): Promise<SandboxReadiness> {
   const options = normalizeSandboxExecutionOptions(input);
   if (options.backend === "host") {
@@ -193,30 +203,54 @@ export async function checkSandboxReadiness(input: SandboxExecutionOptions = {})
     };
   }
 
+  if (options.backend === "apple-container") {
+    const appleReady = await checkAppleContainerBackendReady(options);
+    if (appleReady.ok) return { ok: true, backend: "apple-container", image: options.image, allowHostFallback: false };
+    return {
+      ok: false,
+      backend: "apple-container",
+      image: options.image,
+      allowHostFallback: false,
+      message: appleReady.message,
+    };
+  }
+
+  let appleFailure: string | undefined;
+  if (options.backend === "auto" && autoPrefersAppleContainer()) {
+    const appleReady = await checkAppleContainerBackendReady(options);
+    if (appleReady.ok) return { ok: true, backend: "apple-container", image: options.image, allowHostFallback: false };
+    appleFailure = appleReady.message;
+  }
+
   const ociAvailable = await isOciSandboxAvailable(options.image);
-  if (ociAvailable) return { ok: true, backend: options.backend, image: options.image, allowHostFallback: options.allowHostFallback };
+  if (ociAvailable) return { ok: true, backend: "oci", image: options.image, allowHostFallback: options.allowHostFallback };
   if (options.backend === "oci") {
     return {
       ok: false,
-      backend: options.backend,
+      backend: "oci",
       image: options.image,
       allowHostFallback: options.allowHostFallback,
       message: `OCI sandbox image "${options.image}" is not available. Build or pull it first, or explicitly opt into host execution for trusted local targets.`,
     };
   }
-  if (options.allowHostFallback) return { ok: true, backend: options.backend, image: options.image, allowHostFallback: true };
+  if (options.allowHostFallback) return { ok: true, backend: "host", image: options.image, allowHostFallback: true };
   return {
     ok: false,
-    backend: options.backend,
+    backend: "auto",
     image: options.image,
     allowHostFallback: false,
-    message: `No OCI sandbox is available for image "${options.image}", and host execution fallback is disabled. Install Docker and build or pull the image, or pass --allow-host-execution only for trusted local targets.`,
+    message: noAutoSandboxMessage(options.image, appleFailure),
   };
 }
 
 export function clearSandboxAvailabilityCache(image?: string): void {
-  if (image) ociAvailability.delete(image);
-  else ociAvailability.clear();
+  if (image) {
+    ociAvailability.delete(image);
+    appleContainerAvailability.delete(image);
+  } else {
+    ociAvailability.clear();
+    appleContainerAvailability.clear();
+  }
 }
 
 export async function buildDefaultSandboxImage(options: { timeoutMs?: number } = {}): Promise<SandboxImageBuildResult> {
@@ -272,6 +306,19 @@ async function runWithSelectedBackend(input: ProcessRunInput): Promise<{ stdout:
     return runHostSandboxProcess(input);
   }
 
+  if (input.options.backend === "apple-container") {
+    const appleReady = await checkAppleContainerBackendReady(input.options);
+    if (!appleReady.ok) return unavailableResult(appleReady.message);
+    return runAppleContainerSandboxProcess(input);
+  }
+
+  let appleFailure: string | undefined;
+  if (input.options.backend === "auto" && autoPrefersAppleContainer()) {
+    const appleReady = await checkAppleContainerBackendReady(input.options);
+    if (appleReady.ok) return runAppleContainerSandboxProcess(input);
+    appleFailure = appleReady.message;
+  }
+
   const ociAvailable = await isOciSandboxAvailable(input.options.image);
   if (input.options.backend === "oci" || ociAvailable) {
     if (!ociAvailable) {
@@ -281,7 +328,7 @@ async function runWithSelectedBackend(input: ProcessRunInput): Promise<{ stdout:
   }
 
   if (input.options.allowHostFallback) return runHostSandboxProcess(input);
-  return unavailableResult(`No OCI sandbox is available for image "${input.options.image}", and host execution fallback is disabled. Install Docker and build or pull the image, or pass --allow-host-execution only for trusted local targets.`);
+  return unavailableResult(noAutoSandboxMessage(input.options.image, appleFailure));
 }
 
 function unavailableResult(message: string): { stdout: string; stderr: string; exitCode: number; timedOut: boolean } {
@@ -346,6 +393,52 @@ async function runOciSandboxProcess(input: ProcessRunInput): Promise<{ stdout: s
     maxLogBytes: input.maxLogBytes,
   });
   if (result.timedOut) void forceRemoveContainer(containerName);
+  return result;
+}
+
+async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+  const networkReady = input.options.network === "none" ? await ensureAppleContainerSealedNetwork() : { ok: true as const };
+  if (!networkReady.ok) return unavailableResult(networkReady.message);
+  const containerName = `flounder-${process.pid}-${randomBytes(4).toString("hex")}`;
+  const cwdRelative = path.relative(input.workspaceAbsolute, input.cwdAbsolute).split(path.sep).filter(Boolean).join("/");
+  const containerCwd = cwdRelative ? `/workspace/${cwdRelative}` : "/workspace";
+  const containerArgs = [
+    "run",
+    "--rm",
+    "--name",
+    containerName,
+    "--workdir",
+    containerCwd,
+    "--mount",
+    `type=bind,source=${input.workspaceAbsolute},target=/workspace`,
+    "--cap-drop",
+    "ALL",
+    "--read-only",
+    "--tmpfs",
+    "/tmp",
+    "--tmpfs",
+    "/var/tmp",
+  ];
+  if (input.options.network === "none") containerArgs.push("--network", APPLE_CONTAINER_SEALED_NETWORK, "--no-dns");
+  if (input.cacheDir) containerArgs.push("--mount", `type=bind,source=${input.cacheDir},target=/cache`);
+  if (typeof process.getuid === "function" && typeof process.getgid === "function") {
+    containerArgs.push("--user", `${process.getuid()}:${process.getgid()}`);
+  }
+  if (input.options.memoryMb !== undefined) containerArgs.push("--memory", `${Math.max(64, Math.floor(input.options.memoryMb))}M`);
+  if (input.options.cpus !== undefined) containerArgs.push("--cpus", String(Math.max(0.1, input.options.cpus)));
+  for (const [key, value] of Object.entries(sandboxEnv("/workspace", "/workspace/.tmp", input.cacheDir ? "/cache" : undefined))) {
+    if (value !== undefined) containerArgs.push("--env", `${key}=${value}`);
+  }
+  containerArgs.push(input.options.image, input.command.program, ...input.command.args);
+  const result = await runSpawnedProcess({
+    program: "container",
+    args: containerArgs,
+    cwd: input.workspaceAbsolute,
+    env: containerClientEnv(),
+    timeoutMs: input.command.timeoutMs ?? 120_000,
+    maxLogBytes: input.maxLogBytes,
+  });
+  if (result.timedOut) void forceRemoveAppleContainer(containerName);
   return result;
 }
 
@@ -553,6 +646,7 @@ function replaceAll(input: string, needle: string, replacement: string): string 
 }
 
 const ociAvailability = new Map<string, Promise<boolean>>();
+const appleContainerAvailability = new Map<string, Promise<boolean>>();
 
 function isOciSandboxAvailable(image: string): Promise<boolean> {
   let cached = ociAvailability.get(image);
@@ -573,6 +667,69 @@ async function checkOciSandboxAvailable(image: string): Promise<boolean> {
     maxLogBytes: 2000,
   });
   return result.exitCode === 0 && !result.timedOut;
+}
+
+function isAppleContainerSandboxAvailable(image: string): Promise<boolean> {
+  let cached = appleContainerAvailability.get(image);
+  if (!cached) {
+    cached = checkAppleContainerSandboxAvailable(image);
+    appleContainerAvailability.set(image, cached);
+  }
+  return cached;
+}
+
+async function checkAppleContainerSandboxAvailable(image: string): Promise<boolean> {
+  const result = await runSpawnedProcess({
+    program: "container",
+    args: ["image", "inspect", image],
+    cwd: process.cwd(),
+    env: containerClientEnv(),
+    timeoutMs: 5000,
+    maxLogBytes: 2000,
+  });
+  return result.exitCode === 0 && !result.timedOut;
+}
+
+async function checkAppleContainerBackendReady(options: SandboxProcessOptions): Promise<{ ok: true } | { ok: false; message: string }> {
+  const available = await isAppleContainerSandboxAvailable(options.image);
+  if (!available) {
+    return {
+      ok: false,
+      message: `Apple container sandbox image "${options.image}" is not available. Install apple/container, run "container system start", and build or pull the image for the Apple container runtime.`,
+    };
+  }
+  if (options.network === "none") return ensureAppleContainerSealedNetwork();
+  return { ok: true };
+}
+
+async function ensureAppleContainerSealedNetwork(): Promise<{ ok: true } | { ok: false; message: string }> {
+  const inspect = await runSpawnedProcess({
+    program: "container",
+    args: ["network", "inspect", APPLE_CONTAINER_SEALED_NETWORK],
+    cwd: process.cwd(),
+    env: containerClientEnv(),
+    timeoutMs: 10_000,
+    maxLogBytes: 2000,
+  });
+  if (inspect.exitCode === 0 && !inspect.timedOut) return { ok: true };
+  const created = await runSpawnedProcess({
+    program: "container",
+    args: ["network", "create", "--internal", APPLE_CONTAINER_SEALED_NETWORK],
+    cwd: process.cwd(),
+    env: containerClientEnv(),
+    timeoutMs: 30_000,
+    maxLogBytes: 4000,
+  });
+  if (created.exitCode === 0 && !created.timedOut) return { ok: true };
+  return {
+    ok: false,
+    message: `Apple container backend could not create the internal sealed network "${APPLE_CONTAINER_SEALED_NETWORK}". Sealed audit commands require an internal host-only, no-DNS network on this backend; start apple/container and ensure "container network create --internal" is available.`,
+  };
+}
+
+function noAutoSandboxMessage(image: string, appleFailure?: string): string {
+  const appleHint = appleFailure ? ` Apple container auto-selection was skipped: ${appleFailure}` : "";
+  return `No sandbox backend is available for image "${image}", and host execution fallback is disabled.${appleHint} Install/start Apple container on Apple silicon macOS or install Docker and build/pull the image, or pass --allow-host-execution only for trusted local targets.`;
 }
 
 async function defaultSandboxDockerfilePath(): Promise<string | undefined> {
@@ -603,9 +760,28 @@ async function forceRemoveContainer(name: string): Promise<void> {
   });
 }
 
+async function forceRemoveAppleContainer(name: string): Promise<void> {
+  await runSpawnedProcess({
+    program: "container",
+    args: ["delete", "--force", name],
+    cwd: process.cwd(),
+    env: containerClientEnv(),
+    timeoutMs: 10_000,
+    maxLogBytes: 2000,
+  });
+}
+
 function dockerClientEnv(): NodeJS.ProcessEnv {
   const out: NodeJS.ProcessEnv = {};
   for (const key of ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"]) {
+    if (process.env[key] !== undefined) out[key] = process.env[key];
+  }
+  return out;
+}
+
+function containerClientEnv(): NodeJS.ProcessEnv {
+  const out: NodeJS.ProcessEnv = {};
+  for (const key of ["PATH", "HOME"]) {
     if (process.env[key] !== undefined) out[key] = process.env[key];
   }
   return out;

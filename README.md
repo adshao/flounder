@@ -267,7 +267,9 @@ curl -X PATCH http://127.0.0.1:4500/api/findings/123/tracking \
 
 ## Sandbox Runtime
 
-Real audits execute model-generated commands through the sandbox. The safe default is Docker-backed OCI: install and start Docker or a Docker-compatible runtime, then build the default image with `npm run sandbox:build`. `--sandbox-backend auto` uses `flounder-sandbox:latest` when available and otherwise fails closed instead of silently running tests on the host.
+Real audits execute model-generated commands through the sandbox. The safe default is `--sandbox-backend auto`: on Apple silicon macOS it first uses Apple's `container` runtime when the selected image and sealed network are ready; otherwise it uses Docker-backed OCI when the image is available. If no sandbox engine is ready, it fails closed instead of silently running tests on the host.
+
+For the Docker-backed path, install and start Docker or a Docker-compatible runtime, then build the default image with `npm run sandbox:build`. For the Apple path, install and start Apple's `container` runtime, build or pull the selected sandbox image into that runtime, and let `auto` select it on Apple silicon macOS. `--sandbox-backend apple-container` requires that path explicitly. Sealed Apple commands use an internal host-only, no-DNS `flounder-sealed` network.
 
 The default image is a baseline, not a promise to cover every target stack. It includes common build and audit toolchains so the first run has a safe execution boundary, but specialized targets should use a daemon- or operator-provided image with the exact compiler, prover, chain tooling, or package manager they require:
 

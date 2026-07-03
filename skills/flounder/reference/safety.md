@@ -24,11 +24,18 @@ Model-generated code, PoCs, dependency installs, and tests run in a copied
 workspace. Do not mutate the host checkout or run model-generated tests directly
 on the host.
 
-Use the OCI sandbox for real audits:
+Use the default Docker-backed OCI sandbox for real audits:
 
 ```bash
 npm run sandbox:build
 flounder run --source ./src --build-root . --sandbox-image flounder-sandbox:latest
+```
+
+On Apple silicon macOS daemon hosts, Apple's `container` runtime can be used
+explicitly after the selected image has been built or pulled into that runtime:
+
+```bash
+flounder run --source ./src --build-root . --sandbox-backend apple-container --sandbox-image flounder-sandbox:latest
 ```
 
 Host execution is trusted-local fallback only:

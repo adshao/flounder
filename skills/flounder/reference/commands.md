@@ -108,7 +108,7 @@ is done unless capped by launch config.
 
 | Flag | Meaning |
 | --- | --- |
-| `--sandbox-backend <auto,oci,host>` | Default `auto`; OCI is preferred for model-generated commands |
+| `--sandbox-backend <auto,oci,apple-container,host>` | Default `auto`; Apple container is preferred on Apple silicon macOS when ready, otherwise Docker-backed OCI |
 | `--sandbox-image <image>` | OCI image for sandboxed commands |
 | `--allow-host-execution` | Trusted-local opt-in fallback only |
 | `--prepare-network <none,enabled>` | Dependency warm-up/build network policy |
@@ -116,11 +116,16 @@ is done unless capped by launch config.
 | `--no-prepare` | Skip toolchain warm-up |
 | `--prepare-timeout-ms <n>` | Warm-up timeout |
 
-Real execution-confirming audits require Docker, or a Docker-compatible runtime
-that provides the `docker` CLI, plus a built or pulled sandbox image. Build the
-default image with `npm run sandbox:build`. Default `auto` mode fails closed if
-the image is unavailable; it does not silently run model-generated commands on
-the host.
+Real execution-confirming audits use a sandbox engine plus a built or pulled
+sandbox image. Default `auto` mode prefers Apple's `container` runtime on Apple
+silicon macOS when the selected image and sealed network are ready, then falls
+back to Docker-backed OCI. For the Docker path, build the default image with
+`npm run sandbox:build`.
+
+On Apple silicon macOS daemon hosts, `auto` can select Apple's `container`
+runtime after it is installed, started, and has the selected sandbox image
+available. Use `--sandbox-backend apple-container` to require that path
+explicitly.
 
 Host execution is only for trusted local smoke tests and fixtures:
 

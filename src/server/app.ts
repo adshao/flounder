@@ -28,6 +28,7 @@ import { loadScopeInventory, saveScopeInventory } from "../agent/scope-store.js"
 import { deriveScopeNote } from "../scope-note.js";
 import { confirmSelectorsForFinding } from "../util/confirm-selector.js";
 import { isResumeSettledDecision, isSubmissionReadyDecision, needsSubmissionReadinessWork } from "../util/submission-readiness.js";
+import { isSandboxBackend, type SandboxBackend } from "../security/sandbox.js";
 
 const UI_HTML_PATH = fileURLToPath(new URL("./public/index.html", import.meta.url));
 const UI_PUBLIC_DIR = path.dirname(UI_HTML_PATH);
@@ -436,7 +437,7 @@ const ROUTES: Route[] = [
       sourcePaths: "string[] — ABSOLUTE code paths the daemon reads", corpusPaths: "string[]? — ABSOLUTE design/reference paths", buildRoot: "string? — ABSOLUTE buildable root",
       provider: "string?", model: "string?", thinking: "string?",
       scopeCoverageMode: "focused|standard|half|full|custom? — standard/focused are cumulative project targets, not per-run additions", maxScopes: "number?", mapSteps: "number?", digSteps: "number?", maxSteps: "number?", digSamples: "number?", digConcurrency: "number?",
-      sandboxBackend: "'auto'|'oci'|'host'?", sandboxImage: "string?", sandboxAllowHostFallback: "boolean?", sandboxPrepareNetwork: "'none'|'enabled'?", sandboxConfirmNetwork: "'none'|'enabled'?",
+      sandboxBackend: "'auto'|'oci'|'apple-container'|'host'?", sandboxImage: "string?", sandboxAllowHostFallback: "boolean?", sandboxPrepareNetwork: "'none'|'enabled'?", sandboxConfirmNetwork: "'none'|'enabled'?",
       remap: "boolean?", quick: "boolean?", mockLlm: "boolean?", pipeline: "boolean? — run clue pipeline: prepare if needed -> map/dig -> synthesize -> verify -> confirm -> report", verifyFromStart: "boolean? — pipeline: re-run Verify from the beginning instead of only pending candidates", region: "string?", scope: "string?", scopeNote: "string? — map/audit: 'authorized scope note' that focuses map on the in-scope target (the pipeline auto-derives it from prepare's manifest)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution",
       inputRunDir: "string? — confirm", fresh: "boolean? — confirm",
       clue: "string? — prepare", posture: "string? — prepare", matchDeployed: "boolean? — prepare", endpoint: "string? — prepare",
@@ -2527,7 +2528,7 @@ function normalizeLaunchSpec(body: Record<string, unknown>, target: string, verb
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   const bool = (v: unknown): boolean | undefined => (typeof v === "boolean" ? v : undefined);
   const list = (v: unknown): string[] => (Array.isArray(v) ? v.filter((x): x is string => typeof x === "string") : []);
-  const backend = (v: unknown): "auto" | "oci" | "host" | undefined => (v === "auto" || v === "oci" || v === "host" ? v : undefined);
+  const backend = (v: unknown): SandboxBackend | undefined => isSandboxBackend(v) ? v : undefined;
   const network = (v: unknown): "none" | "enabled" | undefined => (v === "none" || v === "enabled" ? v : undefined);
   return {
     verb,
@@ -4090,7 +4091,7 @@ function launchSpec(project: Record<string, unknown>, body: Record<string, unkno
   const explicitRunMaxScopes = configOverrides.maxScopes !== undefined || bodyOverrides.maxScopes !== undefined;
   const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
   const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
-  const backend = (v: unknown): "auto" | "oci" | "host" | undefined => (v === "auto" || v === "oci" || v === "host" ? v : undefined);
+  const backend = (v: unknown): SandboxBackend | undefined => isSandboxBackend(v) ? v : undefined;
   const network = (v: unknown): "none" | "enabled" | undefined => (v === "none" || v === "enabled" ? v : undefined);
   const list = (v: unknown, fallback: unknown): string[] => {
     const arr = Array.isArray(v) ? v : (safeParse(fallback) as unknown[]) ?? [];

@@ -1,7 +1,7 @@
 import os from "node:os";
 import path from "node:path";
 import type { ProjectContext } from "./types.js";
-import type { SandboxBackend, SandboxExecutionOptions, SandboxNetworkMode } from "./security/sandbox.js";
+import { isSandboxBackend, type SandboxBackend, type SandboxExecutionOptions, type SandboxNetworkMode } from "./security/sandbox.js";
 
 export interface AuditorConfig {
   targetName: string;
@@ -222,7 +222,7 @@ export function sandboxNetworkForPurpose(cfg: AuditorConfig, purpose: "inspect" 
 }
 
 function readSandboxBackend(value: unknown): SandboxBackend | undefined {
-  return value === "auto" || value === "oci" || value === "host" ? value : undefined;
+  return isSandboxBackend(value) ? value : undefined;
 }
 
 function readSandboxNetwork(value: unknown): SandboxNetworkMode | undefined {

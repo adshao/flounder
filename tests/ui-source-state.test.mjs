@@ -117,7 +117,7 @@ test("ui: confirm phase surfaces latest confirm run errors", () => {
         status: "error",
         started_at: "2026-06-26T00:00:00.000Z",
         ended_at: "2026-06-26T00:00:05.000Z",
-        job_error: "No OCI sandbox is available",
+        job_error: "No sandbox backend is available",
       },
     ],
     material: {},
