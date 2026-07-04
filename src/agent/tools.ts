@@ -820,9 +820,10 @@ function insidePristineSourceTree(ctx: ToolContext, normalizedPath: string): boo
 
 function isModelOwnedPocPath(normalizedPath: string): boolean {
   const segments = normalizedPath.toLowerCase().split("/");
-  if (segments.some((segment) => /^(test|tests|spec|specs|__tests__|poc|pocs|repro|repros|harness|harnesses|scratch)$/.test(segment))) return true;
+  const modelOwnedSegment = /(^|[._-])(test|tests|spec|specs|__tests__|poc|pocs|repro|repros|harness|harnesses|scratch|flounder)([._-]|$)/;
+  if (segments.some((segment) => /^(test|tests|spec|specs|__tests__|poc|pocs|repro|repros|harness|harnesses|scratch)$/.test(segment) || modelOwnedSegment.test(segment))) return true;
   const base = segments.at(-1) ?? "";
-  return /(^|[._-])(test|spec|poc|repro|harness|scratch|flounder)([._-]|$)/.test(base)
+  return modelOwnedSegment.test(base)
     || /(^test_|_test\.|\.test\.|\.spec\.)/.test(base);
 }
 

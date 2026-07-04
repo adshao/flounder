@@ -1070,6 +1070,16 @@ test("baseline integrity: the model cannot modify the target source under audit"
     const newFile = await tool("write").run({ path: "exploit_test.rs", content: "// poc\n" }, ctx);
     assert.match(newFile.observation, /wrote exploit_test\.rs/);
 
+    const harnessManifest = await tool("write").run({ path: "verify_poc/Scarb.toml", content: "[package]\nname = \"verify_poc\"\nversion = \"0.1.0\"\n" }, ctx);
+    assert.match(harnessManifest.observation, /wrote verify_poc\/Scarb\.toml/);
+
+    const scratchHarnessManifest = await tool("write").run({ path: ".tmp/verify_poc/Scarb.toml", content: "[package]\nname = \"verify_poc\"\nversion = \"0.1.0\"\n" }, ctx);
+    assert.match(scratchHarnessManifest.observation, /wrote \.tmp\/verify_poc\/Scarb\.toml/);
+
+    const topLevelManifest = await tool("write").run({ path: "Scarb.toml", content: "[package]\nname = \"production_shim\"\nversion = \"0.1.0\"\n" }, ctx);
+    assert.match(topLevelManifest.observation, /blocked/i);
+    assert.match(topLevelManifest.observation, /production source files must stay pristine/i);
+
     session.baselineFiles.add("contracts/contracts/Proxy.sol");
     const newNativeTest = await tool("write").run({ path: "contracts/test/hidden_upgrade_target_hash.spec.ts", content: "// poc\n" }, ctx);
     assert.match(newNativeTest.observation, /wrote contracts\/test\/hidden_upgrade_target_hash\.spec\.ts/);
