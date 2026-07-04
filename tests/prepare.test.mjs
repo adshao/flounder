@@ -42,6 +42,7 @@ test("prepareWorkspaceToolchain warms Cairo Scarb and TON Blueprint projects", a
   const oldPath = process.env.PATH;
   try {
     await writeFile(path.join(workspace, "Scarb.toml"), "[package]\nname = \"audit_target\"\nversion = \"0.1.0\"\n");
+    await writeFile(path.join(workspace, ".tool-versions"), "scarb 2.12.0\nstarknet-foundry 0.49.0\n");
     await mkdir(path.join(workspace, "ton"), { recursive: true });
     await writeFile(path.join(workspace, "ton", "blueprint.config.ts"), "export const config = {};\n");
     await writeFakeTool(binDir, "scarb", logPath);
@@ -65,13 +66,19 @@ test("prepareWorkspaceToolchain warms Cairo Scarb and TON Blueprint projects", a
 
     assert.equal(report.ran, true);
     assert.deepEqual(report.detected, ["scarb", "blueprint"]);
+    assert.deepEqual(report.pinnedToolVersions, [
+      { tool: "scarb", version: "2.12.0", dir: "." },
+      { tool: "starknet-foundry", version: "0.49.0", dir: "." },
+    ]);
     assert.deepEqual(report.results.map((result) => [result.toolchain, result.command, result.cwd, result.ok]), [
       ["scarb", "scarb build", ".", true],
       ["blueprint", "blueprint build --all", "ton", true],
     ]);
     assert.match(await readFile(logPath, "utf8"), /scarb build cwd=.*flounder-prepare-workspace-/);
     assert.match(await readFile(logPath, "utf8"), /blueprint build --all cwd=.*flounder-prepare-workspace-.*\/ton/);
+    assert.equal(log.events[0]?.kind, "audit_prepare_tool_versions");
     assert.equal(log.artifacts[0]?.name, "audit_prepare.json");
+    assert.deepEqual(log.artifacts[0]?.payload.pinnedToolVersions, report.pinnedToolVersions);
   } finally {
     process.env.PATH = oldPath;
     await rm(workspace, { recursive: true, force: true });

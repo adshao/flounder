@@ -1,4 +1,4 @@
-import { readdir } from "node:fs/promises";
+import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import { sandboxExecutionOptions, type AuditorConfig } from "../config.js";
 import { runSandboxCommand, type SandboxWorkspace } from "../security/sandbox.js";
@@ -39,14 +39,25 @@ export interface PrepareCommandResult {
 export interface PrepareReport {
   ran: boolean;
   detected: Toolchain[];
+  pinnedToolVersions: PinnedToolVersion[];
   results: PrepareCommandResult[];
 }
 
+export interface PinnedToolVersion {
+  tool: string;
+  version: string;
+  dir: string;
+}
+
 export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorkspace; cfg: AuditorConfig; logger: RunLogger; cacheDir?: string }): Promise<PrepareReport> {
+  const pinnedToolVersions = await detectPinnedToolVersions(input.workspace.absolute);
+  if (pinnedToolVersions.length > 0) {
+    await input.logger.event("audit_prepare_tool_versions", { pins: pinnedToolVersions });
+  }
   const plans = await detectToolchains(input.workspace.absolute);
   if (plans.length === 0) {
     await input.logger.event("audit_prepare_skipped", { reason: "no supported toolchain manifest detected" });
-    return { ran: false, detected: [], results: [] };
+    return { ran: false, detected: [], pinnedToolVersions, results: [] };
   }
 
   await input.logger.event("audit_prepare_start", { toolchains: plans.map((plan) => plan.toolchain), timeoutMs: input.cfg.auditPrepareTimeoutMs });
@@ -86,8 +97,8 @@ export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorks
     }
   }
 
-  await input.logger.artifact("audit_prepare.json", { detected: plans.map((plan) => plan.toolchain), results });
-  return { ran: true, detected: plans.map((plan) => plan.toolchain), results };
+  await input.logger.artifact("audit_prepare.json", { detected: plans.map((plan) => plan.toolchain), pinnedToolVersions, results });
+  return { ran: true, detected: plans.map((plan) => plan.toolchain), pinnedToolVersions, results };
 }
 
 interface ToolchainPlan {
@@ -147,6 +158,28 @@ async function detectToolchains(workspaceAbsolute: string): Promise<ToolchainPla
   return plans;
 }
 
+export async function detectPinnedToolVersions(workspaceAbsolute: string): Promise<PinnedToolVersion[]> {
+  const manifests = await scanManifests(workspaceAbsolute);
+  const out: PinnedToolVersion[] = [];
+  for (const entry of manifests.filter((manifest) => manifest.name === ".tool-versions")) {
+    const abs = path.join(workspaceAbsolute, ...entry.dir.split("/").filter(Boolean), entry.name);
+    let content: string;
+    try {
+      content = await readFile(abs, "utf8");
+    } catch {
+      continue;
+    }
+    for (const line of content.split(/\r?\n/)) {
+      const trimmed = line.replace(/#.*/, "").trim();
+      if (!trimmed) continue;
+      const [tool, version] = trimmed.split(/\s+/, 2);
+      if (!tool || !version) continue;
+      out.push({ tool, version, dir: entry.dir || "." });
+    }
+  }
+  return out;
+}
+
 function cwd(dir: string): { cwd?: string } {
   return dir && dir !== "." ? { cwd: dir } : {};
 }
@@ -157,7 +190,7 @@ interface ManifestEntry {
 }
 
 async function scanManifests(root: string): Promise<ManifestEntry[]> {
-  const wanted = new Set(["Cargo.toml", "go.mod", "package.json", "foundry.toml", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Scarb.toml", "Scarb.lock", "snfoundry.toml", "blueprint.config.ts", "blueprint.config.js", "blueprint.config.cjs", "blueprint.config.mjs", "tact.config.json"]);
+  const wanted = new Set(["Cargo.toml", "go.mod", "package.json", "foundry.toml", "package-lock.json", "pnpm-lock.yaml", "yarn.lock", "Scarb.toml", "Scarb.lock", "snfoundry.toml", ".tool-versions", "blueprint.config.ts", "blueprint.config.js", "blueprint.config.cjs", "blueprint.config.mjs", "tact.config.json"]);
   const out: ManifestEntry[] = [];
   let budget = MAX_SCAN_ENTRIES;
   const walk = async (absDir: string, relDir: string, depth: number): Promise<void> => {

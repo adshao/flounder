@@ -19,6 +19,20 @@ npm run sandbox:build
 npm run sandbox:cairo:build
 ```
 
+When the target pins Cairo tooling in `.tool-versions`, prefer a pinned
+target-specific image over the generic Cairo image:
+
+```bash
+npm run sandbox:cairo:target -- --target <target-root> --execute
+```
+
+This builds a reviewed image tag such as
+`flounder-sandbox:cairo-scarb-2.12.0-snfoundry-0.49.0` from the same Cairo
+Dockerfile, using the target's Scarb and Starknet Foundry versions. Without
+`--execute`, the script prints the exact build command as JSON for review.
+Use `--runtime container` to build with Apple container's OCI builder instead
+of Docker.
+
 ```bash
 flounder run \
   --config ./configs/cairo-starknet-audit.default.json \
@@ -32,6 +46,8 @@ flounder run \
   --thinking xhigh \
   --map-steps 60 --dig-steps 60
 ```
+
+For a pinned target, replace the sandbox image with the generated tag.
 
 For larger repositories, include the highest-signal specs, bridge message formats, OS design notes, prior audits, test suites, and threat-model material as corpus input.
 

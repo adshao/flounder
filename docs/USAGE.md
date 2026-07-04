@@ -142,10 +142,27 @@ npm run sandbox:cairo:build  # flounder-sandbox:cairo, with Scarb + Starknet Fou
 npm run sandbox:ton:build    # flounder-sandbox:ton, with TON Blueprint + FunC/Tolk/Tact tooling
 ```
 
+For Cairo targets that pin older toolchains in `.tool-versions`, build a
+target-specific Cairo image from the reviewed recipe instead of relying on the
+latest generic Cairo image:
+
+```bash
+npm run sandbox:cairo:target -- --target <target-root> --execute
+```
+
+The command reads `scarb` and `starknet-foundry` pins, passes reviewed release
+checksums into `docker/flounder-sandbox-cairo.Dockerfile`, and tags the result
+as `flounder-sandbox:cairo-scarb-<version>-snfoundry-<version>`. Omit
+`--execute` to print the exact build command for review, or add
+`--runtime container` when building directly into the Apple container runtime.
+Unreviewed Starknet Foundry versions fail closed until both Linux release
+checksums are provided explicitly.
+
 Use them explicitly for matching targets:
 
 ```bash
 flounder run --source ./src --build-root . --sandbox-image flounder-sandbox:cairo
+flounder run --source ./src --build-root . --sandbox-image flounder-sandbox:cairo-scarb-2.12.0-snfoundry-0.49.0
 flounder run --source ./contracts --build-root . --sandbox-image flounder-sandbox:ton
 ```
 
