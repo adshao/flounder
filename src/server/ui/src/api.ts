@@ -428,6 +428,7 @@ export interface LaunchPayload {
   inputRunDir?: string;
   quick?: boolean;
   mockLlm?: boolean;
+  pipeline?: boolean;
   remap?: boolean;
   verifyFromStart?: boolean;
   findingId?: number;
