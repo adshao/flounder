@@ -913,6 +913,30 @@ test("confirm target-link parsing resolves Foundry rooted match paths without tr
   assert.equal(targetLink.linked, true);
 });
 
+test("confirm target-link parsing resolves cwd-relative Hardhat test files to pristine imports", () => {
+  const testPath = "sources/evm-smart-contracts/test/BridgeAdapterSourceBinding.poc.ts";
+  const session = {
+    scratchFiles: new Map([[
+      testPath,
+      "import PRISTINE_BRIDGE_SOURCE from '../contracts/bridge/Bridge.sol';\n"
+        + "it('reproduces through target source', () => console.log(PRISTINE_BRIDGE_SOURCE));\n",
+    ]]),
+    baselineFiles: new Set([
+      "sources/evm-smart-contracts/contracts/bridge/Bridge.sol",
+      "sources/evm-smart-contracts/test/Bridge.ts",
+    ]),
+  };
+  const command = {
+    program: "npx",
+    args: ["hardhat", "test", "--no-compile", "test/BridgeAdapterSourceBinding.poc.ts"],
+    cwd: "sources/evm-smart-contracts",
+  };
+
+  assert.deepEqual(commandFileArgsForTest(command, session), [testPath]);
+  const targetLink = confirmCommandTargetLinkForTest(command, session);
+  assert.equal(targetLink.linked, true);
+});
+
 test("confirm target-link parsing follows command-line remappings from scratch tests to pristine source", () => {
   const session = {
     scratchFiles: new Map([[

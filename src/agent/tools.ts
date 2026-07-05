@@ -574,7 +574,7 @@ function commandFileArgs(command: ReproductionCommand, session: AgentSession): s
       continue;
     }
     if (arg.startsWith("-")) continue;
-    addCommandFileArg(out, arg, [], session);
+    addCommandFileArg(out, arg, roots, session);
   }
   return [...new Set(out)];
 }
