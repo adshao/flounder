@@ -170,6 +170,33 @@ test("store: finding status transitions land on a timeline", async () => {
   db.close();
 });
 
+test("store: duplicate tracking preserves the canonical finding link", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "duplicates" });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/duplicates-1" });
+  db.upsertFindings(projectId, runId, [
+    { findingKey: "canonical", title: "router payment helper reentry", status: "confirmed-executable" },
+    { findingKey: "variant", title: "alternate reentry path", status: "confirmed-executable" },
+  ]);
+
+  const findings = db.listFindings(projectId).sort((a, b) => String(a.finding_key).localeCompare(String(b.finding_key)));
+  const canonical = findings.find((finding) => finding.finding_key === "canonical");
+  const variant = findings.find((finding) => finding.finding_key === "variant");
+  assert.ok(canonical);
+  assert.ok(variant);
+
+  assert.equal(db.setFindingTracking(variant.id, "duplicate", canonical.id), true);
+  const duplicate = db.getFinding(variant.id);
+  assert.equal(duplicate.tracking_status, "duplicate");
+  assert.equal(duplicate.duplicate_of_finding_id, canonical.id);
+
+  assert.equal(db.setFindingTracking(variant.id, "triaging"), true);
+  const reopened = db.getFinding(variant.id);
+  assert.equal(reopened.tracking_status, "triaging");
+  assert.equal(reopened.duplicate_of_finding_id, null);
+  db.close();
+});
+
 test("record: verify REFUTED verdicts become structured refuted rows", () => {
   const base = {
     id: "f1",

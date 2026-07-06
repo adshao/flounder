@@ -553,9 +553,14 @@ function findingTrackingOptionLabel(status: string): string {
   }[status] ?? status;
 }
 
+function duplicateOfLabel(finding: FindingRow): string | null {
+  return finding.duplicate_of_finding_id ? `Duplicate of #${finding.duplicate_of_finding_id}` : null;
+}
+
 function nextAction(finding: FindingRow): string {
   const tracking = finding.tracking_status ?? "open";
   if (tracking === "ignored") return "Ignored";
+  if (tracking === "duplicate") return duplicateOfLabel(finding) ?? "Duplicate";
   if (tracking === "submitted") return "Watch vendor response";
   if (tracking === "accepted") return "Track fix";
   if (tracking === "fixed") return "Close";
@@ -572,6 +577,7 @@ function nextAction(finding: FindingRow): string {
 function findingWorkflow(finding: FindingRow): { label: string; detail: string; className: string } {
   const tracking = finding.tracking_status ?? "open";
   if (tracking === "ignored") return { label: "Ignored", detail: "Hidden from active workflow", className: "s-discharged" };
+  if (tracking === "duplicate") return { label: "Duplicate", detail: duplicateOfLabel(finding) ?? "Linked duplicate", className: "s-discharged" };
   if (tracking === "accepted" || tracking === "fixed") return { label: tracking === "accepted" ? "Accepted" : "Fixed", detail: nextAction(finding), className: "s-confirmed-executable" };
   if (tracking === "submitted") return { label: "Submitted", detail: "Waiting for vendor response", className: "s-confirmed-source" };
   if (finding.status === "refuted" || finding.status === "discharged") return { label: "Closed", detail: nextAction(finding), className: "s-discharged" };
@@ -1983,7 +1989,21 @@ export function App() {
 
   async function updateTracking(finding: FindingRow, status: string) {
     try {
-      await api.trackFinding(finding.id, status);
+      let duplicateOfFindingId: number | null = null;
+      if (status === "duplicate") {
+        const raw = window.prompt("Canonical finding id this duplicates", finding.duplicate_of_finding_id ? String(finding.duplicate_of_finding_id) : "");
+        if (raw === null) return;
+        const trimmed = raw.trim().replace(/^#/, "");
+        if (trimmed) {
+          const parsed = Number(trimmed);
+          if (!Number.isInteger(parsed) || parsed <= 0) {
+            setToast({ tone: "error", message: "Duplicate target must be a positive finding id." });
+            return;
+          }
+          duplicateOfFindingId = parsed;
+        }
+      }
+      await api.trackFinding(finding.id, status, { duplicateOfFindingId });
       if (route.view === "findings") {
         setBugReloadKey((key) => key + 1);
       } else if (route.projectUuid) {
@@ -4694,6 +4714,7 @@ function FindingList({ findings, compact, empty, onOpenReport }: { findings: Fin
             <span className="grow">
               <strong>{finding.title}</strong>
               <small>{finding.location}</small>
+              {duplicateOfLabel(finding) ? <small>{duplicateOfLabel(finding)}</small> : null}
             </span>
             <span className="candidate-meta">
               {origin ? <span className="label origin-label" title={origin.title}>{origin.label}</span> : null}
@@ -4783,6 +4804,7 @@ function FindingTable({
                   <td className="finding-cell">
                     <strong>{finding.title || "Untitled finding"}</strong>
                     <small>{finding.location || "No location"}{finding.scope_id ? ` · ${finding.scope_id}` : ""}</small>
+                    {duplicateOfLabel(finding) ? <small>{duplicateOfLabel(finding)}</small> : null}
                   </td>
                   <td className="evidence-cell">
                     <StatusBadge status={finding.status} />
@@ -6068,6 +6090,7 @@ function findingReportMarkdown(finding: FindingRow): string {
     finding.location ? `- Location: \`${finding.location}\`` : "",
     finding.severity ? `- Severity: ${finding.severity}` : "",
     finding.confidence != null ? `- Confidence: ${Math.round(finding.confidence * 100)}%` : "",
+    duplicateOfLabel(finding) ? `- Duplicate: ${duplicateOfLabel(finding)}` : "",
     "",
   ].filter(Boolean);
   if (finding.description) lines.push("## Description", "", finding.description, "");

@@ -164,6 +164,7 @@ export interface FindingRow {
   status: FindingStatus;
   tracking_status?: string | null;
   confirm_status?: string | null;
+  duplicate_of_finding_id?: number | null;
   report_path?: string | null;
   report_markdown?: string | null;
   has_report?: boolean | null;
@@ -504,7 +505,8 @@ export const api = {
     fetchJson<{ findings: FindingRow[]; total: number; limit: number; offset: number; stats: { total: number; active: number; byStatus: Record<string, number>; byTracking: Record<string, number> } }>(`/api/bugs?${params.toString()}`),
   findingReport: (id: number) => fetchJson<{ markdown: string; source: "db" | "generated" }>(`/api/findings/${id}/report`),
   decisionReport: (id: number) => fetchJson<{ markdown: string; source: "db" | "generated" }>(`/api/confirm-decisions/${id}/report`),
-  trackFinding: (id: number, status: string) => patchJson<unknown>(`/api/findings/${id}/tracking`, { status }),
+  trackFinding: (id: number, status: string, opts?: { duplicateOfFindingId?: number | null }) =>
+    patchJson<unknown>(`/api/findings/${id}/tracking`, { status, duplicateOfFindingId: opts?.duplicateOfFindingId ?? null }),
   artifact: (runId: number, name: string) => fetch(`/api/runs/${runId}/artifact?name=${encodeURIComponent(name)}`),
 };
 

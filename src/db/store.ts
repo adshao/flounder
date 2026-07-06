@@ -286,6 +286,7 @@ CREATE TABLE IF NOT EXISTS finding(
   severity TEXT,
   status TEXT NOT NULL,
   confirm_status TEXT,            -- per-finding real-target confirm state: NULL=not confirmed yet | confirming | reproduced | not-reproduced
+  duplicate_of_finding_id INTEGER REFERENCES finding(id),
   report_path TEXT,
   report_markdown TEXT,           -- user-facing per-finding report markdown; local artifacts are only provenance/debug fallback
   scope_id TEXT,
@@ -657,6 +658,7 @@ export class MetadataStore {
       "ALTER TABLE scope ADD COLUMN priority INTEGER DEFAULT 0", // manual dig-queue ordering, separate from score
       "ALTER TABLE finding ADD COLUMN tracking_status TEXT", // submission tracking: open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored
       "ALTER TABLE finding ADD COLUMN confirm_status TEXT", // per-finding real-target confirm state
+      "ALTER TABLE finding ADD COLUMN duplicate_of_finding_id INTEGER REFERENCES finding(id)",
       "ALTER TABLE finding ADD COLUMN report_markdown TEXT", // user-facing per-finding report markdown
       "ALTER TABLE finding ADD COLUMN description TEXT", // rich finding content, previously only in run-dir artifacts
       "ALTER TABLE finding ADD COLUMN evidence TEXT",
@@ -1591,8 +1593,9 @@ export class MetadataStore {
 
   /** Update a finding's submission-tracking state (does NOT touch updated_at, so the audit
    * "found" time and newest-first ordering are preserved). */
-  setFindingTracking(id: number, status: string): boolean {
-    return this.db.prepare("UPDATE finding SET tracking_status = ? WHERE id = ?").run(status || null, id).changes > 0;
+  setFindingTracking(id: number, status: string, duplicateOfFindingId?: number | null): boolean {
+    const duplicateOf = status === "duplicate" ? (duplicateOfFindingId ?? null) : null;
+    return this.db.prepare("UPDATE finding SET tracking_status = ?, duplicate_of_finding_id = ? WHERE id = ?").run(status || null, duplicateOf, id).changes > 0;
   }
 
   /** Persist a user-facing formal report for one finding. The project id guard preserves

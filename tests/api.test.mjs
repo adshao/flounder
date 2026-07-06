@@ -89,6 +89,7 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     assert.match(globalFindings.query.limit, /default 200/);
     const findingTracking = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/findings/:id/tracking");
     assert.match(findingTracking.body.status, /ignored/);
+    assert.match(findingTracking.body.duplicateOfFindingId, /canonical finding id/);
     const runLog = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/runs/:id/log");
     assert.match(runLog.query.tail, /JSON/);
     const runPatch = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/runs/:id");
@@ -3477,6 +3478,57 @@ test("api: ignored findings are hidden from active filters and can be recovered"
     await patch(`/api/findings/${ignored.id}/tracking`, { status: "open" });
     const restored = await json(await fetch(base + `/api/projects/${created.uuid}/findings?tracking=active`));
     assert.deepEqual(restored.findings.map((finding) => finding.finding_key).sort(), ["ignore", "keep"]);
+  });
+});
+
+test("api: duplicate tracking can link to a canonical finding in the same project", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const patch = (p, body) => fetch(base + p, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "duplicate-finding-links", sourcePaths: ["./src"] }));
+    const other = await json(await post("/api/projects", { name: "duplicate-finding-other", sourcePaths: ["./src"] }));
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "audit", runDir: await mkdtemp(path.join(out, "duplicate-finding-links-run-")) });
+      store.upsertFindings(created.id, runId, [
+        { findingKey: "canonical", title: "Canonical helper reentry", location: "src/Router.sol:1", severity: "high", status: "confirmed-executable" },
+        { findingKey: "variant", title: "Variant helper reentry", location: "src/Router.sol:2", severity: "medium", status: "confirmed-executable" },
+      ]);
+      const otherRunId = store.startRun({ projectId: other.id, kind: "audit", runDir: await mkdtemp(path.join(out, "duplicate-finding-other-run-")) });
+      store.upsertFindings(other.id, otherRunId, [
+        { findingKey: "other", title: "Other project finding", location: "src/Other.sol:1", severity: "medium", status: "confirmed-executable" },
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const all = await json(await fetch(base + `/api/projects/${created.uuid}/findings`));
+    const canonical = all.findings.find((finding) => finding.finding_key === "canonical");
+    const variant = all.findings.find((finding) => finding.finding_key === "variant");
+    assert.ok(canonical);
+    assert.ok(variant);
+
+    const linkedResponse = await patch(`/api/findings/${variant.id}/tracking`, { status: "duplicate", duplicateOfFindingId: canonical.id });
+    assert.equal(linkedResponse.status, 200);
+    const duplicates = await json(await fetch(base + `/api/projects/${created.uuid}/findings?tracking=duplicate`));
+    assert.equal(duplicates.total, 1);
+    assert.equal(duplicates.findings[0].finding_key, "variant");
+    assert.equal(duplicates.findings[0].duplicate_of_finding_id, canonical.id);
+
+    const selfResponse = await patch(`/api/findings/${variant.id}/tracking`, { status: "duplicate", duplicateOfFindingId: variant.id });
+    assert.equal(selfResponse.status, 400);
+
+    const otherAll = await json(await fetch(base + `/api/projects/${other.uuid}/findings`));
+    const otherFinding = otherAll.findings[0];
+    const crossProjectResponse = await patch(`/api/findings/${variant.id}/tracking`, { status: "duplicate", duplicateOfFindingId: otherFinding.id });
+    assert.equal(crossProjectResponse.status, 400);
+
+    await patch(`/api/findings/${variant.id}/tracking`, { status: "triaging" });
+    const reopened = await json(await fetch(base + `/api/projects/${created.uuid}/findings?q=%23${variant.id}`));
+    assert.equal(reopened.findings[0].tracking_status, "triaging");
+    assert.equal(reopened.findings[0].duplicate_of_finding_id, null);
   });
 });
 

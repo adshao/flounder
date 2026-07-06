@@ -425,9 +425,9 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "PATCH", path: "/api/findings/:id/tracking",
-    summary: "Set a finding's submission-tracking state (open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored) — for following a bug from discovery to vendor disclosure.",
+    summary: "Set a finding's submission-tracking state (open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored) — for following a bug from discovery to vendor disclosure. When status is duplicate, duplicateOfFindingId may link to the canonical finding in the same project.",
     params: { id: "finding id" },
-    body: { status: "open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored" },
+    body: { status: "open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored", duplicateOfFindingId: "number? — canonical finding id when status is duplicate" },
     handler: findingTracking,
   }),
 
@@ -2865,6 +2865,7 @@ function findingSummaryRow(row: Record<string, unknown>): Record<string, unknown
     "severity",
     "status",
     "confirm_status",
+    "duplicate_of_finding_id",
     "scope_id",
     "confidence",
     "tracking_status",
@@ -3420,7 +3421,21 @@ async function findingTracking(c: Ctx): Promise<void> {
   const body = (await readBody(c.req)) as Record<string, unknown>;
   const status = typeof body.status === "string" ? body.status : "";
   if (!TRACKING_STATES.has(status)) return sendJson(c.res, 400, { error: "invalid tracking status", allowed: [...TRACKING_STATES] });
-  const ok = c.store.setFindingTracking(Number(c.params.id), status);
+  const id = Number(c.params.id);
+  const finding = c.store.getFinding(id);
+  if (!finding) return sendJson(c.res, 404, { error: "no such finding" });
+  const rawDuplicateOf = body.duplicateOfFindingId ?? body.duplicate_of_finding_id;
+  let duplicateOfFindingId: number | null = null;
+  if (rawDuplicateOf !== undefined && rawDuplicateOf !== null && rawDuplicateOf !== "") {
+    const parsed = Number(rawDuplicateOf);
+    if (!Number.isInteger(parsed) || parsed <= 0) return sendJson(c.res, 400, { error: "duplicateOfFindingId must be a positive integer" });
+    if (parsed === id) return sendJson(c.res, 400, { error: "a finding cannot be marked duplicate of itself" });
+    const target = c.store.getFinding(parsed);
+    if (!target) return sendJson(c.res, 400, { error: "duplicate target finding does not exist" });
+    if (Number(target.project_id) !== Number(finding.project_id)) return sendJson(c.res, 400, { error: "duplicate target must be in the same project" });
+    duplicateOfFindingId = parsed;
+  }
+  const ok = c.store.setFindingTracking(id, status, duplicateOfFindingId);
   ok ? sendJson(c.res, 200, { ok: true }) : sendJson(c.res, 404, { error: "no such finding" });
 }
 
