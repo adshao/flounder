@@ -268,6 +268,7 @@ const ROUTES: Route[] = [
       region: "string? — audit: pinned region e.g. src/Foo.sol:120-180", scope: "string? — audit: scope id(s)", verifyFindings: "object|array? — audit: inline suspected finding(s) to confirm-or-refute by execution; project finding rows with id are linked back to that original row",
       allowMaterialDrift: "boolean? — expert override for verifyFindings when a newer Prepare run changed project materials after the selected findings were produced",
       regenerateReports: "boolean? — report: include findings that already have formal reports; selected findingIds are always regenerated",
+      continueCoverage: "boolean? — explicit opt-in to open the next mapped scope batch after the current pipeline round is fully settled",
       scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run; standard means audit until the project has 30 audited scopes; pass continueCoverage:true to explicitly start another scope batch after verify/confirm/report are settled",
       maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", digSteps: "number? — one-off per-scope dig turn cap",
       maxSteps: "number? — one-off global turn cap", digSamples: "number? — one-off samples per scope", digConcurrency: "number? — one-off parallel scopes",
