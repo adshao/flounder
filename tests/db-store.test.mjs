@@ -549,7 +549,43 @@ test("store: source-level confirm evidence is not promoted to real-target submis
   const [decision] = db.listConfirmDecisions(projectId);
   assert.equal(decision.evidence_level, "source-only-local-confirmed");
   assert.equal(decision.submission_confidence, "low");
+  assert.equal(decision.recommendation, "needs-human");
+  assert.match(decision.human_gates, /evidence level is source_only_local_confirmed|source-only-local-confirmed/);
   const [finding] = db.listFindings(projectId);
   assert.equal(finding.confirm_status, null);
+  db.close();
+});
+
+test("store: ambiguous reproduced decisions do not default to real-target evidence", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "p" });
+  const auditRun = db.startRun({ projectId, kind: "run", runDir: "/runs/p-audit-1" });
+  db.upsertFindings(projectId, auditRun, [
+    {
+      findingKey: "kambiguous",
+      title: "Ambiguous reproduction",
+      severity: "high",
+      status: "confirmed-executable",
+    },
+  ]);
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/p-confirm-1" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [
+    {
+      bug: "Ambiguous reproduction",
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      members: ["kambiguous"],
+      reproEvidence: "Prior settled row carried forward: cmd28 testAmbiguousPoC passed.",
+      reproCommandId: "cmd28",
+    },
+  ]);
+
+  const [decision] = db.listConfirmDecisions(projectId);
+  assert.equal(decision.evidence_level, "source-only-local-confirmed");
+  assert.equal(decision.submission_confidence, "low");
+  assert.equal(decision.recommendation, "needs-human");
+  const [finding] = db.listFindings(projectId);
+  assert.equal(finding.confirm_status, null);
+  assert.equal(db.countConfirmedBugs(projectId), 0);
   db.close();
 });

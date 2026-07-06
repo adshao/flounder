@@ -212,7 +212,7 @@ export function sortScopes(scopes: ScopeRow[]): ScopeRow[] {
 }
 
 export function confirmedDecisions(rows: ConfirmDecision[] | undefined): ConfirmDecision[] {
-  return (rows ?? []).filter((row) => row.reproduced === "yes");
+  return (rows ?? []).filter((row) => row.reproduced === "yes" && hasRealTargetEvidence(row));
 }
 
 const DECISION_RECOMMENDATION_RANK: Record<string, number> = {

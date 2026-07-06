@@ -875,7 +875,7 @@ async function projectGet(c: Ctx): Promise<void> {
     const confirmDecisions = activePrepareRefresh
       ? []
       : currentConfirmDecisions(c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
-    const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes").length;
+    const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes" && isRealTargetDecisionEvidence(stringValue(row.evidence_level))).length;
     sendJson(c.res, 200, {
       project,
       progress,
@@ -4223,7 +4223,7 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
     const confirmDecisions = activePrepareRefresh
       ? []
       : currentConfirmDecisions(store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
-    const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes").length;
+    const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes" && isRealTargetDecisionEvidence(stringValue(row.evidence_level))).length;
     const submissionWorkKeys = new Set(confirmDecisions.filter((row) => needsSubmissionReadinessWork(row)).flatMap(confirmDecisionMemberKeys));
     const verifyPendingFindings = (counts.suspected ?? 0) + (counts["confirmed-source"] ?? 0);
     const requiresRealTargetConfirmation = latestPrepareRequiresRealTargetConfirmation(allRuns);

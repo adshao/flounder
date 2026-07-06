@@ -3925,7 +3925,7 @@ function ConfirmDecisionsCard({
 }
 
 function RealTargetCallout({ decisions, onOpen }: { decisions: ConfirmDecision[]; onOpen: () => void }) {
-  const reproduced = decisions.filter((decision) => decision.reproduced === "yes").length;
+  const reproduced = confirmedDecisions(decisions).length;
   const submissionReady = submissionReadyCount(decisions);
   const droppedReproductions = droppedReproductionCount(decisions);
   const meta = decisionCalloutMeta(decisions);

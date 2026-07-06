@@ -54,6 +54,8 @@ export function isResumeSettledDecision(row: object): boolean {
 
 export function submissionReadinessBlocker(row: SubmissionDecisionLike, options: SubmissionReadinessOptions = {}): string | undefined {
   if (decisionReproduced(row) !== "yes") return "the row is not reproduced on the real target";
+  const evidenceLevel = normalizedWord(decisionEvidenceLevel(row));
+  if (evidenceLevel && !isRealTargetEvidenceLevel(evidenceLevel)) return `evidence level is ${evidenceLevel}, not real-target or local-fork reproduced`;
   if (!isBountyLikePolicy(row)) {
     return hasOpenSubmissionGate(row) ? "submission gates remain unsettled in human_gates or adjudication" : undefined;
   }
@@ -96,6 +98,14 @@ function decisionReproduced(row: SubmissionDecisionLike): string {
 
 function decisionRecommendation(row: SubmissionDecisionLike): string {
   return stringField(row, ["recommendation"]).toLowerCase();
+}
+
+function decisionEvidenceLevel(row: SubmissionDecisionLike): string {
+  return stringField(row, ["evidenceLevel", "evidence_level"]);
+}
+
+function isRealTargetEvidenceLevel(value: string): boolean {
+  return value === "real_target_reproduced" || value === "fork_reproduced" || value === "local_fork_reproduced";
 }
 
 function decisionHumanGates(row: SubmissionDecisionLike): string {

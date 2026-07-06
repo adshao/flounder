@@ -312,6 +312,8 @@ export async function runConfirm(
       humanGates: row.humanGates,
       engagementProfile: row.engagementProfile,
       adjudication: row.adjudication,
+      evidenceLevel: row.evidenceLevel,
+      submissionConfidence: row.submissionConfidence,
       mergedFrom: row.mergedFrom,
       reproCommandId: row.reproCommandId,
     })),
@@ -457,6 +459,8 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
   humanGates?: string;
   engagementProfile?: unknown;
   adjudication?: unknown;
+  evidenceLevel?: string;
+  submissionConfidence?: string;
   reproCommandId?: string;
 }> {
   const rows: Array<{
@@ -471,6 +475,8 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
     humanGates?: string;
     engagementProfile?: unknown;
     adjudication?: unknown;
+    evidenceLevel?: string;
+    submissionConfidence?: string;
     reproCommandId?: string;
   }> = [];
   for (const entry of raw) {
@@ -489,6 +495,8 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
       humanGates?: string;
       engagementProfile?: unknown;
       adjudication?: unknown;
+      evidenceLevel?: string;
+      submissionConfidence?: string;
       reproCommandId?: string;
     } = { bug: obj.bug };
     if (typeof obj.reproduced === "string") row.reproduced = obj.reproduced;
@@ -506,6 +514,10 @@ function toLiveConfirmRows(raw: unknown[]): Array<{
     if (engagementProfile) row.engagementProfile = engagementProfile;
     const adjudication = normalizeStructuredValue(obj.adjudication);
     if (adjudication) row.adjudication = adjudication;
+    if (typeof obj.evidence_level === "string") row.evidenceLevel = obj.evidence_level;
+    else if (typeof obj.evidenceLevel === "string") row.evidenceLevel = obj.evidenceLevel;
+    if (typeof obj.submission_confidence === "string") row.submissionConfidence = obj.submission_confidence;
+    else if (typeof obj.submissionConfidence === "string") row.submissionConfidence = obj.submissionConfidence;
     if (typeof obj.repro_command_id === "string") row.reproCommandId = obj.repro_command_id;
     else if (typeof obj.reproCommandId === "string") row.reproCommandId = obj.reproCommandId;
     rows.push(row);
@@ -526,6 +538,8 @@ export interface ConfirmDecisionRow {
   humanGates: string;
   engagementProfile?: unknown;
   adjudication?: unknown;
+  evidenceLevel?: string;
+  submissionConfidence?: string;
   recommendation: "submit-candidate" | "needs-human" | "drop" | "unknown";
   // Structured fields the fix-equivalence matrix needs (present when the row's PoC is a
   // source-level test with a declared fix). Not rendered; consumed by consolidation.
@@ -747,6 +761,8 @@ function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow 
   const recommendation = ((value: string): ConfirmDecisionRow["recommendation"] =>
     value === "submit-candidate" || value === "needs-human" || value === "drop" ? value : "unknown")(str(raw.recommendation).toLowerCase());
   const reproCommandId = str(raw.repro_command_id) || str(raw.reproCommandId);
+  const evidenceLevel = str(raw.evidence_level) || str(raw.evidenceLevel);
+  const submissionConfidence = str(raw.submission_confidence) || str(raw.submissionConfidence);
   const fixPatch = parseFixPatch(raw.fix_patch ?? raw.fixPatch);
   const patched = asStringList(raw.patched_success_patterns ?? raw.patchedSuccessPatterns);
   const engagementProfile = normalizeStructuredValue(raw.engagement_profile ?? raw.engagementProfile);
@@ -763,6 +779,8 @@ function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow 
     ...(engagementProfile ? { engagementProfile } : {}),
     ...(adjudication ? { adjudication } : {}),
     recommendation,
+    ...(evidenceLevel ? { evidenceLevel } : {}),
+    ...(submissionConfidence ? { submissionConfidence } : {}),
     ...(reproCommandId ? { reproCommandId } : {}),
     ...(fixPatch ? { fixPatch } : {}),
     ...(patched.length > 0 ? { patchedSuccessPatterns: patched } : {}),
@@ -897,9 +915,13 @@ function mergeRows(members: ConfirmDecisionRow[]): ConfirmDecisionRow {
   const uniq = (values: string[]): string[] => [...new Set(values.filter(Boolean))];
   const reproRank: Record<ConfirmDecisionRow["reproduced"], number> = { yes: 3, "could-not-set-up": 2, no: 1, unknown: 0 };
   const recRank: Record<ConfirmDecisionRow["recommendation"], number> = { "submit-candidate": 3, "needs-human": 2, drop: 1, unknown: 0 };
+  const evidenceRank: Record<string, number> = { unknown: 0, "not-reproduced": 1, "could-not-set-up": 1, reasoned: 2, "source-supported": 3, "source-only-local-confirmed": 4, "locally-reproduced": 4, "execution-reproduced": 4, "local-fork-reproduced": 5, "fork-reproduced": 5, "real-target-reproduced": 6 };
+  const confidenceRank: Record<string, number> = { unknown: 0, low: 1, medium: 2, high: 3 };
   const strongest = <T extends string>(values: T[], rank: Record<T, number>, fallback: T): T => values.reduce((best, value) => (rank[value] > rank[best] ? value : best), fallback);
   const engagementProfile = members.map((m) => m.engagementProfile).find(Boolean);
   const adjudication = members.map((m) => m.adjudication).find(Boolean);
+  const evidenceLevel = strongest(members.map((m) => m.evidenceLevel ?? "unknown"), evidenceRank, "unknown");
+  const submissionConfidence = strongest(members.map((m) => m.submissionConfidence ?? "unknown"), confidenceRank, "unknown");
   return {
     bug: members.map((m) => m.bug).join(" / "),
     members: uniq(members.flatMap((m) => [...m.members, m.bug])),
@@ -911,6 +933,8 @@ function mergeRows(members: ConfirmDecisionRow[]): ConfirmDecisionRow {
     humanGates: uniq(members.map((m) => m.humanGates)).join(" | "),
     ...(engagementProfile ? { engagementProfile } : {}),
     ...(adjudication ? { adjudication } : {}),
+    ...(evidenceLevel !== "unknown" ? { evidenceLevel } : {}),
+    ...(submissionConfidence !== "unknown" ? { submissionConfidence } : {}),
     recommendation: strongest(members.map((m) => m.recommendation), recRank, "unknown"),
     mergedFrom: members.map((m) => m.bug),
   };

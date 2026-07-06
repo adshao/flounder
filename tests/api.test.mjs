@@ -758,7 +758,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
       ], "differential");
       const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "pipeline-confirm-run") });
       store.upsertConfirmDecisions(created.id, confirmRun, [
-        { bug: "prior reproduced withdrawal proof", reproduced: "yes", recommendation: "submit-candidate", members: ["kalreadyreproduced"] },
+        { bug: "prior reproduced withdrawal proof", reproduced: "yes", recommendation: "submit-candidate", evidenceLevel: "real-target-reproduced", members: ["kalreadyreproduced"] },
         {
           bug: "gate-blocked reproduced proof",
           reproduced: "yes",
@@ -839,7 +839,7 @@ test("api: current confirm decisions hide older rows superseded by newer member 
       store.finishRun(oldConfirm, "done");
       const newConfirm = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "new-confirm") });
       store.upsertConfirmDecisions(created.id, newConfirm, [
-        { bug: "new reproduced result", reproduced: "yes", recommendation: "submit-candidate", members: ["kabc123"] },
+        { bug: "new reproduced result", reproduced: "yes", recommendation: "submit-candidate", evidenceLevel: "real-target-reproduced", members: ["kabc123"] },
       ]);
       store.finishRun(newConfirm, "done");
       const setupFailedConfirm = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "setup-failed-confirm") });
@@ -2108,7 +2108,7 @@ test("api: project detail summarizes the latest prepare manifest and workspace q
       ]);
       const confirmRunId = confirmStore.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "prepared-target-confirm-test"), provider: "openai-codex", model: "gpt-5.5" });
       confirmStore.upsertConfirmDecisions(created.id, confirmRunId, [
-        { bug: "prior prepared source bug", reproduced: "yes", recommendation: "submit-candidate", members: ["kalreadyreproduced"] },
+        { bug: "prior prepared source bug", reproduced: "yes", recommendation: "submit-candidate", evidenceLevel: "real-target-reproduced", members: ["kalreadyreproduced"] },
       ]);
       confirmStore.finishRun(confirmRunId, "done");
     } finally {

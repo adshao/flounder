@@ -508,7 +508,7 @@ function inferredDecisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "rep
   if (hasSourceOnlyReproductionCrutch(row)) return "source-only-local-confirmed";
   if (hasLocalForkReproduction(row)) return "local-fork-reproduced";
   if (hasRealTargetReproduction(row)) return "real-target-reproduced";
-  return "real-target-reproduced";
+  return "source-only-local-confirmed";
 }
 
 function shouldDowngradeEvidence(stored: string, inferred: string): boolean {
@@ -520,7 +520,10 @@ function shouldDowngradeEvidence(stored: string, inferred: string): boolean {
 function decisionEvidenceLevel(row: Pick<ConfirmRow, "reproduced" | "evidenceLevel" | "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): string {
   const inferred = inferredDecisionEvidenceLevel(row);
   const explicit = row.evidenceLevel?.trim();
-  if (explicit && !shouldDowngradeEvidence(explicit, inferred)) return explicit;
+  if (explicit) {
+    if (hasSourceOnlyReproductionCrutch(row) && shouldDowngradeEvidence(explicit, "source-only-local-confirmed")) return "source-only-local-confirmed";
+    return explicit;
+  }
   return inferred;
 }
 
@@ -1686,7 +1689,10 @@ export class MetadataStore {
 
   upsertConfirmDecisions(projectId: number, runId: number, rows: ConfirmRow[], decisionPath?: string): void {
     this.transaction(() => {
-      const readyRows = enforceSubmissionReadiness(rows, { requireImpactInventory: false });
+      const readyRows = enforceSubmissionReadiness(
+        rows.map((row) => ({ ...row, evidenceLevel: row.evidenceLevel ?? decisionEvidenceLevel(row) })),
+        { requireImpactInventory: false },
+      );
       // a confirm run's decision sheet is rewritten wholesale, so replace its rows
       this.db.prepare("DELETE FROM confirm_decision WHERE run_id = ?").run(runId);
       const stmt = this.db.prepare(
@@ -1770,7 +1776,13 @@ export class MetadataStore {
 
   /** Count bugs that actually reproduced on the real target (confirm's real output). */
   countConfirmedBugs(projectId: number): number {
-    return Number((this.db.prepare("SELECT COUNT(*) AS n FROM confirm_decision WHERE project_id = ? AND reproduced = 'yes'").get(projectId) as { n: number }).n);
+    return Number((this.db.prepare(
+      `SELECT COUNT(*) AS n
+         FROM confirm_decision
+        WHERE project_id = ?
+          AND reproduced = 'yes'
+          AND evidence_level IN ('real-target-reproduced', 'fork-reproduced', 'local-fork-reproduced')`,
+    ).get(projectId) as { n: number }).n);
   }
 
   // --- daemons + job queue (control plane for remote execution) -------------

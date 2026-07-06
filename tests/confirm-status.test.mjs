@@ -32,7 +32,7 @@ test("pendingConfirmable + decision -> confirm_status (finding-grained, resumabl
   // a confirm settles A=reproduced, B=not. Models sometimes include the title next to the
   // content key, so the store accepts both exact keys and "key title" members.
   store.upsertConfirmDecisions(pid, runId, [
-    { bug: "Bug A", reproduced: "yes", members: [`${keyA} Bug A`] },
+    { bug: "Bug A", reproduced: "yes", evidenceLevel: "real-target-reproduced", members: [`${keyA} Bug A`] },
     { bug: "Bug B", reproduced: "no", members: [`[${keyB}] Bug B`] },
   ]);
 
