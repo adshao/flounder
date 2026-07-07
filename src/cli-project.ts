@@ -4,6 +4,7 @@ export function buildProjectContinueBody(args: readonly string[]): Record<string
   const body: Record<string, unknown> = { verb: "run" };
   if (args.includes("--verify-from-start")) body.verifyFromStart = true;
   if (args.includes("--remap")) body.remap = true;
+  if (args.includes("--append-map") || args.includes("--expand-map")) body.appendMap = true;
   if (args.includes("--quick")) body.quick = true;
   if (args.includes("--mock-llm")) body.mockLlm = true;
   if (args.includes("--continue-coverage")) body.continueCoverage = true;

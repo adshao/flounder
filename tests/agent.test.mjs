@@ -9,6 +9,7 @@ import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../di
 import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
+import { mergeScopeInventory } from "../dist/agent/scope-store.js";
 import { runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
@@ -69,6 +70,65 @@ class VerifyIsolationLlmClient {
       return JSON.stringify({ done: true, summary: "second candidate finished" });
     }
     return JSON.stringify({ done: true, summary: "unexpected verify seed" });
+  }
+}
+
+class AppendMapLlmClient {
+  async complete(input) {
+    const action = (thought, toolName, args) => JSON.stringify({ thought, tool: toolName, args });
+    if (input.user.includes("Phase: MAP")) {
+      if (!input.user.includes("wrote scopes.json")) {
+        const appendMode = input.user.includes("map_existing_scopes.json");
+        return action(appendMode ? "Append only scopes absent from the existing inventory." : "Create the initial scope inventory.", "write", {
+          path: "scopes.json",
+          content: JSON.stringify(appendMode ? [
+            {
+              id: "S2",
+              obligation: "secondary advice region must bind to its source",
+              region: "halo2_missing_constraint.rs:5",
+              lenses: ["unbound-input"],
+              exposure: "high",
+              difficulty: "medium",
+              score: 80,
+              why: "duplicate of the existing S2 should be ignored by the merge.",
+            },
+            {
+              id: "S3",
+              obligation: "tertiary advice region must bind to its source",
+              region: "halo2_missing_constraint.rs:7",
+              lenses: ["unbound-input"],
+              exposure: "medium",
+              difficulty: "medium",
+              score: 70,
+              why: "new scope discovered by append-map.",
+            },
+          ] : [
+            {
+              id: "S1",
+              obligation: "the advice cell must be constrained to its trusted source value",
+              region: "halo2_missing_constraint.rs:5",
+              lenses: ["unbound-input"],
+              exposure: "critical",
+              difficulty: "high",
+              score: 95,
+              why: "initial scope.",
+            },
+            {
+              id: "S2",
+              obligation: "secondary advice region must bind to its source",
+              region: "halo2_missing_constraint.rs:5",
+              lenses: ["unbound-input"],
+              exposure: "high",
+              difficulty: "medium",
+              score: 76,
+              why: "initial second scope.",
+            },
+          ]),
+        });
+      }
+      return JSON.stringify({ done: true, summary: "scopes written" });
+    }
+    return new MockAuditLlmClient().complete(input);
   }
 }
 
@@ -296,6 +356,22 @@ test("run health distinguishes blocked, shallow, and coverage-incomplete runs", 
   assert.equal(buildRunHealth({ ...base, infraErrors: 1 }).status, "infra-failed");
 });
 
+test("scope inventory merge appends novel scopes while preserving existing status", () => {
+  const existing = [
+    { id: "S1", obligation: "bind source", region: "src/A.sol:10", lenses: [], exposure: "high", difficulty: "low", score: 90, why: "old", status: "audited", digSeconds: 12 },
+  ];
+  const merged = mergeScopeInventory(existing, [
+    { id: "S1", obligation: "bind source", region: "src/A.sol:10", lenses: [], exposure: "high", difficulty: "low", score: 100, why: "duplicate" },
+    { id: "S1", obligation: "check recipient", region: "src/B.sol:20", lenses: [], exposure: "medium", difficulty: "low", score: 70, why: "new" },
+  ]);
+  assert.equal(merged.added, 1);
+  assert.equal(merged.skippedDuplicate, 1);
+  assert.equal(merged.scopes[0].status, "audited");
+  assert.equal(merged.scopes[0].digSeconds, 12);
+  assert.equal(merged.scopes[1].status, "pending");
+  assert.notEqual(merged.scopes[1].id, "S1", "new scope id is made unique");
+});
+
 test("prepare checkpoint guard blocks optional work after source is staged but manifest components are empty", () => {
   const state = { hasManifest: true, componentCount: 0, hasStagedSource: true };
   const blocked = prepareCheckpointDirective("Clue: official source", 18, state, "bash", { cmd: "find sources -type f" });
@@ -340,6 +416,10 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
 
   const mapPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", map: true });
   assert.ok(!mapPrompt.includes("Record candidates by writing findings.json"), "map prompt should not inherit findings-report instructions");
+  const appendMapPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", map: true, mapExistingScopesPath: "map_existing_scopes.json", mapExistingScopesCount: 2 });
+  assert.match(appendMapPrompt, /APPEND-MAP MODE/);
+  assert.match(appendMapPrompt, /map_existing_scopes\.json/);
+  assert.match(appendMapPrompt, /ONLY newly discovered/i);
   for (const prompt of [
     MAP_SYSTEM,
     mapPrompt,
@@ -1842,6 +1922,39 @@ test("map → dig is resumable: a second run skips map and audits the next pendi
     assert.ok(events2.some((e) => e.kind === "audit_map_resumed"), "run 2 resumes the persisted inventory");
     const run2Findings = JSON.parse(await readFile(path.join(run2.runDir, "audit_findings.json"), "utf8"));
     assert.equal(run2Findings[0]?.scopeId, "S2", "run 2 audits the previously-pending scope (S2)");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("map append expands inventory without replacing audited scope state", async () => {
+  const dir = await tempDir();
+  try {
+    const base = {
+      targetName: "append-map-e2e",
+      sourcePaths: [fixtures],
+      corpusPaths: [fixtures],
+      outputDir: path.join(dir, "runs"),
+      auditDeep: true,
+      auditSynthesize: false,
+      auditRefute: false,
+      auditMapSteps: 6,
+      auditDigSteps: 8,
+      auditMaxScopes: 1,
+    };
+
+    const run1 = await runAudit({ ...defaultConfig(), ...base }, { llm: new AppendMapLlmClient() });
+    assert.deepEqual(run1.scopeCoverage, { total: 2, audited: 1, pending: 1, deferred: 0 });
+
+    const append = await runAudit({ ...defaultConfig(), ...base, auditMapOnly: true, auditAppendMap: true }, { llm: new AppendMapLlmClient() });
+    assert.deepEqual(append.scopeCoverage, { total: 3, audited: 1, pending: 2, deferred: 0 });
+    const scopes = JSON.parse(await readFile(path.join(append.runDir, "audit_scopes.json"), "utf8"));
+    assert.equal(scopes.length, 3);
+    assert.equal(scopes.find((s) => s.id === "S1")?.status, "audited");
+    assert.equal(scopes.find((s) => s.id === "S2")?.status, "pending");
+    assert.ok(scopes.some((s) => s.obligation === "tertiary advice region must bind to its source" && s.status === "pending"));
+    const events = (await readFile(path.join(append.runDir, "events.jsonl"), "utf8")).trim().split("\n").map((l) => JSON.parse(l));
+    assert.ok(events.some((e) => e.kind === "audit_map_append_done" && e.added === 1 && e.skippedDuplicate === 1));
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

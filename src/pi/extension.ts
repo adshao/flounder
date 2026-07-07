@@ -102,6 +102,7 @@ function applyAuditBudgets(cfg: AuditorConfig, params: ToolParams): void {
   const digConcurrency = num(params, "digConcurrency");
   if (digConcurrency !== undefined) cfg.auditDigConcurrency = Math.max(1, Math.floor(digConcurrency));
   if (bool(params, "remap")) cfg.auditRemap = true;
+  if (bool(params, "appendMap")) cfg.auditAppendMap = true;
 }
 
 function configured(params: ToolParams): AuditorConfig {
@@ -194,6 +195,7 @@ const auditBudgetParams = {
   digSamples: Type.Optional(Type.Number({ description: "Independent dig passes per selected scope." })),
   digConcurrency: Type.Optional(Type.Number({ description: "How many scopes run in parallel." })),
   remap: Type.Optional(Type.Boolean({ description: "Re-enumerate scopes from scratch instead of resuming inventory." })),
+  appendMap: Type.Optional(Type.Boolean({ description: "Expand the existing scope inventory by appending novel scopes; preserves existing scope status." })),
 };
 
 export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
@@ -301,6 +303,7 @@ export default function fullStackAuditorExtension(pi: ExtensionAPI): void {
       const mapSteps = num(params, "mapSteps");
       if (mapSteps !== undefined) cfg.auditMapSteps = Math.max(1, Math.floor(mapSteps));
       if (bool(params, "remap")) cfg.auditRemap = true;
+      if (bool(params, "appendMap")) cfg.auditAppendMap = true;
       cfg.auditDeep = true;
       cfg.auditMapOnly = true;
       const result = await runAudit(cfg, { kind: "map" });

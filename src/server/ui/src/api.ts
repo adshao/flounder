@@ -432,6 +432,7 @@ export interface LaunchPayload {
   pipeline?: boolean;
   continueCoverage?: boolean;
   remap?: boolean;
+  appendMap?: boolean;
   verifyFromStart?: boolean;
   findingId?: number;
   findingIds?: number[];

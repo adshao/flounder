@@ -60,7 +60,7 @@ type SettingsPane = "providers" | "daemons" | "archived";
 type ProjectTab = "overview" | "decisions" | "findings" | "scopes" | "runs" | "activity" | "setup";
 type ModalName = "new-project" | "run" | "edit-project" | "report" | "decision-report" | "run-log" | "artifact" | null;
 type ArtifactPreview = { title: string; runId: number; name: string };
-type LaunchAction = "run" | "run-next-coverage" | "prepare" | "map" | "audit" | "confirm" | "verify" | "report";
+type LaunchAction = "run" | "run-next-coverage" | "prepare" | "map" | "map-expand" | "audit" | "confirm" | "verify" | "report";
 
 const PROJECT_TABS: Array<{ id: ProjectTab; label: string }> = [
   { id: "overview", label: "Overview" },
@@ -1959,11 +1959,12 @@ export function App() {
         verb,
         ...(action === "run" || opensNextCoverage ? { pipeline: true } : {}),
         ...(opensNextCoverage ? { continueCoverage: true } : {}),
+        ...(action === "map-expand" ? { verb: "map", appendMap: true } : {}),
         ...(action === "verify" ? { verifyFindings: selected ?? verifyCandidates } : {}),
         ...((action === "confirm" || action === "report") && selected ? { findingIds: selected.map((finding) => finding.id) } : {}),
       })) as LaunchResult;
       const waiting = (result.daemons ?? 0) === 0;
-      const label = action === "verify" ? "verify" : opensNextCoverage ? "run" : verb;
+      const label = action === "verify" ? "verify" : action === "map-expand" ? "expand map" : opensNextCoverage ? "run" : verb;
       setToast({
         tone: waiting ? "warning" : "success",
         message: waiting
@@ -5710,7 +5711,8 @@ function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError 
       detail: prepareActionDetail,
       disabled: locked,
     },
-    { verb: "map", label: "Map scopes only", detail: "Build or refresh the scope inventory without digging.", disabled: locked },
+    { verb: "map-expand", label: "Expand map", detail: detail.progress.total ? `Run MAP with the current ${plural(detail.progress.total, "scope")} visible, append only novel scopes, and preserve audited/deferred status.` : "Disabled until an initial scope inventory exists.", disabled: locked || !detail.progress.total },
+    { verb: "map", label: "Remap from scratch", detail: "Rebuild the scope inventory from scratch without digging. This replaces the current scope view; use Expand map to append coverage.", disabled: locked },
     { verb: "audit", label: "Dig pending scopes", detail: pendingScopes ? `Explicitly deep-audit pending mapped scopes without starting another full pipeline round.` : "Disabled until Map scopes creates pending scope inventory.", disabled: locked || pendingScopes === 0 },
     { verb: "verify", label: verifyButtonLabel(verifiable), detail: verifiable ? `Confirm-or-refute ${plural(verifiable, "candidate")} by local execution.` : "Disabled until synthesis or dig leaves suspected candidates.", disabled: locked || verifiable === 0 },
     { verb: "confirm", label: "Confirm", detail: requiresConfirmation ? (confirmable ? `Reproduce ${plural(confirmable, "execution-confirmed finding")} against the real target.` : "Disabled until local execution confirms a finding.") : "Not required for this source-only target.", disabled: locked || confirmable === 0 },

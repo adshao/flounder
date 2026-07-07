@@ -125,6 +125,8 @@ export async function runAuditSession(input: {
   deep?: boolean;
   deepFocus?: string;
   map?: boolean;
+  mapExistingScopesPath?: string;
+  mapExistingScopesCount?: number;
   verify?: string;
   /** Synthesis mode: cross-scope composition pass after dig — carries the per-scope findings/scopes to compose. */
   synthesize?: string;
@@ -340,7 +342,7 @@ export async function runAuditSession(input: {
       finalizing = true;
       await input.logger.event("audit_map_finalize", { reason: "no scopes written before stop" });
       try {
-        await runFinalizePrompt(MAP_FINALIZE_PROMPT, "audit_map_finalize_timeout");
+        await runFinalizePrompt(input.mapExistingScopesPath ? buildMapFinalizePrompt(input.mapExistingScopesPath) : MAP_FINALIZE_PROMPT, "audit_map_finalize_timeout");
       } catch {
         // best-effort: an abort during the finalize turns is expected
       }
@@ -385,6 +387,8 @@ export async function runAuditSession(input: {
         ...(input.deep ? { deep: true } : {}),
         ...(input.deepFocus ? { deepFocus: input.deepFocus } : {}),
         ...(input.map ? { map: true } : {}),
+        ...(input.mapExistingScopesPath ? { mapExistingScopesPath: input.mapExistingScopesPath } : {}),
+        ...(input.mapExistingScopesCount !== undefined ? { mapExistingScopesCount: input.mapExistingScopesCount } : {}),
         ...(input.verify ? { verify: input.verify } : {}),
         ...(input.synthesize ? { synthesize: input.synthesize } : {}),
         ...(input.confirm ? { confirm: input.confirm } : {}),
@@ -626,13 +630,13 @@ export const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
   }),
 };
 
-export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; verify?: string; synthesize?: string; confirm?: string; report?: string; prepare?: string }): string {
+export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; mapExistingScopesPath?: string; mapExistingScopesCount?: number; verify?: string; synthesize?: string; confirm?: string; report?: string; prepare?: string }): string {
   // Confirm is the open-world mode: it has its own white-hat line (fork/read live
   // networks OK, never broadcast), so it does NOT share the local-only scaffold below.
   if (input.prepare) return buildPrepareSessionPrompt({ prepare: input.prepare, fileManifest: input.fileManifest, ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   if (input.confirm) return buildConfirmSessionPrompt({ confirm: input.confirm, fileManifest: input.fileManifest, ...(input.scopeNote ? { scopeNote: input.scopeNote } : {}), ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   if (input.report) return buildReportSessionPrompt({ report: input.report, fileManifest: input.fileManifest, ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
-  const intro = input.synthesize ? synthesizeIntro(input.synthesize) : input.verify ? verifyIntro(input.verify) : input.map ? mapIntro() : input.deep ? deepIntro(input.deepFocus) : breadthIntro();
+  const intro = input.synthesize ? synthesizeIntro(input.synthesize) : input.verify ? verifyIntro(input.verify) : input.map ? mapIntro(input.mapExistingScopesPath, input.mapExistingScopesCount) : input.deep ? deepIntro(input.deepFocus) : breadthIntro();
   const reportingBlock = input.map
     ? ""
     : `
@@ -678,7 +682,11 @@ Loaded source files:
 ${input.fileManifest}
 
 ${input.map
-    ? `Apply the three lenses and write scopes.json early as a checkpoint, then keep expanding and splitting it until it is the COMPLETE scope inventory (each: id, obligation, region, lenses, exposure, difficulty, score, why). Do not deep-dive or prove bugs in this phase; coverage over depth. Emit done only after a final completeness pass over the loaded first-party tree.
+    ? input.mapExistingScopesPath && input.mapExistingScopesCount
+      ? `Read ${input.mapExistingScopesPath} first. It contains the existing ${input.mapExistingScopesCount} scope(s) that must be preserved and not duplicated. Apply the three lenses to find coverage gaps beyond that file, and write scopes.json early with ONLY newly discovered non-duplicate scopes (each: id, obligation, region, lenses, exposure, difficulty, score, why). Do not deep-dive or prove bugs in this phase; coverage over depth. Emit done only after a final expansion pass for omitted scopes not already represented in the existing inventory.
+
+${MAP_GRANULARITY_RULES}`
+      : `Apply the three lenses and write scopes.json early as a checkpoint, then keep expanding and splitting it until it is the COMPLETE scope inventory (each: id, obligation, region, lenses, exposure, difficulty, score, why). Do not deep-dive or prove bugs in this phase; coverage over depth. Emit done only after a final completeness pass over the loaded first-party tree.
 
 ${MAP_GRANULARITY_RULES}`
     : input.synthesize
@@ -689,6 +697,10 @@ ${MAP_GRANULARITY_RULES}`
 }
 
 const MAP_FINALIZE_PROMPT = `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} covering every concrete scope you identified under the three general lenses: spec conditions, value/asset flow, and trusted-but-unbound inputs. Score each scope with an integer 0-100 ordering signal; use the full scale to distinguish similarly exposed scopes and do NOT compress into 0-10. If a scope covers multiple independent gates, proof boundaries, invariants, or attacker-controlled inputs, split it before writing. Partial but broad beats empty; do not collapse the inventory into a shortlist or a 30-scope dig batch. After writing, emit {"done": true}. Output only the write tool call.`;
+
+function buildMapFinalizePrompt(existingScopesPath: string): string {
+  return `Your exploration budget is spent. Do NOT read, grep, or run anything else. Based ONLY on what you have already examined, WRITE scopes.json now at the workspace root as your very next action — call the write tool once with a JSON array of objects {"id","obligation","region":"file:lines","lenses":[...],"exposure","difficulty","score","why"} containing ONLY newly discovered scopes not already represented in ${existingScopesPath}. Do not include existing scopes, and do not rename or re-score them. Score each new scope with an integer 0-100 ordering signal. If a new scope covers multiple independent gates, proof boundaries, invariants, or attacker-controlled inputs, split it before writing. Partial but broad beats empty; if you found no novel scopes, write [] exactly. After writing, emit {"done": true}. Output only the write tool call.`;
+}
 
 export const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis and command results you have already produced, WRITE findings.json now at the workspace root as your very next action — call the write tool once with ONLY actionable findings: UNMET obligations, concrete suspected bugs, and confirmed bugs that cite an already-passing purpose=confirm command_id. Do NOT include discharged/safe/no-issue obligations, ranked shortlist notes, or obligation ledgers. If you found no actionable bug, write [] exactly. Do NOT invent a confirmation and DO NOT mark anything confirmed by assertion. After writing, emit {"done": true}. Output only the write tool call.`;
 
@@ -866,8 +878,12 @@ ${claim}
 Method: (1) read the cited code + its callers/callees/modifiers, and check whether the claimed-unconstrained value is actually bound elsewhere (a verified hash/proof, a require, a check) — many "X is unconstrained" claims are false. At decode/serialization/proof boundaries, also check whether the value is length-checked, canonical/range-checked, and interpreted in the correct domain/modulus/units rather than silently normalized into a different statement. (2) Write a NEW PoC test in the sandbox that exercises the ACTUAL code path and triggers the claimed bug; prefer adding it inside the target's native build root or package test tree so existing manifests, lockfiles, local patches, and prepared caches are reused. Use purpose=build when dependency fetch or compilation is needed; package registry/network setup belongs here, not in prepare, and it is not confirmation-eligible. Create a standalone PoC package only when it can import pristine target source without inventing a new dependency-resolution problem. For Rust, if the staged package has a Cargo.lock newer than installed Cargo understands, try the native manifest with the needed Cargo compatibility flag (for example -Znext-lockfile-bump) before making a fresh harness. Do not keep retrying the same missing-registry-package or DNS failure; switch back to the native workspace or record a setup blocker without upgrading or refuting the finding. Run the final proof with purpose=confirm and success_patterns; that final proof must stay local/no-live-network. (3) Verdict in findings.json: if the PoC passes and triggers the bug, record the finding at its true severity citing command_id, and supply fix_patch + patched_success_patterns for differential confirmation; if after genuine effort it cannot reproduce because the claim is mitigated/false, record ONE finding of severity "info" whose title starts "REFUTED:" with evidence citing the exact mitigating line. After writing the verdict for this ONE claim, emit done immediately. Do not keep auditing for stronger variants, related bugs, extra affected surfaces, or broader coverage; those belong to a separate dig/synthesis run. Never confirm by assertion — default to refuting unless an executable PoC proves it.`;
 }
 
-function mapIntro(): string {
+function mapIntro(existingScopesPath?: string, existingScopesCount?: number): string {
+  const appendMapBlock = existingScopesPath && existingScopesCount
+    ? `\nAPPEND-MAP MODE:\n- The existing scope inventory is available at ${existingScopesPath} and contains ${existingScopesCount} scope(s).\n- Read it before writing scopes.json and treat those scopes as already-covered map output.\n- Write ONLY newly discovered scopes to scopes.json. Do not rewrite, rename, or re-score existing scopes.\n- Avoid duplicates by comparing region and obligation; add only genuinely new obligations or regions missing from the existing inventory.\n- The framework will merge your novel scopes into the persisted inventory and preserve existing audited/deferred/pending status.\n`
+    : "";
   return `You are an autonomous white-hat security auditor doing the MAP phase: enumerate the COMPLETE set of audit SCOPES for this target. You are NOT finding or proving bugs yet — a later phase deep-audits each scope. Your job is COVERAGE, not a ranked shortlist that drops things.
+${appendMapBlock}
 
 Apply THREE lenses (general method, not a hint about this target); be exhaustive, over-list rather than silently omit:
 1. SPEC CONDITIONS — read the design/spec material under corpus/ (and higher-level code) and list every security statement the system must enforce; each maps to the code that enforces it. A stated condition with NO enforcing code is itself a scope.

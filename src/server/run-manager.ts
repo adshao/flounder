@@ -61,6 +61,7 @@ export interface LaunchSpec {
   digSamples?: number | undefined;
   digConcurrency?: number | undefined;
   remap?: boolean | undefined; // run/map/audit: re-enumerate the scope inventory (restart)
+  appendMap?: boolean | undefined; // run/map: expand the existing scope inventory without replacing prior scopes
   fresh?: boolean | undefined; // confirm: ignore a prior interrupted confirm
   inputRunDir?: string | undefined; // confirm: the finished run dir to reproduce
   inputRunDirs?: string[] | undefined; // confirm (aggregate): several run dirs whose confirmed findings are unioned + reproduced together
@@ -164,6 +165,7 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   if (spec.digConcurrency !== undefined) cfg.auditDigConcurrency = spec.digConcurrency;
   if (spec.verifyFromStart) cfg.auditVerifyFromStart = true;
   if (spec.remap) cfg.auditRemap = true; // re-enumerate scopes from scratch (restart)
+  if (spec.appendMap) cfg.auditAppendMap = true; // expand persisted inventory, preserving existing scope statuses
   // prepare + confirm derive their own posture from their options (clue / prior run), not from
   // the sealed audit's map/dig flags — return the base cfg (provider/model/out/target) as-is.
   if (spec.verb === "prepare" || spec.verb === "confirm" || spec.verb === "report") return cfg;
@@ -257,6 +259,7 @@ export function buildArgs(spec: LaunchSpec): string[] {
   if (spec.digSamples !== undefined) args.push("--dig-samples", String(spec.digSamples));
   if (spec.digConcurrency !== undefined) args.push("--dig-concurrency", String(spec.digConcurrency));
   if (spec.remap && spec.verb !== "confirm") args.push("--remap");
+  if (spec.appendMap && (spec.verb === "run" || spec.verb === "map")) args.push("--append-map");
   if (spec.fresh && spec.verb === "confirm") args.push("--fresh");
   if (spec.quick && spec.verb === "run") args.push("--quick");
   if (spec.mockLlm) args.push("--mock-llm");

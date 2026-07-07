@@ -271,6 +271,7 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   cfg.auditDigSamples = readIntFlag(args, "--dig-samples") ?? cfg.auditDigSamples;
   cfg.auditDigConcurrency = readIntFlag(args, "--dig-concurrency") ?? cfg.auditDigConcurrency;
   if (args.includes("--remap")) cfg.auditRemap = true;
+  if (args.includes("--append-map") || args.includes("--expand-map")) cfg.auditAppendMap = true;
   if (args.includes("--dry-run")) cfg.dryRun = true;
   const thinking = readFlag(args, "--thinking");
   if (thinking === "off" || thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh") {
@@ -564,6 +565,7 @@ function buildAuditSpec(cmd: "run" | "map" | "audit", rest: string[], cfg: Audit
   if (cfg.auditScopeNote && cfg.auditScopeNote.trim()) spec.scopeNote = cfg.auditScopeNote.trim(); // --scope-note, or the pipeline's prepare-derived focus
   if (cmd === "run" && rest.includes("--quick")) spec.quick = true;
   if (rest.includes("--remap")) spec.remap = true;
+  if (rest.includes("--append-map") || rest.includes("--expand-map")) spec.appendMap = true;
   if (cmd === "run" && rest.includes("--verify-from-start")) spec.verifyFromStart = true;
   if (rest.includes("--mock-llm")) spec.mockLlm = true; // offline mock model, executed by the daemon
   if (cmd === "audit") {
@@ -1102,6 +1104,7 @@ run / map / audit deep-phase options:
   --dig-concurrency <n>   scopes deep-audited in parallel (isolated workspaces), default 1
   --max-scopes <n>        one-run cap for un-audited scopes; UI Standard defaults to auditing until 30 project scopes are done
   --remap                 re-enumerate scopes from scratch (default resumes the persisted inventory)
+  --append-map            expand the persisted inventory by asking MAP for novel scopes, preserving existing scope status
 
 flounder audit selectors (choose one; default digs the existing inventory):
   <region>                deep-audit one pinned region, e.g. src/Foo.sol:120-180 (no map needed)
@@ -1121,6 +1124,7 @@ flounder continue:
   --project <uuid|name>   tracked UI/API project. Names are resolved client-side when unique.
   --verify-from-start     re-run Verify from the beginning instead of only pending candidates.
   --remap                 re-enumerate scopes from scratch before digging.
+  --append-map            expand the persisted inventory before digging; preserves existing scope status.
   --continue-coverage     explicitly open another mapped scope batch after the current round is settled.
   --coverage <mode>       focused|standard|half|full|custom one-off coverage mode.
   --max-scopes <n>        one-off scope cap, or custom target when --coverage custom.

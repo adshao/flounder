@@ -157,6 +157,10 @@ test("specToConfig: posture per verb + unbounded budgets by default", () => {
   assert.equal(capped.auditMaxScopes, 8);
   assert.equal(capped.auditMapSteps, 50);
   assert.equal(capped.auditRemap, true);
+
+  const append = specToConfig({ ...base, verb: "map", appendMap: true }, "out");
+  assert.equal(append.auditMapOnly, true);
+  assert.equal(append.auditAppendMap, true);
 });
 
 test("specToConfig: a project dir + relative materials resolve under the daemon workspace", () => {

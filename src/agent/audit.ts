@@ -15,7 +15,7 @@ import { runDifferentialConfirmation, type DifferentialResult } from "./differen
 import { runDischargeChallenge, runRefutation } from "./refutation.js";
 import { runAuditLoop } from "./loop.js";
 import { ProjectMemory } from "./memory.js";
-import { loadScopeInventory, saveScopeInventory, scopeProgress } from "./scope-store.js";
+import { loadScopeInventory, mergeScopeInventory, saveScopeInventory, scopeProgress } from "./scope-store.js";
 import { RunRecorder, toDiscoveryBacklogRows, type RunTrackerFactory } from "../db/record.js";
 import type { RunKind } from "../db/store.js";
 import { isPiSessionProvider, runAuditSession, SessionLlmClient } from "./pi-session.js";
@@ -33,6 +33,8 @@ import {
   type ResourceRequest,
   type RunHealth,
 } from "./discovery-artifacts.js";
+
+const APPEND_MAP_EXISTING_SCOPES_PATH = "map_existing_scopes.json";
 
 // Orchestrates one autonomous audit: load authorized material, give the model the
 // capability surface, run the ReAct loop, then turn whatever it proved into the
@@ -80,6 +82,7 @@ export async function runAudit(
   const session = newSession();
   const tools = buildTools();
   const ctx: ToolContext = { cfg, source, corpus, memory, logger, session };
+  if (cfg.auditRemap && cfg.auditAppendMap) throw new Error("choose either append-map or remap, not both");
 
   // Create the shared isolated workspace up front. It is the sandbox for tools
   // and the cwd for the agent session. The toolchain warm-up is lazy (run by the
@@ -142,7 +145,7 @@ export async function runAudit(
   };
   const runPhase = async (
     phaseCfg: AuditorConfig,
-    opts: { mode: "breadth" | "map" | "dig" | "verify" | "synthesize"; deepFocus?: string; verifySeed?: string; synthSeed?: string; maxSteps: number },
+    opts: { mode: "breadth" | "map" | "dig" | "verify" | "synthesize"; deepFocus?: string; verifySeed?: string; synthSeed?: string; maxSteps: number; mapExistingScopesPath?: string; mapExistingScopesCount?: number },
     over?: { ctx: ToolContext; cwd: string },
   ): Promise<{ steps: TranscriptStep[]; stoppedReason: string }> => {
     const phaseCtx = over?.ctx ?? ctx;
@@ -164,6 +167,8 @@ export async function runAudit(
         fileManifest,
         ...(scopeNote ? { scopeNote } : {}),
         ...(memoryHint ? { memoryHint } : {}),
+        ...(opts.mapExistingScopesPath ? { mapExistingScopesPath: opts.mapExistingScopesPath } : {}),
+        ...(opts.mapExistingScopesCount !== undefined ? { mapExistingScopesCount: opts.mapExistingScopesCount } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.onActivity ? { onActivity: options.onActivity } : {}),
         ...flags,
@@ -183,6 +188,8 @@ export async function runAudit(
       fileManifest,
       ...(scopeNote ? { scopeNote } : {}),
       ...(memoryHint ? { memoryHint } : {}),
+      ...(opts.mapExistingScopesPath ? { mapExistingScopesPath: opts.mapExistingScopesPath } : {}),
+      ...(opts.mapExistingScopesCount !== undefined ? { mapExistingScopesCount: opts.mapExistingScopesCount } : {}),
       ...flags,
     }));
   };
@@ -284,12 +291,26 @@ export async function runAudit(
     // MAP only (`flounder map`): enumerate and persist the scope inventory, then stop — no
     // dig. The resumable `flounder audit` digs from this inventory afterwards.
     const inventoryDir = projectHistoryDir(historyLocation(cfg));
-    const mapPhase = await runPhase(withRole(cfg, "map"), { mode: "map", maxSteps: cfg.auditMapSteps });
-    scopeInventory = readScratchScopes(session);
+    const existing = cfg.auditAppendMap ? await loadScopeInventory(inventoryDir) : [];
+    const mapSeed = await writeAppendMapExistingScopesSeed(existing, workspaceCwd);
+    if (existing.length > 0) await logger.event("audit_map_append_start", { existing: existing.length, seed: mapSeed });
+    const mapPhase = await runPhase(withRole(cfg, "map"), {
+      mode: "map",
+      maxSteps: cfg.auditMapSteps,
+      ...(mapSeed ? { mapExistingScopesPath: mapSeed, mapExistingScopesCount: existing.length } : {}),
+    });
+    const mapped = readScratchScopes(session);
+    if (existing.length > 0) {
+      const merged = mergeScopeInventory(existing, mapped);
+      scopeInventory = merged.scopes;
+      await logger.event("audit_map_append_done", { existing: existing.length, produced: mapped.length, added: merged.added, skippedDuplicate: merged.skippedDuplicate, total: scopeInventory.length });
+    } else {
+      scopeInventory = mapped;
+      await logger.event("audit_map_done", { scopes: scopeInventory.length });
+    }
     for (const scope of scopeInventory) if (!scope.status) scope.status = "pending";
     await saveScopeInventory(inventoryDir, scopeInventory);
     await logger.artifact("audit_scopes.json", scopeInventory);
-    await logger.event("audit_map_done", { scopes: scopeInventory.length });
     await logger.event("audit_scope_progress", { ...scopeProgress(scopeInventory), resumed: false });
     recorder.scopes(scopeInventory);
     clearScratchFindings(session);
@@ -309,15 +330,29 @@ export async function runAudit(
     const aggregatedSteps: TranscriptStep[] = [];
     const picked = cfg.auditScopeIds ?? [];
     scopeInventory = cfg.auditRemap ? [] : await loadScopeInventory(inventoryDir);
-    const resuming = scopeInventory.length > 0;
+    const appendExisting = cfg.auditAppendMap ? scopeInventory : [];
+    const resuming = scopeInventory.length > 0 && !cfg.auditAppendMap;
     if (!resuming && (picked.length > 0 || cfg.auditRequireInventory)) {
       throw new Error("`flounder audit` needs an existing scope inventory; run `flounder map` first to enumerate scopes (then pick with `--scope` from audit_scopes.json), or `flounder run` to map and audit in one pass.");
     }
     if (!resuming) {
-      const mapPhase = await runPhase(withRole(cfg, "map"), { mode: "map", maxSteps: cfg.auditMapSteps });
-      scopeInventory = readScratchScopes(session);
+      const mapSeed = await writeAppendMapExistingScopesSeed(appendExisting, workspaceCwd);
+      if (appendExisting.length > 0) await logger.event("audit_map_append_start", { existing: appendExisting.length, seed: mapSeed });
+      const mapPhase = await runPhase(withRole(cfg, "map"), {
+        mode: "map",
+        maxSteps: cfg.auditMapSteps,
+        ...(mapSeed ? { mapExistingScopesPath: mapSeed, mapExistingScopesCount: appendExisting.length } : {}),
+      });
+      const mapped = readScratchScopes(session);
+      if (appendExisting.length > 0) {
+        const merged = mergeScopeInventory(appendExisting, mapped);
+        scopeInventory = merged.scopes;
+        await logger.event("audit_map_append_done", { existing: appendExisting.length, produced: mapped.length, added: merged.added, skippedDuplicate: merged.skippedDuplicate, total: scopeInventory.length });
+      } else {
+        scopeInventory = mapped;
+        await logger.event("audit_map_done", { scopes: scopeInventory.length });
+      }
       aggregatedSteps.push(...mapPhase.steps);
-      await logger.event("audit_map_done", { scopes: scopeInventory.length });
       clearScratchFindings(session);
     } else {
       await logger.event("audit_map_resumed", { ...scopeProgress(scopeInventory) });
@@ -1162,6 +1197,23 @@ function deriveScopeNoteFromSource(sourcePaths: string[]): string | undefined {
 function renderMemoryHint(notes: { kind: string; note: string; sourceRef?: string }[]): string {
   if (notes.length === 0) return "";
   return notes.map((note) => `- [${note.kind}] ${note.note}${note.sourceRef ? ` (ref: ${note.sourceRef})` : ""}`).join("\n");
+}
+
+async function writeAppendMapExistingScopesSeed(scopes: AuditScope[], workspaceCwd: string): Promise<string | undefined> {
+  if (scopes.length === 0) return undefined;
+  const snapshot = scopes.map((scope) => ({
+    id: scope.id,
+    status: scope.status ?? "pending",
+    region: scope.region,
+    obligation: scope.obligation,
+    lenses: scope.lenses,
+    exposure: scope.exposure,
+    difficulty: scope.difficulty,
+    score: scope.score,
+    why: scope.why,
+  }));
+  await writeSandboxFiles(workspaceCwd, [{ path: APPEND_MAP_EXISTING_SCOPES_PATH, content: `${JSON.stringify(snapshot, null, 2)}\n` }]);
+  return APPEND_MAP_EXISTING_SCOPES_PATH;
 }
 
 // Bounded worker pool: run `worker` over `items` with at most `limit` in flight,

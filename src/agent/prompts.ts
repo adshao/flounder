@@ -196,9 +196,15 @@ export function buildMapKickoff(input: {
   fileManifest: string;
   memoryHint?: string;
   maxSteps: number;
+  mapExistingScopesPath?: string;
+  mapExistingScopesCount?: number;
 }): string {
+  const appendMapBlock = input.mapExistingScopesPath && input.mapExistingScopesCount
+    ? `\nAPPEND-MAP MODE:\n- An existing scope inventory with ${input.mapExistingScopesCount} scope(s) is available at ${input.mapExistingScopesPath}.\n- Before writing scopes.json, read that file and treat it as already-covered map output.\n- Your output scopes.json must contain ONLY newly discovered scopes not already represented there. Do not rewrite, rename, or re-score existing scopes.\n- Avoid duplicates by comparing both region and obligation; split genuinely new obligations even if they live near an existing region.\n- The framework will merge your novel scopes into the persisted inventory and preserve existing audited/deferred/pending status.\n`
+    : "";
   return `Target: ${input.target}
 Phase: MAP — enumerate the COMPLETE scope inventory (coverage, not a shortlist). ${actionBudgetText(input.maxSteps)}; stay broad and shallow, but keep expanding until the loaded in-scope material has been covered.
+${appendMapBlock}
 
 ${MAP_SCORING_RULES}
 

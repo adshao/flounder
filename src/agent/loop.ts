@@ -31,6 +31,9 @@ export async function runAuditLoop(input: {
   deepFocus?: string;
   /** Map (scope-enumeration) phase: writes scopes.json instead of findings.json. */
   map?: boolean;
+  /** Append-map mode: existing inventory snapshot the model should avoid duplicating. */
+  mapExistingScopesPath?: string;
+  mapExistingScopesCount?: number;
   /** Verify posture: confirm-or-refute ONE specific suspected finding (the claim text). */
   verify?: string;
   /** Synthesis mode: compose per-scope deep-audit output into cross-component findings. */
@@ -63,7 +66,7 @@ export async function runAuditLoop(input: {
       : input.verify
       ? buildVerifyKickoff({ ...kickoffCommon, verify: input.verify })
       : input.map
-        ? buildMapKickoff(kickoffCommon)
+        ? buildMapKickoff({ ...kickoffCommon, ...(input.mapExistingScopesPath ? { mapExistingScopesPath: input.mapExistingScopesPath } : {}), ...(input.mapExistingScopesCount !== undefined ? { mapExistingScopesCount: input.mapExistingScopesCount } : {}) })
         : input.deep
           ? buildDeepKickoff({ ...kickoffCommon, ...(input.deepFocus ? { deepFocus: input.deepFocus } : {}) })
           : buildAuditKickoff(kickoffCommon);
@@ -121,7 +124,9 @@ export async function runAuditLoop(input: {
       remaining > finalizeThreshold
         ? ""
         : input.map
-          ? "\nBUDGET LOW — write scopes.json NOW with the COMPLETE scope inventory you have so far (each with id, obligation, region, score as integer 0-100), then emit done. Unrecorded scopes are lost."
+          ? input.mapExistingScopesPath
+            ? "\nBUDGET LOW — write scopes.json NOW with only the NEW non-duplicate scopes you found beyond map_existing_scopes.json (each with id, obligation, region, score as integer 0-100), then emit done. Unrecorded new scopes are lost."
+            : "\nBUDGET LOW — write scopes.json NOW with the COMPLETE scope inventory you have so far (each with id, obligation, region, score as integer 0-100), then emit done. Unrecorded scopes are lost."
           : input.deep
             ? "\nBUDGET LOW — make sure findings.json records EVERY obligation and its status (discharged-with-line / UNMET / uncertain). Keep working through the remaining obligations; an UNMET obligation with its exact missing edge is a finding. Unrecorded obligations are lost."
             : "\nALMOST OUT OF STEPS — do not open new investigations. Write findings.json NOW with any confirmed findings AND your best unconfirmed hypotheses (each with location and why it is suspected), then emit done. Unrecorded hypotheses are lost.";
