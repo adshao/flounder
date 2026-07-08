@@ -68,8 +68,8 @@ type LaunchAction = "run" | "run-next-coverage" | "prepare" | "map" | "map-expan
 
 const PROJECT_TABS: Array<{ id: ProjectTab; label: string }> = [
   { id: "overview", label: "Overview" },
-  { id: "next-actions", label: "Next Actions" },
   { id: "activity", label: "Activity" },
+  { id: "next-actions", label: "Next Actions" },
   { id: "decisions", label: "Decisions" },
   { id: "findings", label: "Findings" },
   { id: "scopes", label: "Scopes" },
@@ -3085,7 +3085,6 @@ function ProjectDetailView(props: {
           onOpenDecisionReport={props.onOpenDecisionReport}
           onOpenDecisions={() => openProjectSection("decisions", "project-real-target-decisions")}
           onOpenActivity={() => openProjectSection("activity")}
-          onOpenNextActions={() => openProjectSection("next-actions", "project-next-actions")}
         />
       ) : null}
       {tab === "next-actions" ? (
@@ -3326,7 +3325,6 @@ function ProjectOverview({
   onOpenDecisionReport,
   onOpenDecisions,
   onOpenActivity,
-  onOpenNextActions,
 }: {
   detail: ProjectDetail;
   candidates: FindingRow[];
@@ -3337,7 +3335,6 @@ function ProjectOverview({
   onOpenDecisionReport: (decision: ConfirmDecision) => void;
   onOpenDecisions: () => void;
   onOpenActivity: () => void;
-  onOpenNextActions: () => void;
 }) {
   const currentRuns = currentMaterialRuns(detail.runs, detail.material);
   const current = currentRuns.find((run) => run.status === "running") ?? currentRuns[0];
@@ -3441,11 +3438,6 @@ function ProjectOverview({
           </div>
         </Card>
       </div>
-      <NextActionsSummaryCard
-        items={detail.discoveryBacklog ?? []}
-        counts={detail.backlogCounts ?? {}}
-        onOpen={onOpenNextActions}
-      />
     </>
   );
 }
@@ -3487,47 +3479,6 @@ const BACKLOG_GROUPS: Array<{ id: BacklogGroupId; label: string; detail: string;
     empty: "No decision-only backlog items.",
   },
 ];
-
-function NextActionsSummaryCard({ items, counts, onOpen }: { items: DiscoveryBacklogRow[]; counts: Record<string, number>; onOpen: () => void }) {
-  const open = backlogOpenCount(items, counts);
-  if (open === 0 && items.length === 0) return null;
-  const groupCounts = backlogActionGroupCounts(items);
-  const shown = backlogOpenItems(items).slice(0, 4);
-  const summary = [
-    groupCounts["agent-runnable"] ? `${groupCounts["agent-runnable"]} agent-runnable` : "",
-    groupCounts["needs-resource"] ? `${groupCounts["needs-resource"]} resource` : "",
-    groupCounts["needs-decision"] ? `${groupCounts["needs-decision"]} decision` : "",
-  ].filter(Boolean).join(" · ") || `${open} open`;
-  return (
-    <div id="project-discovery-backlog" className="section-anchor">
-      <Card title={<span>Next actions <Counter>{open}</Counter></span>}>
-        <div className="candidate-head">
-          <div>
-            <strong>{summary}</strong>
-            <small>Open discovery backlog items grouped by who can move them forward.</small>
-          </div>
-          <Button size="sm" onClick={onOpen}>Open queue</Button>
-        </div>
-        {shown.length ? (
-          <div className="resource-list">
-            {shown.map((item) => (
-              <div className="resource-card backlog-card" key={item.id}>
-                <span className={`label s-${item.kind}`}>{backlogKindLabel(item.kind)}</span>
-                <div className="grow">
-                  <strong>{item.title || "Untitled backlog item"}</strong>
-                  <small>{backlogSummaryDetail(item)}</small>
-                </div>
-                <span className={`label backlog-owner ${backlogGroupId(item)}`}>{backlogGroupShortLabel(backlogGroupId(item))}</span>
-              </div>
-            ))}
-          </div>
-        ) : (
-          <EmptyInline>No open next actions.</EmptyInline>
-        )}
-      </Card>
-    </div>
-  );
-}
 
 function NextActionsView({
   detail,
