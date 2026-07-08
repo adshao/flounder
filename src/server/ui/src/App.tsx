@@ -22,6 +22,7 @@ import {
 import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge } from "./components";
 import {
   confirmedDecisions,
+  contestStrategy,
   currentMaterialDetail,
   currentMaterialConfirmDecisions,
   currentMaterialFindings,
@@ -31,6 +32,7 @@ import {
   fmtDur,
   fmtTime,
   isVerifyRun,
+  isBugBountyContestConfig,
   isSubmissionReadyDecision,
   verifyRunProgress,
   verifyRunRechecksConfirmed,
@@ -668,7 +670,9 @@ function coverageConfig(mode: CoverageMode, maxScopes: string): ProjectConfig {
   return cfg;
 }
 
-function coverageLabel(cfg: { scopeCoverageMode?: string; maxScopes?: number }): string {
+function coverageLabel(cfg: ProjectConfig): string {
+  const contest = contestStrategy(cfg);
+  if (contest.enabled) return `Contest - ${contest.batchScopes}-scope rounds`;
   const mode = coverageModeFromConfig(cfg);
   if (mode === "focused") return "Focused - until 10 scopes";
   if (mode === "standard") return "Standard - until 30 scopes";
@@ -677,7 +681,8 @@ function coverageLabel(cfg: { scopeCoverageMode?: string; maxScopes?: number }):
   return `Custom - ${cfg.maxScopes ?? 30} scopes per run`;
 }
 
-function coverageModeName(cfg: { scopeCoverageMode?: string; maxScopes?: number }): string {
+function coverageModeName(cfg: ProjectConfig): string {
+  if (contestStrategy(cfg).enabled) return "Contest";
   const mode = coverageModeFromConfig(cfg);
   if (mode === "focused") return "Focused";
   if (mode === "standard") return "Standard";
@@ -801,8 +806,15 @@ function runKindLabel(kind: string, run?: RunRow): string {
   }[kind] ?? kind;
 }
 
-function needsRealTargetConfirmation(detail: Pick<ProjectDetail, "prepareSummary"> | null | undefined): boolean {
-  return detail?.prepareSummary?.realTarget?.requiresConfirmation !== false;
+function needsRealTargetConfirmation(detail: (Pick<ProjectDetail, "prepareSummary" | "project"> | ProjectSnapshot) | null | undefined): boolean {
+  const cfg = detail && "project" in detail
+    ? parseJson<ProjectConfig>(detail.project.config_json, {})
+    : detail && "config" in detail
+      ? detail.config ?? {}
+      : {};
+  if (contestStrategy(cfg).skipRealTargetConfirm) return false;
+  const prepareSummary = detail && "prepareSummary" in detail ? detail.prepareSummary : undefined;
+  return prepareSummary?.realTarget?.requiresConfirmation !== false;
 }
 
 function isIgnoredFinding(finding: FindingRow): boolean {
@@ -877,7 +889,13 @@ function pipelineCoverageRoundComplete(detail: ProjectDetail): boolean {
 }
 
 function pipelineRunActionDetail(detail: ProjectDetail, hasPipelineRun: boolean): string {
-  if (!hasPipelineRun) return "Run the automatic pipeline: Prepare when needed, then map/dig, confirm reproduced impact, and generate reports.";
+  const cfg = projectConfig(detail).cfg;
+  const contest = contestStrategy(cfg);
+  if (!hasPipelineRun) {
+    return contest.enabled
+      ? `Contest pipeline: Prepare when needed, then map/dig ${plural(contest.batchScopes, "scope")} per round, verify locally, and generate source-only reports.`
+      : "Run the automatic pipeline: Prepare when needed, then map/dig, confirm reproduced impact, and generate reports.";
+  }
   const requiresConfirmation = needsRealTargetConfirmation(detail);
   const verifyCount = rawPendingVerifyCount(detail.allFindings);
   if (verifyCount > 0) return `Continue the current pipeline by verifying ${plural(verifyCount, "candidate")} before this round can finish.`;
@@ -885,12 +903,18 @@ function pipelineRunActionDetail(detail: ProjectDetail, hasPipelineRun: boolean)
   if (confirmCount > 0) return `Continue the current pipeline by confirming ${plural(confirmCount, "finding")} before this round can finish.`;
   const reportCount = requiresConfirmation ? pendingDecisionReports(detail.confirmDecisions).length : pendingFormalReports(detail.allFindings, requiresConfirmation).length;
   if (reportCount > 0) return `Continue the current pipeline by generating ${plural(reportCount, "report")} before this round can finish.`;
-  const mode = coverageModeFromConfig(projectConfig(detail).cfg);
+  const mode = coverageModeFromConfig(cfg);
   const audited = Math.max(0, detail.progress.audited ?? 0);
   const pending = Math.max(0, detail.progress.pending ?? 0);
+  if (contest.enabled) {
+    if (pending > 0) return `Continue will audit the next contest batch: up to ${plural(Math.min(contest.batchScopes, pending), "pending scope")}.`;
+    return contest.appendMapWhenExhausted
+      ? `Continue will expand the map, append novel scopes, then audit up to ${plural(contest.batchScopes, "scope")}.`
+      : "Contest scope inventory is exhausted; expand the map or edit the stop policy before continuing.";
+  }
   if (pipelineCoverageRoundComplete(detail)) {
     return pending
-      ? `Current ${coverageModeName(projectConfig(detail).cfg)} round is complete. Continue stays stopped; use Start next scope round to open another batch from ${plural(pending, "pending scope")}.`
+      ? `Current ${coverageModeName(cfg)} round is complete. Continue stays stopped; use Start next scope round to open another batch from ${plural(pending, "pending scope")}.`
       : "Current pipeline round is complete. Continue stays stopped; no pending mapped scopes remain.";
   }
   if (mode === "standard") {
@@ -2549,6 +2573,7 @@ function ProjectSidebar({
             >
               <span className="project-row-top">
                 <span className="project-name">{shortName(project.name, 31)}</span>
+                {isBugBountyContestConfig(project.config) ? <span className="project-type-badge">Contest</span> : null}
                 {project.pinned_at ? <span className="project-pin-indicator" title="Pinned"><Icon name="pin" size={13} /></span> : null}
                 <ProjectStatusIcon project={project} />
               </span>
@@ -2681,6 +2706,7 @@ function ProjectDetailView(props: {
   const provider = providers.find((p) => p.id === detail.project.provider_id);
   const selectedDaemon = daemons.find((daemon) => daemon.id === detail.project.daemon_id);
   const config = projectConfig(detail);
+  const contestProfile = contestStrategy(config.cfg);
   const selectedDaemonOnline = selectedDaemon ? daemonHealth(selectedDaemon) === "online" : false;
   const online = selectedDaemonOnline ? [selectedDaemon] : [];
   const progress = currentMaterialProgress(detail);
@@ -2743,7 +2769,8 @@ function ProjectDetailView(props: {
     && setupReadWatermarks[project.uuid] !== setupAttentionSignature
   );
   const launchLocked = props.busy || Boolean(runningRun);
-  const runLaunchLocked = launchLocked || currentRoundComplete;
+  const contestCanContinue = contestProfile.enabled && ((progress.pending ?? 0) > 0 || (progress.total ?? 0) === 0 || contestProfile.appendMapWhenExhausted);
+  const runLaunchLocked = launchLocked || (currentRoundComplete && !contestCanContinue);
   const requiredProviders = requiredProviderProfiles(detail, providers);
   const authStatuses = requiredProviders.map((profile) => ({ profile, status: daemonHasProvider(selectedDaemon, profile.provider) }));
   const authUnknown = authStatuses.some((entry) => entry.status === null);
@@ -2799,7 +2826,7 @@ function ProjectDetailView(props: {
     findingsTotal: allFindings.length,
     auditConfirmedFindings: confirmed,
     reproducedBugs: reproduced,
-    confirmedBugs: reproduced,
+    confirmedBugs: requiresConfirmation ? reproduced : confirmed,
     verifyPendingFindings: pendingVerify,
     confirmPendingFindings: pendingConfirm,
     confirmDecisionCount: confirmDecisions.length,
@@ -2908,11 +2935,17 @@ function ProjectDetailView(props: {
           <div className="hero-main">
             <div className="title-line">
               <h1>{detail.project.name}</h1>
+              {contestProfile.enabled ? <span className="project-type-badge hero-badge">Contest</span> : null}
               <StateBadge status={projectBadgeStatus(currentProject)} />
             </div>
             <div className="subtle-line">
               {provider ? providerProfileLabel(provider) : "no provider set"} · {selectedDaemon ? selectedDaemon.name ?? `daemon-${selectedDaemon.id}` : "no daemon selected"} · {detail.project.dir || detail.project.name}
             </div>
+            {contestProfile.enabled ? (
+              <div className="subtle-line contest-summary">
+                {contestProfile.batchScopes} scopes/round · {contestProfile.digConcurrency} parallel digs · {contestProfile.skipRealTargetConfirm ? "source-only reports" : "real-target confirm required"}{contestProfile.stopAfterHours ? ` · review after ${contestProfile.stopAfterHours}h` : ""}
+              </div>
+            ) : null}
             {localVerifySummary ? <div className="subtle-line verify-summary">{localVerifySummary}</div> : null}
             {phaseOverrides.length ? (
               <div className="subtle-line phase-summary">
@@ -2964,7 +2997,11 @@ function ProjectDetailView(props: {
             const label = phaseLabel(phase);
             const footer = phases[phase].dur || phaseStatusLabel(displayStatus);
             const stat = phase === "prepare" ? prepareInfo.stat : phases[phase].stat;
-            const detailText = phase === "prepare" ? prepareInfo.detail : PHASE_DESC[phase];
+            const detailText = phase === "prepare"
+              ? prepareInfo.detail
+              : phase === "confirm" && !requiresConfirmation
+                ? "Skipped for source-only local evidence"
+                : PHASE_DESC[phase];
             return (
               <button key={phase} type="button" className={`phase ${displayStatus}`} onClick={() => jumpToPhase(phase)} title={`Open ${label} output`}>
                 <span className="phase-head">
@@ -5285,6 +5322,14 @@ function Field({ label, help, children, span }: { label: string; help?: string; 
 }
 
 type BudgetForm = { digSamples: string; mapSteps: string; digSteps: string; digConcurrency: string };
+type ContestForm = {
+  contest: boolean;
+  contestBatchScopes: string;
+  contestDigConcurrency: string;
+  contestStopAfterHours: string;
+  contestSkipConfirm: boolean;
+  contestAppendMap: boolean;
+};
 type PhaseProviderForm = Record<ProviderPhase, string>;
 
 function applyBudgetFields(config: ProjectConfig, form: BudgetForm): ProjectConfig {
@@ -5300,6 +5345,31 @@ function setOptionalNumber(config: ProjectConfig, key: keyof Pick<ProjectConfig,
   const parsed = numberOrUndefined(value);
   if (parsed === undefined) delete config[key];
   else config[key] = parsed;
+}
+
+function applyContestFields(config: ProjectConfig, form: ContestForm): ProjectConfig {
+  const next = { ...config };
+  if (!form.contest) {
+    delete next.engagement;
+    return next;
+  }
+  const batchScopes = numberOrUndefined(form.contestBatchScopes) ?? 10;
+  const digConcurrency = numberOrUndefined(form.contestDigConcurrency) ?? 5;
+  const stopAfterHours = numberOrUndefined(form.contestStopAfterHours);
+  next.scopeCoverageMode = "custom";
+  next.maxScopes = batchScopes;
+  next.digConcurrency = digConcurrency;
+  next.engagement = {
+    kind: "bug-bounty-contest",
+    strategy: {
+      batchScopes,
+      digConcurrency,
+      appendMapWhenExhausted: form.contestAppendMap,
+      skipRealTargetConfirm: form.contestSkipConfirm,
+      ...(stopAfterHours !== undefined ? { stopAfterHours } : {}),
+    },
+  };
+  return next;
 }
 
 function phaseProviderConfig(form: PhaseProviderForm): ProjectConfig["phaseProviders"] | undefined {
@@ -5404,7 +5474,7 @@ function NewProjectModal({ providers, daemons, onClose, onCreated, onError }: { 
   const [advanced, setAdvanced] = useState(false);
   const [phaseOpen, setPhaseOpen] = useState(false);
   const firstDaemon = daemons.find((daemon) => daemonHealth(daemon) === "online") ?? daemons[0];
-  const [form, setForm] = useState({ intent: "", name: "", runAfterCreate: true, daemonId: firstDaemon?.id ? String(firstDaemon.id) : "", providerId: defaultProjectProviderId(providers), dir: "", sourcePaths: ".", buildRoot: ".", corpusPaths: "docs/specs", coverageMode: "standard" as CoverageMode, maxScopes: "30", digSamples: "1", mapSteps: "", digSteps: "", digConcurrency: "1" });
+  const [form, setForm] = useState({ intent: "", name: "", runAfterCreate: true, daemonId: firstDaemon?.id ? String(firstDaemon.id) : "", providerId: defaultProjectProviderId(providers), dir: "", sourcePaths: ".", buildRoot: ".", corpusPaths: "docs/specs", coverageMode: "standard" as CoverageMode, maxScopes: "30", digSamples: "1", mapSteps: "", digSteps: "", digConcurrency: "1", contest: false, contestBatchScopes: "10", contestDigConcurrency: "5", contestStopAfterHours: "48", contestSkipConfirm: true, contestAppendMap: true });
   const [phaseProviders, setPhaseProviders] = useState<PhaseProviderForm>({ prepare: "", map: "", dig: "", confirm: "" });
   const providerMissing = providers.length === 0;
   const daemonMissing = daemons.length === 0;
@@ -5436,7 +5506,7 @@ function NewProjectModal({ providers, daemons, onClose, onCreated, onError }: { 
       onError("Describe what this project should audit, or enter a project name.");
       return;
     }
-    const cfg = applyBudgetFields(coverageConfig(form.coverageMode, form.maxScopes), form);
+    const cfg = applyContestFields(applyBudgetFields(coverageConfig(form.coverageMode, form.maxScopes), form), form);
     const intent = form.intent.trim();
     if (intent) {
       cfg.projectIntent = intent;
@@ -5496,6 +5566,23 @@ function NewProjectModal({ providers, daemons, onClose, onCreated, onError }: { 
             <Field label="Project directory" help="Resolved under the daemon workspace. Empty uses the project UUID."><input value={form.dir} onChange={(event) => setForm({ ...form, dir: event.target.value })} placeholder="defaults to project UUID" /></Field>
           </div>
         </FormSection>
+        <FormSection title="Engagement">
+          <label className="check-row">
+            <input type="checkbox" checked={form.contest} onChange={(event) => setForm({ ...form, contest: event.target.checked, coverageMode: event.target.checked ? "custom" : form.coverageMode, maxScopes: event.target.checked ? form.contestBatchScopes : form.maxScopes, digConcurrency: event.target.checked ? form.contestDigConcurrency : form.digConcurrency })} />
+            <span>Bug bounty contest</span>
+          </label>
+          {form.contest ? (
+            <div className="contest-profile-grid">
+              <Field label="Round scopes" help="Each settled Run opens this many scopes before report packaging."><input type="number" min="1" value={form.contestBatchScopes} onChange={(event) => setForm({ ...form, contestBatchScopes: event.target.value, maxScopes: event.target.value })} /></Field>
+              <Field label="Dig concurrency" help="Parallel scopes for contest throughput."><input type="number" min="1" value={form.contestDigConcurrency} onChange={(event) => setForm({ ...form, contestDigConcurrency: event.target.value, digConcurrency: event.target.value })} /></Field>
+              <Field label="Stop review" help="Hours after contest start to review marginal yield."><input type="number" min="1" value={form.contestStopAfterHours} onChange={(event) => setForm({ ...form, contestStopAfterHours: event.target.value })} /></Field>
+              <div className="contest-checks">
+                <label className="check-row"><input type="checkbox" checked={form.contestSkipConfirm} onChange={(event) => setForm({ ...form, contestSkipConfirm: event.target.checked })} /><span>Skip real-target confirm</span></label>
+                <label className="check-row"><input type="checkbox" checked={form.contestAppendMap} onChange={(event) => setForm({ ...form, contestAppendMap: event.target.checked })} /><span>Expand map after inventory is exhausted</span></label>
+              </div>
+            </div>
+          ) : null}
+        </FormSection>
         <button type="button" className="advanced-toggle" onClick={() => setPhaseOpen(!phaseOpen)}>{phaseOpen ? "Hide phase provider overrides" : "Customize phase providers"}</button>
         {phaseOpen ? (
           <FormSection title="Phase provider overrides">
@@ -5538,6 +5625,7 @@ function NewProjectModal({ providers, daemons, onClose, onCreated, onError }: { 
 function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onError }: { detail: ProjectDetail; providers: ProviderProfile[]; daemons: DaemonRow[]; onClose: () => void; onSaved: () => Promise<void>; onError: (message: string) => void }) {
   const cfg = projectConfig(detail);
   const initialCoverageMode = coverageModeFromConfig(cfg.cfg);
+  const initialContest = contestStrategy(cfg.cfg);
   const [form, setForm] = useState({
     intent: cfg.cfg.prepareClue ?? cfg.cfg.projectIntent ?? "",
     daemonId: detail.project.daemon_id ? String(detail.project.daemon_id) : "",
@@ -5552,6 +5640,12 @@ function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onErro
     mapSteps: cfg.cfg.mapSteps != null ? String(cfg.cfg.mapSteps) : "",
     digSteps: cfg.cfg.digSteps != null ? String(cfg.cfg.digSteps) : "",
     digConcurrency: String(cfg.cfg.digConcurrency ?? 1),
+    contest: initialContest.enabled,
+    contestBatchScopes: String(initialContest.batchScopes),
+    contestDigConcurrency: String(initialContest.digConcurrency),
+    contestStopAfterHours: initialContest.stopAfterHours != null ? String(initialContest.stopAfterHours) : "48",
+    contestSkipConfirm: initialContest.skipRealTargetConfirm,
+    contestAppendMap: initialContest.appendMapWhenExhausted,
   });
   const [phaseProviders, setPhaseProviders] = useState<PhaseProviderForm>({
     prepare: cfg.cfg.phaseProviders?.prepare ? String(cfg.cfg.phaseProviders.prepare) : "",
@@ -5573,7 +5667,7 @@ function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onErro
       return;
     }
     try {
-      const nextConfig = applyBudgetFields({ ...cfg.cfg, ...coverageConfig(form.coverageMode, form.maxScopes) }, form);
+      const nextConfig = applyContestFields(applyBudgetFields({ ...cfg.cfg, ...coverageConfig(form.coverageMode, form.maxScopes) }, form), form);
       const intent = form.intent.trim();
       if (intent) {
         nextConfig.projectIntent = intent;
@@ -5613,6 +5707,23 @@ function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onErro
             <Field label="Default provider" help="Used by every phase unless overridden below."><select required value={form.providerId} onChange={(event) => setForm({ ...form, providerId: event.target.value })}><option value="" disabled>Select provider</option>{providers.map((p) => <option key={p.id} value={p.id}>{providerProfileLabel(p)}</option>)}</select></Field>
             <Field label="Project directory" help="Resolved under the daemon workspace."><input value={form.dir} onChange={(event) => setForm({ ...form, dir: event.target.value })} /></Field>
           </div>
+        </FormSection>
+        <FormSection title="Engagement">
+          <label className="check-row">
+            <input type="checkbox" checked={form.contest} onChange={(event) => setForm({ ...form, contest: event.target.checked, contestSkipConfirm: event.target.checked ? true : form.contestSkipConfirm, coverageMode: event.target.checked ? "custom" : form.coverageMode, maxScopes: event.target.checked ? form.contestBatchScopes : form.maxScopes, digConcurrency: event.target.checked ? form.contestDigConcurrency : form.digConcurrency })} />
+            <span>Bug bounty contest</span>
+          </label>
+          {form.contest ? (
+            <div className="contest-profile-grid">
+              <Field label="Round scopes" help="Each settled Run opens this many scopes before report packaging."><input type="number" min="1" value={form.contestBatchScopes} onChange={(event) => setForm({ ...form, contestBatchScopes: event.target.value, maxScopes: event.target.value })} /></Field>
+              <Field label="Dig concurrency" help="Parallel scopes for contest throughput."><input type="number" min="1" value={form.contestDigConcurrency} onChange={(event) => setForm({ ...form, contestDigConcurrency: event.target.value, digConcurrency: event.target.value })} /></Field>
+              <Field label="Stop review" help="Hours after contest start to review marginal yield."><input type="number" min="1" value={form.contestStopAfterHours} onChange={(event) => setForm({ ...form, contestStopAfterHours: event.target.value })} /></Field>
+              <div className="contest-checks">
+                <label className="check-row"><input type="checkbox" checked={form.contestSkipConfirm} onChange={(event) => setForm({ ...form, contestSkipConfirm: event.target.checked })} /><span>Skip real-target confirm</span></label>
+                <label className="check-row"><input type="checkbox" checked={form.contestAppendMap} onChange={(event) => setForm({ ...form, contestAppendMap: event.target.checked })} /><span>Expand map after inventory is exhausted</span></label>
+              </div>
+            </div>
+          ) : null}
         </FormSection>
         <FormSection title="Phase provider overrides">
           <p className="section-help">Leave a phase on the default provider unless it needs a different model profile. The selected daemon must authenticate every provider used here.</p>
@@ -5660,7 +5771,10 @@ function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError 
   const currentRoundWorkPending = verifiable > 0 || confirmable > 0 || missingReports > 0;
   const currentRoundComplete = hasPipelineRun && !currentRoundWorkPending && pipelineCoverageRoundComplete(detail);
   const locked = busy || Boolean(running);
-  const projectCoverageMode = coverageModeFromConfig(projectConfig(detail).cfg);
+  const cfg = projectConfig(detail).cfg;
+  const contestProfile = contestStrategy(cfg);
+  const projectCoverageMode = coverageModeFromConfig(cfg);
+  const contestCanContinue = contestProfile.enabled && (pendingScopes > 0 || (detail.progress.total ?? 0) === 0 || contestProfile.appendMapWhenExhausted);
   const [runCoverageMode, setRunCoverageMode] = useState<CoverageMode>(projectCoverageMode);
   const [runTargetDraft, setRunTargetDraft] = useState("");
   useEffect(() => {
@@ -5694,7 +5808,7 @@ function RunModal({ detail, busy, onClose, onLaunch, onUpdateRunTarget, onError 
     ? "Optionally re-run Prepare to close provenance, deployment-match, or real-target caveats. The current materials can still drive Map/Dig."
     : "Acquire official source/docs, pin provenance, and record material or real-target gaps before sealed auditing.";
   const options: Array<{ verb: LaunchAction; label: string; detail: string; disabled?: boolean }> = [
-    { verb: "run", label: hasPipelineRun ? "Continue" : "Run", detail: pipelineActionDetail, disabled: locked || currentRoundComplete },
+    { verb: "run", label: hasPipelineRun ? "Continue" : "Run", detail: pipelineActionDetail, disabled: locked || (currentRoundComplete && !contestCanContinue) },
     ...(hasPipelineRun ? [{
       verb: "run-next-coverage" as const,
       label: "Start next scope round",

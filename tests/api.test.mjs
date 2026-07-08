@@ -48,6 +48,7 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     assert.equal(projectCreate.body.providerId.startsWith("number"), true);
     assert.match(projectCreate.body.config, /phaseProviders/);
     assert.match(projectCreate.body.config, /prepareClue/);
+    assert.match(projectCreate.body.config, /bug-bounty-contest/);
     const projectList = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/projects");
     assert.match(projectList.query.archived, /archived projects/);
     assert.match(projectList.query.limit, /default 100/);
@@ -468,6 +469,132 @@ test("api: standard pipeline continue stops after a settled round unless coverag
     const spec = JSON.parse(job.spec_json);
     assert.equal(spec.scope, "pending-0");
     assert.equal(spec.maxScopes, 30);
+  });
+});
+
+test("api: bug bounty contest projects skip real-target confirm and settle reports before the next scope batch", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", {
+      name: "contest-source-only-rounds",
+      sourcePaths: ["./src"],
+      config: {
+        engagement: {
+          kind: "bug-bounty-contest",
+          strategy: {
+            batchScopes: 10,
+            digConcurrency: 5,
+            skipRealTargetConfirm: true,
+            appendMapWhenExhausted: true,
+            stopAfterHours: 48,
+          },
+        },
+      },
+    }));
+
+    const store = MetadataStore.openForOutput(out);
+    let findingId;
+    try {
+      store.upsertScopes(created.id, [
+        ...Array.from({ length: 10 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 20 - i })),
+        ...Array.from({ length: 12 }, (_, i) => ({ scopeId: `pending-${i}`, title: `Pending ${i}`, status: "pending", score: 12 - i })),
+      ]);
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir: path.join(out, "contest-source-only-rounds-run") });
+      store.upsertFindings(created.id, runId, [
+        {
+          findingKey: "kcontest",
+          title: "Contest source-only bug",
+          location: "src/A.sol:1",
+          severity: "high",
+          status: "confirmed-executable",
+          evidence: "local proof",
+        },
+      ]);
+      store.finishRun(runId, "done");
+      findingId = store.listFindings(created.id)[0].id;
+    } finally {
+      store.close();
+    }
+
+    const list = await json(await fetch(base + "/api/projects"));
+    const row = list.projects.find((project) => project.uuid === created.uuid);
+    assert.equal(row.confirmPendingFindings, 0, "contest source-only findings do not wait for real-target confirm");
+
+    const pipeline = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run", pipeline: true }));
+    const pipelineJob = (await json(await fetch(base + "/api/jobs/" + pipeline.jobId))).job;
+    const pipelineSpec = JSON.parse(pipelineJob.spec_json);
+    assert.equal(pipelineSpec.coverageMode, "custom");
+    assert.equal(pipelineSpec.maxScopes, 0, "missing report work is settled before opening the next contest batch");
+    assert.equal(pipelineSpec.digConcurrency, 5);
+
+    const report = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "report" }));
+    const reportJob = (await json(await fetch(base + "/api/jobs/" + report.jobId))).job;
+    const reportSpec = JSON.parse(reportJob.spec_json);
+    assert.equal(reportSpec.reportFindings[0].findingId, findingId);
+    assert.equal(reportSpec.reportFindings[0].evidenceMode, "source-only-local-confirmed");
+  });
+});
+
+test("api: bug bounty contest pipeline opens short batches and expands the map when pending scopes are exhausted", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", {
+      name: "contest-next-batch",
+      sourcePaths: ["./src"],
+      config: {
+        engagement: {
+          kind: "bug-bounty-contest",
+          strategy: { batchScopes: 10, digConcurrency: 5, skipRealTargetConfirm: true, appendMapWhenExhausted: true },
+        },
+      },
+    }));
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        ...Array.from({ length: 10 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 20 - i })),
+        ...Array.from({ length: 12 }, (_, i) => ({ scopeId: `pending-${i}`, title: `Pending ${i}`, status: "pending", score: 12 - i })),
+      ]);
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir: path.join(out, "contest-next-batch-run") });
+      store.upsertFindings(created.id, runId, [
+        {
+          findingKey: "kreportsready",
+          title: "Reported contest bug",
+          location: "src/A.sol:1",
+          severity: "high",
+          status: "confirmed-executable",
+          evidence: "local proof",
+        },
+      ]);
+      const findingId = store.listFindings(created.id)[0].id;
+      store.setFindingReport(created.id, findingId, "# Reported contest bug\n\nFormal report.");
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const next = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run", pipeline: true }));
+    const nextJob = (await json(await fetch(base + "/api/jobs/" + next.jobId))).job;
+    const nextSpec = JSON.parse(nextJob.spec_json);
+    assert.equal(nextSpec.coverageMode, "custom");
+    assert.equal(nextSpec.maxScopes, 10);
+    assert.equal(nextSpec.continueCoverage, true);
+
+    const exhaustedStore = MetadataStore.openForOutput(out);
+    try {
+      exhaustedStore.replaceScopes(created.id, [
+        ...Array.from({ length: 22 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 30 - i })),
+      ]);
+    } finally {
+      exhaustedStore.close();
+    }
+    const expanded = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run", pipeline: true }));
+    const expandedJob = (await json(await fetch(base + "/api/jobs/" + expanded.jobId))).job;
+    const expandedSpec = JSON.parse(expandedJob.spec_json);
+    assert.equal(expandedSpec.appendMap, true);
+    assert.equal(expandedSpec.maxScopes, 10);
   });
 });
 

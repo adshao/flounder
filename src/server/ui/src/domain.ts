@@ -1,4 +1,4 @@
-import type { ConfirmDecision, Coverage, FindingRow, PhaseConfig, ProjectDetail, RunRow, ScopeRow } from "./api";
+import type { ConfirmDecision, ContestStrategy, Coverage, EngagementConfig, FindingRow, PhaseConfig, ProjectDetail, RunRow, ScopeRow } from "./api";
 
 export const STATUSES = ["confirmed-differential", "confirmed-executable", "confirmed-source", "needs-evidence", "suspected", "discharged", "refuted"] as const;
 export const TRACKING = ["open", "triaging", "submitted", "accepted", "fixed", "duplicate", "rejected", "ignored"] as const;
@@ -16,6 +16,10 @@ export const PHASE_DESC: Record<(typeof PHASES)[number], string> = {
   confirm: "Reproduce confirmed findings on the real target",
   report: "Prepare one submission package per bug",
 };
+
+export const BUG_BOUNTY_CONTEST_KIND = "bug-bounty-contest";
+export const DEFAULT_CONTEST_BATCH_SCOPES = 10;
+export const DEFAULT_CONTEST_DIG_CONCURRENCY = 5;
 
 const STATUS_RANK: Record<string, number> = {
   "confirmed-differential": 5,
@@ -44,6 +48,7 @@ export interface PhaseInfo {
 export type PhaseState = Record<(typeof PHASES)[number], PhaseInfo>;
 
 function needsRealTargetConfirmation(detail: ProjectDetail): boolean {
+  if (contestStrategy(projectConfig(detail).cfg).skipRealTargetConfirm) return false;
   return detail.prepareSummary?.realTarget?.requiresConfirmation !== false;
 }
 
@@ -324,6 +329,7 @@ export function currentMaterialDetail(detail: ProjectDetail): ProjectDetail {
   const confirmDecisions = currentMaterialConfirmDecisions(detail);
   const auditConfirmedFindings = allFindings.filter(isExecutionConfirmedFinding).length;
   const reproducedBugs = confirmedDecisions(confirmDecisions).length;
+  const requiresConfirmation = needsRealTargetConfirmation(detail);
   return {
     ...detail,
     progress,
@@ -331,19 +337,20 @@ export function currentMaterialDetail(detail: ProjectDetail): ProjectDetail {
     findingsTotal: allFindings.length,
     auditConfirmedFindings,
     reproducedBugs,
-    confirmedBugs: reproducedBugs,
+    confirmedBugs: requiresConfirmation ? reproducedBugs : auditConfirmedFindings,
     confirmDecisions,
     allFindings,
   };
 }
 
 export function projectConfig(detail: ProjectDetail | null): { cfg: ProjectConfigShape; sourcePaths: string[]; buildRoot: string; corpusPaths: string[] } {
-  if (!detail) return { cfg: {}, sourcePaths: [], buildRoot: "", corpusPaths: [] };
+  const project = detail?.project;
+  if (!project) return { cfg: {}, sourcePaths: [], buildRoot: "", corpusPaths: [] };
   return {
-    cfg: parseJson<ProjectConfigShape>(detail.project.config_json, {}),
-    sourcePaths: parseJson<string[]>(detail.project.source_paths, []),
-    buildRoot: detail.project.build_root ?? "",
-    corpusPaths: parseJson<string[]>(detail.project.corpus_paths, []),
+    cfg: parseJson<ProjectConfigShape>(project.config_json, {}),
+    sourcePaths: parseJson<string[]>(project.source_paths, []),
+    buildRoot: project.build_root ?? "",
+    corpusPaths: parseJson<string[]>(project.corpus_paths, []),
   };
 }
 
@@ -368,6 +375,42 @@ export interface ProjectConfigShape {
   digConcurrency?: number;
   phases?: PhaseConfig;
   phaseProviders?: Partial<Record<ProviderPhase, number>>;
+  engagement?: EngagementConfig;
+}
+
+export interface NormalizedContestStrategy {
+  enabled: boolean;
+  batchScopes: number;
+  digConcurrency: number;
+  appendMapWhenExhausted: boolean;
+  skipRealTargetConfirm: boolean;
+  stopAfterHours?: number;
+}
+
+export function isBugBountyContestConfig(cfg: Pick<ProjectConfigShape, "engagement"> | undefined): boolean {
+  const kind = cfg?.engagement?.kind;
+  return kind === BUG_BOUNTY_CONTEST_KIND || kind === "contest";
+}
+
+export function contestStrategy(cfg: Pick<ProjectConfigShape, "engagement"> | undefined): NormalizedContestStrategy {
+  const enabled = isBugBountyContestConfig(cfg);
+  const strategy: ContestStrategy = cfg?.engagement?.strategy ?? {};
+  const positive = (value: unknown, fallback: number): number => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : fallback;
+  };
+  const optionalPositive = (value: unknown): number | undefined => {
+    const n = Number(value);
+    return Number.isFinite(n) && n > 0 ? Math.floor(n) : undefined;
+  };
+  return {
+    enabled,
+    batchScopes: positive(strategy.batchScopes, DEFAULT_CONTEST_BATCH_SCOPES),
+    digConcurrency: positive(strategy.digConcurrency, DEFAULT_CONTEST_DIG_CONCURRENCY),
+    appendMapWhenExhausted: strategy.appendMapWhenExhausted !== false,
+    skipRealTargetConfirm: enabled && strategy.skipRealTargetConfirm !== false,
+    stopAfterHours: optionalPositive(strategy.stopAfterHours),
+  };
 }
 
 export function parseJson<T>(input: unknown, fallback: T): T {
@@ -706,7 +749,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
         ? "running"
         : verifyRechecksConfirmed
           ? "pending"
-        : !requiresConfirmation && locallyVerified > 0
+        : !requiresConfirmation
           ? "done"
         : decisions.length
           ? (repro === decisions.length && pendingConfirm === 0 && decisions.filter(needsSubmissionReadinessWork).length === 0 ? "done" : "partial")
@@ -715,7 +758,7 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
             : "none",
       stat: conf?.status === "error"
         ? "Confirm blocked"
-        : !requiresConfirmation && locallyVerified > 0
+        : !requiresConfirmation
         ? "Not required"
         : verifyRechecksConfirmed
           ? "Waiting for Verify to finish"

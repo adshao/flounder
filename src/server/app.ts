@@ -37,6 +37,9 @@ const DAEMON_JOB_HEARTBEAT_TTL_MS = 45_000;
 const DAEMON_OFFLINE_RECONCILE_GRACE_MS = DAEMON_JOB_HEARTBEAT_TTL_MS * 2;
 const PROJECT_STATUS_FILTERS = ["running", "needs-work", "done", "failed", "not-started"] as const;
 const PERSISTED_ACTIVITY_TAIL_BYTES = 16 * 1024 * 1024;
+const BUG_BOUNTY_CONTEST_KIND = "bug-bounty-contest";
+const DEFAULT_CONTEST_BATCH_SCOPES = 10;
+const DEFAULT_CONTEST_DIG_CONCURRENCY = 5;
 type ProjectStatusFilter = (typeof PROJECT_STATUS_FILTERS)[number];
 type ProjectStatusCounts = Record<"all" | ProjectStatusFilter, number>;
 
@@ -226,7 +229,7 @@ const ROUTES: Route[] = [
       sourcePaths: "string[] — code paths relative to dir",
       buildRoot: "string? — buildable root relative to dir",
       corpusPaths: "string[]? — specs/docs relative to dir",
-      config: "object? — { prepareClue, projectIntent, phaseProviders, scopeCoverageMode, maxScopes, mapSteps, digSteps, digSamples, digConcurrency, sandbox... }. Default coverage is Standard: map/dig turns are unbounded, and each run audits enough pending scopes to reach 30 audited project scopes.",
+      config: "object? — { prepareClue, projectIntent, phaseProviders, scopeCoverageMode, maxScopes, mapSteps, digSteps, digSamples, digConcurrency, engagement, sandbox... }. Default coverage is Standard. engagement.kind='bug-bounty-contest' enables short settled rounds, source-only reportability by default, and optional append-map expansion.",
     },
     handler: projectCreate,
   }),
@@ -269,7 +272,7 @@ const ROUTES: Route[] = [
       allowMaterialDrift: "boolean? — expert override for verifyFindings when a newer Prepare run changed project materials after the selected findings were produced",
       regenerateReports: "boolean? — report: include findings that already have formal reports; selected findingIds are always regenerated",
       continueCoverage: "boolean? — explicit opt-in to open the next mapped scope batch after the current pipeline round is fully settled",
-      scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run; standard means audit until the project has 30 audited scopes; pass continueCoverage:true to explicitly start another scope batch after verify/confirm/report are settled",
+      scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run; standard means audit until the project has 30 audited scopes; pass continueCoverage:true to explicitly start another scope batch after verify/confirm/report are settled. Bug-bounty contest projects default to short custom batches unless overridden.",
       maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", digSteps: "number? — one-off per-scope dig turn cap",
       maxSteps: "number? — one-off global turn cap", digSamples: "number? — one-off samples per scope", digConcurrency: "number? — one-off parallel scopes",
       findingId: "number? — confirm/report: reproduce or report one selected finding",
@@ -876,6 +879,7 @@ async function projectGet(c: Ctx): Promise<void> {
       ? []
       : currentConfirmDecisions(c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes" && isRealTargetDecisionEvidence(stringValue(row.evidence_level))).length;
+    const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, allRunsRaw);
     sendJson(c.res, 200, {
       project,
       progress,
@@ -883,7 +887,7 @@ async function projectGet(c: Ctx): Promise<void> {
       findingsTotal: activeFindings.length,
       auditConfirmedFindings,
       reproducedBugs,
-      confirmedBugs: reproducedBugs,
+      confirmedBugs: requiresRealTargetConfirmation ? reproducedBugs : auditConfirmedFindings,
       runs,
       runsTotal: c.store.countRuns(id),
       currentRunsTotal: currentResultRunsRaw.length,
@@ -2171,11 +2175,13 @@ async function runLaunch(c: Ctx): Promise<void> {
   }
   const prepared = applyPreparedWorkspaceIfNeeded(spec, runs);
   if (!prepared.ok) return sendJson(c.res, 400, { error: prepared.error });
+  const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, runs);
+  applyContestRunDefaults(spec, project, body, progress, c.store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation, runs);
   resumeInterruptedCoverageBatch(spec, progress, runs);
-  promoteSettledPipelineCoverageBatch(spec, c.store, projectId, progress, currentResultRunIds, materialBoundary, runs);
+  promoteSettledPipelineCoverageBatch(spec, c.store, projectId, progress, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation);
   const materialDrift = verifyMaterialDrift(c.store, projectId, spec.verifyFindings, body.allowMaterialDrift === true);
   if (materialDrift) return sendJson(c.res, 409, materialDrift);
-  if (spec.verb === "run" && spec.pipeline && pipelineRoundComplete(spec, progress, c.store, projectId, currentResultRunIds, materialBoundary, runs)) {
+  if (spec.verb === "run" && spec.pipeline && pipelineRoundComplete(spec, progress, c.store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation)) {
     return sendJson(c.res, 409, {
       error: "Current pipeline round is complete. Pass continueCoverage:true, choose a coverage mode, or use Dig pending scopes to start another scope batch.",
       roundComplete: true,
@@ -2236,7 +2242,7 @@ async function runLaunch(c: Ctx): Promise<void> {
   }
   if (spec.verb === "report") {
     const selected = selectedFindingIds(body);
-    const reports = reportWorklist(c.store, Number(project.id), selected, currentResultRunIds, materialBoundary, latestPrepareRequiresRealTargetConfirmation(runs), body.regenerateReports === true);
+    const reports = reportWorklist(c.store, Number(project.id), selected, currentResultRunIds, materialBoundary, projectRequiresRealTargetConfirmation(project, runs), body.regenerateReports === true);
     if (reports.error) return sendJson(c.res, 400, { error: reports.error });
     spec.reportFindings = reports.findings;
   }
@@ -2291,6 +2297,62 @@ function resetPipelineCoverageForUnknownInventory(spec: LaunchSpec): void {
   }
 }
 
+function applyContestRunDefaults(
+  spec: LaunchSpec,
+  project: Record<string, unknown>,
+  body: Record<string, unknown>,
+  progress: Coverage,
+  store: MetadataStore,
+  projectId: number,
+  currentResultRunIds: Set<number>,
+  materialBoundary: Record<string, unknown> | undefined,
+  requiresRealTargetConfirmation: boolean,
+  runs: Array<Record<string, unknown>>,
+): void {
+  if (!isBugBountyContestProject(project)) return;
+  if (spec.digConcurrency === undefined && !runBodyHasConfigOverride(body, "digConcurrency")) {
+    spec.digConcurrency = contestDigConcurrency(project);
+  }
+  if (spec.verb !== "run" || !spec.pipeline) return;
+  if (spec.scope || spec.region || spec.verifyFindings !== undefined) return;
+  if (runBodyHasConfigOverride(body, "scopeCoverageMode") || runBodyHasConfigOverride(body, "maxScopes")) return;
+
+  const pendingPostAudit = pipelinePostAuditWorkPending(store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation);
+  const pending = Math.max(0, Math.floor(progress.pending));
+  const interrupted = latestInterruptedCoverageBatchRemainder(runs);
+  const batch = contestBatchScopes(project);
+
+  spec.coverageMode = "custom";
+  spec.coverageTarget = undefined;
+
+  if (interrupted > 0 && pending > 0) {
+    spec.maxScopes = Math.min(pending, interrupted);
+    spec.continueCoverage = true;
+    return;
+  }
+  if (pendingPostAudit) {
+    spec.maxScopes = 0;
+    return;
+  }
+  if (pending > 0) {
+    spec.maxScopes = Math.min(batch, pending);
+    spec.continueCoverage = true;
+    return;
+  }
+
+  const hasInventory = Math.max(0, Math.floor(progress.total)) > 0;
+  if (hasInventory && contestAppendMapWhenExhausted(project)) spec.appendMap = true;
+  spec.maxScopes = hasInventory && !spec.appendMap ? 0 : batch;
+  spec.continueCoverage = true;
+}
+
+function runBodyHasConfigOverride(body: Record<string, unknown>, key: string): boolean {
+  if (body[key] !== undefined) return true;
+  const overrides = objectValue(body.overrides);
+  const config = objectValue(overrides?.config);
+  return config?.[key] !== undefined;
+}
+
 function resumeInterruptedCoverageBatch(spec: LaunchSpec, progress: Coverage, runs: Array<Record<string, unknown>>): void {
   if (spec.verb !== "run" && spec.verb !== "audit") return;
   if (spec.scope || spec.region || spec.verifyFindings !== undefined) return;
@@ -2324,13 +2386,13 @@ function promoteSettledPipelineCoverageBatch(
   progress: Coverage,
   currentResultRunIds: Set<number>,
   materialBoundary: Record<string, unknown> | undefined,
-  runs: Array<Record<string, unknown>>,
+  requiresRealTargetConfirmation: boolean,
 ): void {
   if (spec.verb !== "run" || !spec.pipeline) return;
   if (spec.coverageMode !== "standard" || spec.coverageTarget !== 30 || spec.maxScopes !== 0) return;
   if (!spec.continueCoverage) return;
   if (progress.pending <= 0) return;
-  if (pipelinePostAuditWorkPending(store, projectId, currentResultRunIds, materialBoundary, runs)) return;
+  if (pipelinePostAuditWorkPending(store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation)) return;
   spec.maxScopes = Math.min(30, progress.pending);
 }
 
@@ -2341,12 +2403,12 @@ function pipelineRoundComplete(
   projectId: number,
   currentResultRunIds: Set<number>,
   materialBoundary: Record<string, unknown> | undefined,
-  runs: Array<Record<string, unknown>>,
+  requiresRealTargetConfirmation: boolean,
 ): boolean {
   if (spec.continueCoverage) return false;
   if (spec.maxScopes !== 0) return false;
   if (!coverageTargetReached(spec)) return false;
-  if (pipelinePostAuditWorkPending(store, projectId, currentResultRunIds, materialBoundary, runs)) return false;
+  if (pipelinePostAuditWorkPending(store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation)) return false;
   return true;
 }
 
@@ -2355,10 +2417,9 @@ function pipelinePostAuditWorkPending(
   projectId: number,
   currentResultRunIds: Set<number>,
   materialBoundary: Record<string, unknown> | undefined,
-  runs: Array<Record<string, unknown>>,
+  requiresRealTargetConfirmation: boolean,
 ): boolean {
   if (verifyWorklist(store, projectId, currentResultRunIds, materialBoundary).length > 0) return true;
-  const requiresRealTargetConfirmation = latestPrepareRequiresRealTargetConfirmation(runs);
   if (requiresRealTargetConfirmation) {
     const currentDecisions = currentConfirmDecisions(store.listConfirmDecisions(projectId).filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary)));
     const pending = confirmWorkRows(store, projectId, currentResultRunIds, materialBoundary, currentDecisions);
@@ -2669,6 +2730,73 @@ function latestPrepareRequiresRealTargetConfirmation(runs: Array<Record<string, 
   const manifest = run ? readPrepareManifestObject(run) : undefined;
   const realTarget = summarizePrepareRealTarget(manifest?.real_target ?? manifest?.realTarget);
   return !(realTarget.reported && realTarget.requiresConfirmation === false);
+}
+
+function projectConfigRecord(project: Record<string, unknown>): Record<string, unknown> {
+  const cfg = safeParse(project.config_json);
+  return cfg && typeof cfg === "object" && !Array.isArray(cfg) ? cfg as Record<string, unknown> : {};
+}
+
+function bugBountyContestEngagement(cfg: Record<string, unknown>): Record<string, unknown> | undefined {
+  const engagement = objectValue(cfg.engagement);
+  const kind = stringValue(engagement?.kind ?? engagement?.type ?? cfg.engagementKind ?? cfg.projectKind);
+  if (kind !== BUG_BOUNTY_CONTEST_KIND && kind !== "contest") return undefined;
+  return engagement ?? { kind: BUG_BOUNTY_CONTEST_KIND };
+}
+
+function contestStrategy(cfg: Record<string, unknown>): Record<string, unknown> {
+  const engagement = bugBountyContestEngagement(cfg);
+  return objectValue(engagement?.strategy) ?? engagement ?? {};
+}
+
+function contestPositiveInt(cfg: Record<string, unknown>, keys: string[], fallback: number): number {
+  const engagement = bugBountyContestEngagement(cfg);
+  const strategy = contestStrategy(cfg);
+  for (const source of [strategy, engagement ?? {}]) {
+    for (const key of keys) {
+      const value = Number(source[key]);
+      if (Number.isFinite(value) && value > 0) return Math.floor(value);
+    }
+  }
+  return fallback;
+}
+
+function contestBoolean(cfg: Record<string, unknown>, keys: string[], fallback: boolean): boolean {
+  const engagement = bugBountyContestEngagement(cfg);
+  const strategy = contestStrategy(cfg);
+  for (const source of [strategy, engagement ?? {}]) {
+    for (const key of keys) {
+      const value = source[key];
+      if (typeof value === "boolean") return value;
+    }
+  }
+  return fallback;
+}
+
+function isBugBountyContestProject(project: Record<string, unknown>): boolean {
+  return Boolean(bugBountyContestEngagement(projectConfigRecord(project)));
+}
+
+function contestBatchScopes(project: Record<string, unknown>): number {
+  return contestPositiveInt(projectConfigRecord(project), ["batchScopes", "scopeBatchSize", "roundScopes"], DEFAULT_CONTEST_BATCH_SCOPES);
+}
+
+function contestDigConcurrency(project: Record<string, unknown>): number {
+  return contestPositiveInt(projectConfigRecord(project), ["digConcurrency", "concurrency"], DEFAULT_CONTEST_DIG_CONCURRENCY);
+}
+
+function contestAppendMapWhenExhausted(project: Record<string, unknown>): boolean {
+  return contestBoolean(projectConfigRecord(project), ["appendMapWhenExhausted", "appendMapAfterBatch", "expandMapWhenExhausted"], true);
+}
+
+function contestSkipsRealTargetConfirmation(project: Record<string, unknown>): boolean {
+  if (!isBugBountyContestProject(project)) return false;
+  return contestBoolean(projectConfigRecord(project), ["skipRealTargetConfirm", "skipRealTargetConfirmation", "skipConfirm"], true);
+}
+
+function projectRequiresRealTargetConfirmation(project: Record<string, unknown>, runs: Array<Record<string, unknown>>): boolean {
+  if (contestSkipsRealTargetConfirmation(project)) return false;
+  return latestPrepareRequiresRealTargetConfirmation(runs);
 }
 
 function applyPreparedWorkspaceIfNeeded(spec: LaunchSpec, runs: Array<Record<string, unknown>>): { ok: true } | { ok: false; error: string } {
@@ -3921,7 +4049,7 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
   const currentRuns = currentMaterialRuns(allRuns, materialBoundary);
   const scopeBoundary = latestScopeInventoryBoundaryRun(currentRuns);
   const currentResultRunIds = runIdSet(currentResultRuns(currentRuns, scopeBoundary));
-  const requiresRealTargetConfirmation = latestPrepareRequiresRealTargetConfirmation(allRuns);
+  const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, allRuns);
 
   if (phase === "verify") {
     const verifyFindings = verifyWorklist(c.store, projectId, currentResultRunIds, materialBoundary, body.verifyFromStart === true);
@@ -4242,9 +4370,10 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       ? []
       : currentConfirmDecisions(store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes" && isRealTargetDecisionEvidence(stringValue(row.evidence_level))).length;
+    const auditConfirmedFindings = countAuditConfirmedFindings(findings);
     const submissionWorkKeys = new Set(confirmDecisions.filter((row) => needsSubmissionReadinessWork(row)).flatMap(confirmDecisionMemberKeys));
     const verifyPendingFindings = (counts.suspected ?? 0) + (counts["confirmed-source"] ?? 0);
-    const requiresRealTargetConfirmation = latestPrepareRequiresRealTargetConfirmation(allRuns);
+    const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, allRuns);
     const confirmPendingFindings = requiresRealTargetConfirmation
       ? findings.filter((finding) => {
           const status = String(finding.status ?? "");
@@ -4268,9 +4397,9 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       progress: scopeView.progress,
       findingCounts: counts,
       findingsTotal: findings.length,
-      auditConfirmedFindings: countAuditConfirmedFindings(findings),
+      auditConfirmedFindings,
       reproducedBugs,
-      confirmedBugs: reproducedBugs,
+      confirmedBugs: requiresRealTargetConfirmation ? reproducedBugs : auditConfirmedFindings,
       verifyPendingFindings,
       confirmPendingFindings,
       confirmDecisionCount: confirmDecisions.length,

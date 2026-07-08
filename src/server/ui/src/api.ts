@@ -371,6 +371,24 @@ export interface PhaseRole {
 
 export type PhaseConfig = Partial<Record<"prepare" | "map" | "dig" | "confirm", PhaseRole>>;
 export type PhaseProviderConfig = Partial<Record<"prepare" | "map" | "dig" | "confirm", number>>;
+export type EngagementKind = "bug-bounty-contest" | "standard" | string;
+
+export interface ContestStrategy {
+  batchScopes?: number;
+  digConcurrency?: number;
+  appendMapWhenExhausted?: boolean;
+  skipRealTargetConfirm?: boolean;
+  stopAfterHours?: number;
+}
+
+export interface EngagementConfig {
+  kind?: EngagementKind;
+  venue?: string;
+  contestUrl?: string;
+  startsAt?: string;
+  endsAt?: string;
+  strategy?: ContestStrategy;
+}
 
 export interface ProjectConfig {
   projectIntent?: string;
@@ -383,6 +401,7 @@ export interface ProjectConfig {
   digConcurrency?: number;
   phases?: PhaseConfig;
   phaseProviders?: PhaseProviderConfig;
+  engagement?: EngagementConfig;
 }
 
 export interface RunUpdatePayload {
