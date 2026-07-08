@@ -234,8 +234,11 @@ curl http://127.0.0.1:4500/api/runs/<id>/log
 
 Discovery backlog rows can be filtered with
 `kind=coverage-gap|resource-request|followup-scope` and
-`status=open|resolved|stale|ignored|all`. Update operator state without deleting
-provenance:
+`status=open|resolved|stale|ignored|all`. Rows include `actionability`,
+`action_owner`, `recommended_action`, and `primary_action_label`: agents can
+advance `agent-runnable` rows by continuing, appending map coverage, or
+prioritizing scopes; `needs-resource` and `needs-decision` rows remain visible
+blockers until handled. Update operator state without deleting provenance:
 
 ```bash
 curl -X PATCH http://127.0.0.1:4500/api/backlog/<id> \

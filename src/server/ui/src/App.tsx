@@ -61,13 +61,14 @@ import { Icon, type IconName } from "./icons";
 
 type View = "projects" | "findings" | "settings";
 type SettingsPane = "providers" | "daemons" | "archived";
-type ProjectTab = "overview" | "decisions" | "findings" | "scopes" | "runs" | "activity" | "setup";
+type ProjectTab = "overview" | "next-actions" | "decisions" | "findings" | "scopes" | "runs" | "activity" | "setup";
 type ModalName = "new-project" | "run" | "edit-project" | "report" | "decision-report" | "run-log" | "artifact" | null;
 type ArtifactPreview = { title: string; runId: number; name: string };
 type LaunchAction = "run" | "run-next-coverage" | "prepare" | "map" | "map-expand" | "audit" | "confirm" | "verify" | "report";
 
 const PROJECT_TABS: Array<{ id: ProjectTab; label: string }> = [
   { id: "overview", label: "Overview" },
+  { id: "next-actions", label: "Next Actions" },
   { id: "activity", label: "Activity" },
   { id: "decisions", label: "Decisions" },
   { id: "findings", label: "Findings" },
@@ -2777,6 +2778,9 @@ function ProjectDetailView(props: {
     && tab !== "setup"
     && setupReadWatermarks[project.uuid] !== setupAttentionSignature
   );
+  const backlogItems = currentDetail.discoveryBacklog ?? [];
+  const openBacklogCount = backlogOpenCount(backlogItems, currentDetail.backlogCounts ?? {});
+  const agentRunnableBacklogCount = backlogGroupItems(backlogItems, "agent-runnable").length;
   const launchLocked = props.busy || Boolean(runningRun);
   const contestCanContinue = contestProfile.enabled && ((progress.pending ?? 0) > 0 || (progress.total ?? 0) === 0 || contestProfile.appendMapWhenExhausted);
   const runLaunchLocked = launchLocked || (currentRoundComplete && !contestCanContinue);
@@ -3062,6 +3066,8 @@ function ProjectDetailView(props: {
             onClick={() => setTab(t.id)}
           >
             <span>{t.label}</span>
+            {t.id === "next-actions" && openBacklogCount > 0 ? <Counter>{openBacklogCount}</Counter> : null}
+            {t.id === "next-actions" && agentRunnableBacklogCount > 0 && tab !== "next-actions" ? <span className="tab-alert-dot pending" aria-label="Agent-runnable backlog" /> : null}
             {t.id === "decisions" && confirmDecisions.length ? <Counter>{confirmDecisions.length}</Counter> : null}
             {t.id === "activity" && activityUnread ? <span className="tab-alert-dot pending" aria-label="New activity" /> : null}
             {t.id === "setup" && setupAttentionDisplay && setupUnread ? <span className={`tab-alert-dot ${setupAttentionDisplay.tone}`} aria-label="Setup attention" /> : null}
@@ -3079,7 +3085,16 @@ function ProjectDetailView(props: {
           onOpenDecisionReport={props.onOpenDecisionReport}
           onOpenDecisions={() => openProjectSection("decisions", "project-real-target-decisions")}
           onOpenActivity={() => openProjectSection("activity")}
+          onOpenNextActions={() => openProjectSection("next-actions", "project-next-actions")}
+        />
+      ) : null}
+      {tab === "next-actions" ? (
+        <NextActionsView
+          detail={currentDetail}
+          onLaunch={props.onLaunch}
+          onPatchScope={props.onPatchScope}
           onPatchBacklog={props.onPatchBacklog}
+          onOpenSetup={openSetupTab}
         />
       ) : null}
       {tab === "decisions" ? <ProjectDecisions detail={currentDetail} onOpenFinding={openLinkedFinding} onOpenDecisionReport={props.onOpenDecisionReport} /> : null}
@@ -3311,7 +3326,7 @@ function ProjectOverview({
   onOpenDecisionReport,
   onOpenDecisions,
   onOpenActivity,
-  onPatchBacklog,
+  onOpenNextActions,
 }: {
   detail: ProjectDetail;
   candidates: FindingRow[];
@@ -3322,7 +3337,7 @@ function ProjectOverview({
   onOpenDecisionReport: (decision: ConfirmDecision) => void;
   onOpenDecisions: () => void;
   onOpenActivity: () => void;
-  onPatchBacklog: (id: number, status: string) => Promise<void> | void;
+  onOpenNextActions: () => void;
 }) {
   const currentRuns = currentMaterialRuns(detail.runs, detail.material);
   const current = currentRuns.find((run) => run.status === "running") ?? currentRuns[0];
@@ -3426,10 +3441,10 @@ function ProjectOverview({
           </div>
         </Card>
       </div>
-      <DiscoveryBacklogCard
+      <NextActionsSummaryCard
         items={detail.discoveryBacklog ?? []}
         counts={detail.backlogCounts ?? {}}
-        onPatch={onPatchBacklog}
+        onOpen={onOpenNextActions}
       />
     </>
   );
@@ -3450,26 +3465,48 @@ function runHealthDetail(health: ProjectDetail["latestRunHealth"] | RunRow["runH
   return [steps, commands].filter(Boolean).join(" · ") || "No framework health blocker detected.";
 }
 
-function DiscoveryBacklogCard({ items, counts, onPatch }: { items: DiscoveryBacklogRow[]; counts: Record<string, number>; onPatch: (id: number, status: string) => Promise<void> | void }) {
-  const open = counts.open ?? items.filter((item) => item.status === "open").length;
+type BacklogGroupId = "agent-runnable" | "needs-resource" | "needs-decision";
+
+const BACKLOG_GROUPS: Array<{ id: BacklogGroupId; label: string; detail: string; empty: string }> = [
+  {
+    id: "agent-runnable",
+    label: "Agent can run",
+    detail: "Coverage gaps and follow-up scopes that can be handled with Continue, Expand map, or scope prioritization.",
+    empty: "No agent-runnable backlog items.",
+  },
+  {
+    id: "needs-resource",
+    label: "Needs resource",
+    detail: "Toolchain, sandbox, dependency, credential, or source material requests that need operator or environment work.",
+    empty: "No resource blockers.",
+  },
+  {
+    id: "needs-decision",
+    label: "Needs decision",
+    detail: "Backlog rows without a safe automatic action mapping.",
+    empty: "No decision-only backlog items.",
+  },
+];
+
+function NextActionsSummaryCard({ items, counts, onOpen }: { items: DiscoveryBacklogRow[]; counts: Record<string, number>; onOpen: () => void }) {
+  const open = backlogOpenCount(items, counts);
   if (open === 0 && items.length === 0) return null;
-  const gapCount = counts["coverage-gap"] ?? 0;
-  const resourceCount = counts["resource-request"] ?? 0;
-  const followupCount = counts["followup-scope"] ?? 0;
-  const shown = items.slice(0, 6);
+  const groupCounts = backlogActionGroupCounts(items);
+  const shown = backlogOpenItems(items).slice(0, 4);
   const summary = [
-    gapCount ? `${gapCount} coverage` : "",
-    resourceCount ? `${resourceCount} resource` : "",
-    followupCount ? `${followupCount} follow-up` : "",
+    groupCounts["agent-runnable"] ? `${groupCounts["agent-runnable"]} agent-runnable` : "",
+    groupCounts["needs-resource"] ? `${groupCounts["needs-resource"]} resource` : "",
+    groupCounts["needs-decision"] ? `${groupCounts["needs-decision"]} decision` : "",
   ].filter(Boolean).join(" · ") || `${open} open`;
   return (
     <div id="project-discovery-backlog" className="section-anchor">
-      <Card title={<span>Discovery backlog <Counter>{open}</Counter></span>}>
+      <Card title={<span>Next actions <Counter>{open}</Counter></span>}>
         <div className="candidate-head">
           <div>
             <strong>{summary}</strong>
-            <small>Open items from the latest audited coverage trail.</small>
+            <small>Open discovery backlog items grouped by who can move them forward.</small>
           </div>
+          <Button size="sm" onClick={onOpen}>Open queue</Button>
         </div>
         {shown.length ? (
           <div className="resource-list">
@@ -3478,21 +3515,209 @@ function DiscoveryBacklogCard({ items, counts, onPatch }: { items: DiscoveryBack
                 <span className={`label s-${item.kind}`}>{backlogKindLabel(item.kind)}</span>
                 <div className="grow">
                   <strong>{item.title || "Untitled backlog item"}</strong>
-                  <small>{backlogDetail(item)}</small>
+                  <small>{backlogSummaryDetail(item)}</small>
                 </div>
-                <span className="resource-actions">
-                  {item.status === "open" ? <Button size="sm" onClick={() => onPatch(item.id, "resolved")}>Resolve</Button> : null}
-                  {item.status === "open" ? <Button size="sm" onClick={() => onPatch(item.id, "ignored")}>Ignore</Button> : null}
-                </span>
+                <span className={`label backlog-owner ${backlogGroupId(item)}`}>{backlogGroupShortLabel(backlogGroupId(item))}</span>
               </div>
             ))}
           </div>
         ) : (
-          <EmptyInline>No open discovery backlog items.</EmptyInline>
+          <EmptyInline>No open next actions.</EmptyInline>
         )}
       </Card>
     </div>
   );
+}
+
+function NextActionsView({
+  detail,
+  onLaunch,
+  onPatchScope,
+  onPatchBacklog,
+  onOpenSetup,
+}: {
+  detail: ProjectDetail;
+  onLaunch: (action: LaunchAction) => void;
+  onPatchScope: (scopeId: string, body: unknown) => Promise<void> | void;
+  onPatchBacklog: (id: number, status: string) => Promise<void> | void;
+  onOpenSetup: () => void;
+}) {
+  const items = detail.discoveryBacklog ?? [];
+  const open = backlogOpenCount(items, detail.backlogCounts ?? {});
+  const groupCounts = backlogActionGroupCounts(items);
+  const currentRuns = currentMaterialRuns(detail.runs, detail.material);
+  const runningRun = currentRuns.find((run) => run.status === "running");
+  const runnable = backlogGroupItems(items, "agent-runnable");
+  const canRunAgentQueue = runnable.length > 0 && !runningRun;
+  return (
+    <div id="project-next-actions" className="section-anchor">
+      <Card title={<span>Next actions <Counter>{open}</Counter></span>}>
+        <div className="next-actions-head">
+          <div>
+            <strong>{runnable.length ? `${plural(runnable.length, "item")} can be advanced by the agent` : "No agent-runnable backlog item is loaded"}</strong>
+            <small>Resource and decision rows stay visible; automatic work should only run items marked agent-runnable.</small>
+          </div>
+          <Button
+            size="sm"
+            variant="primary"
+            icon="play"
+            disabled={!canRunAgentQueue}
+            title={runningRun ? "A run is already active for this project." : runnable.length ? "Continue the project pipeline against agent-runnable backlog." : "No agent-runnable backlog items."}
+            onClick={() => onLaunch("run")}
+          >
+            Run agent queue
+          </Button>
+        </div>
+        <div className="queue-grid next-action-metrics">
+          <QueueItem label="Agent can run" value={String(groupCounts["agent-runnable"])} detail="Continue, append map, or prioritize scope without operator input." />
+          <QueueItem label="Needs resource" value={String(groupCounts["needs-resource"])} detail="Requires setup, auth, sandbox, dependency, source, or toolchain work." />
+          <QueueItem label="Needs decision" value={String(groupCounts["needs-decision"])} detail="Requires a human/product mapping before automatic execution." />
+        </div>
+        <div className="next-action-groups">
+          {BACKLOG_GROUPS.map((group) => {
+            const rows = backlogGroupItems(items, group.id);
+            return (
+              <section className="next-action-group" key={group.id} aria-label={group.label}>
+                <div className="next-action-group-head">
+                  <div>
+                    <strong>{group.label}</strong>
+                    <small>{group.detail}</small>
+                  </div>
+                  <Counter>{rows.length}</Counter>
+                </div>
+                {rows.length ? (
+                  <div className="resource-list">
+                    {rows.map((item) => (
+                      <NextActionRow
+                        key={item.id}
+                        item={item}
+                        running={Boolean(runningRun)}
+                        onLaunch={onLaunch}
+                        onPatchScope={onPatchScope}
+                        onPatchBacklog={onPatchBacklog}
+                        onOpenSetup={onOpenSetup}
+                      />
+                    ))}
+                  </div>
+                ) : (
+                  <EmptyInline>{group.empty}</EmptyInline>
+                )}
+              </section>
+            );
+          })}
+        </div>
+      </Card>
+    </div>
+  );
+}
+
+function NextActionRow({
+  item,
+  running,
+  onLaunch,
+  onPatchScope,
+  onPatchBacklog,
+  onOpenSetup,
+}: {
+  item: DiscoveryBacklogRow;
+  running: boolean;
+  onLaunch: (action: LaunchAction) => void;
+  onPatchScope: (scopeId: string, body: unknown) => Promise<void> | void;
+  onPatchBacklog: (id: number, status: string) => Promise<void> | void;
+  onOpenSetup: () => void;
+}) {
+  const group = backlogGroupId(item);
+  const recommended = backlogRecommendedAction(item);
+  const scopeId = backlogScopeId(item);
+  const primaryLabel = item.primary_action_label || backlogPrimaryActionLabel(item);
+  return (
+    <div className={`resource-card backlog-card next-action-card ${group}`}>
+      <span className={`label s-${item.kind}`}>{backlogKindLabel(item.kind)}</span>
+      <div className="grow">
+        <div className="next-action-title">
+          <strong>{item.title || "Untitled backlog item"}</strong>
+          <span className={`label backlog-owner ${group}`}>{backlogGroupShortLabel(group)}</span>
+        </div>
+        <small>{backlogSummaryDetail(item)}</small>
+        {item.action_reason ? <small className="next-action-reason">{item.action_reason}</small> : null}
+      </div>
+      <span className="resource-actions">
+        {group === "agent-runnable" && recommended === "prioritize-scope" && scopeId ? (
+          <Button size="sm" disabled={running} onClick={() => void Promise.resolve(onPatchScope(scopeId, { prioritize: true }))}>Prioritize</Button>
+        ) : null}
+        {group === "agent-runnable" && recommended === "expand-map" ? (
+          <Button size="sm" disabled={running} onClick={() => onLaunch("map-expand")}>{primaryLabel}</Button>
+        ) : null}
+        {group === "agent-runnable" && recommended !== "expand-map" ? (
+          <Button size="sm" icon="play" disabled={running} onClick={() => onLaunch("run")}>{recommended === "prioritize-scope" && scopeId ? "Continue" : primaryLabel}</Button>
+        ) : null}
+        {group === "needs-resource" ? <Button size="sm" onClick={onOpenSetup}>Setup</Button> : null}
+        {item.status === "open" ? <Button size="sm" onClick={() => void Promise.resolve(onPatchBacklog(item.id, "resolved"))}>Resolve</Button> : null}
+        {item.status === "open" ? <Button size="sm" onClick={() => void Promise.resolve(onPatchBacklog(item.id, "ignored"))}>Ignore</Button> : null}
+      </span>
+    </div>
+  );
+}
+
+function backlogOpenItems(items: DiscoveryBacklogRow[]): DiscoveryBacklogRow[] {
+  return items.filter((item) => item.status === "open");
+}
+
+function backlogOpenCount(items: DiscoveryBacklogRow[], counts: Record<string, number>): number {
+  return counts.open ?? backlogOpenItems(items).length;
+}
+
+function backlogGroupItems(items: DiscoveryBacklogRow[], group: BacklogGroupId): DiscoveryBacklogRow[] {
+  return backlogOpenItems(items).filter((item) => backlogGroupId(item) === group);
+}
+
+function backlogActionGroupCounts(items: DiscoveryBacklogRow[]): Record<BacklogGroupId, number> {
+  return {
+    "agent-runnable": backlogGroupItems(items, "agent-runnable").length,
+    "needs-resource": backlogGroupItems(items, "needs-resource").length,
+    "needs-decision": backlogGroupItems(items, "needs-decision").length,
+  };
+}
+
+function backlogGroupId(item: DiscoveryBacklogRow): BacklogGroupId {
+  if (item.actionability === "agent-runnable" || item.actionability === "needs-resource" || item.actionability === "needs-decision") return item.actionability;
+  if (item.kind === "resource-request") return "needs-resource";
+  if (item.kind === "coverage-gap" || item.kind === "followup-scope") return "agent-runnable";
+  return "needs-decision";
+}
+
+function backlogGroupShortLabel(group: BacklogGroupId): string {
+  if (group === "agent-runnable") return "Agent";
+  if (group === "needs-resource") return "Resource";
+  return "Decision";
+}
+
+function backlogRecommendedAction(item: DiscoveryBacklogRow): string {
+  if (item.recommended_action) return item.recommended_action;
+  if (item.kind === "coverage-gap") return backlogScopeId(item) ? "prioritize-scope" : "expand-map";
+  if (item.kind === "followup-scope") return backlogScopeId(item) ? "prioritize-scope" : "continue";
+  if (item.kind === "resource-request") return "supply-resource";
+  return "review";
+}
+
+function backlogPrimaryActionLabel(item: DiscoveryBacklogRow): string {
+  const action = backlogRecommendedAction(item);
+  if (action === "prioritize-scope") return "Prioritize scope";
+  if (action === "expand-map") return "Expand map";
+  if (action === "continue") return "Continue";
+  if (action === "supply-resource") return "Review setup";
+  return "Review";
+}
+
+function backlogScopeId(item: DiscoveryBacklogRow): string {
+  if (item.scope_id) return item.scope_id;
+  const payload = item.payload;
+  if (payload && typeof payload === "object" && !Array.isArray(payload)) {
+    const record = payload as Record<string, unknown>;
+    const value = record.scope_id ?? record.scopeId ?? record.id;
+    return typeof value === "string" ? value : "";
+  }
+  return "";
 }
 
 function backlogKindLabel(kind: string): string {
@@ -3502,8 +3727,9 @@ function backlogKindLabel(kind: string): string {
   return kind;
 }
 
-function backlogDetail(item: DiscoveryBacklogRow): string {
-  return [item.location, item.scope_id ? `scope ${item.scope_id}` : "", item.reason, item.next_action].filter(Boolean).join(" · ");
+function backlogSummaryDetail(item: DiscoveryBacklogRow): string {
+  const scopeId = backlogScopeId(item);
+  return [item.location, scopeId ? `scope ${scopeId}` : "", item.reason, item.next_action].filter(Boolean).join(" · ") || "No additional detail recorded.";
 }
 
 function ProjectOverviewDecisions({

@@ -130,6 +130,8 @@ export interface RunHealth {
 
 export type DiscoveryBacklogKind = "coverage-gap" | "resource-request" | "followup-scope" | string;
 export type DiscoveryBacklogStatus = "open" | "resolved" | "stale" | "ignored" | string;
+export type DiscoveryBacklogActionability = "agent-runnable" | "needs-resource" | "needs-decision" | string;
+export type DiscoveryBacklogOwner = "agent" | "user" | "decision" | string;
 
 export interface DiscoveryBacklogRow {
   id: number;
@@ -145,6 +147,12 @@ export interface DiscoveryBacklogRow {
   priority?: string | null;
   payload_json?: string | null;
   payload?: unknown;
+  actionability?: DiscoveryBacklogActionability | null;
+  action_owner?: DiscoveryBacklogOwner | null;
+  recommended_action?: string | null;
+  primary_action_label?: string | null;
+  autonomous?: boolean | null;
+  action_reason?: string | null;
   created_at?: string | null;
   updated_at?: string | null;
   run_kind?: string | null;

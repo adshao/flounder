@@ -261,9 +261,10 @@ For repository development or local builds, use Node 24 LTS from `.nvmrc` /
    - run health: `latestRunHealth.status` is `healthy`,
      `needs-coverage`, `needs-resource`, `shallow`, or `infra-failed`
    - discovery backlog: `GET /api/projects/:uuid/backlog?status=open`
-     lists coverage gaps, resource requests, and follow-up scopes; use
-     `PATCH /api/backlog/:id` to mark rows `resolved`, `ignored`, `stale`, or
-     back to `open`
+     lists coverage gaps, resource requests, and follow-up scopes with
+     `actionability`, `action_owner`, and `recommended_action`; autonomously run
+     only `agent-runnable` rows, and use `PATCH /api/backlog/:id` to mark rows
+     `resolved`, `ignored`, `stale`, or back to `open`
 
    Project names are display labels. Resolve a project UUID from `POST /api/projects`
    or `GET /api/projects`; do not build a project URL from the name.
@@ -516,9 +517,10 @@ Open only the references needed for the current task:
   as a substitute for coverage.
 - Latest run health is `shallow`: treat the run as inconclusive; inspect logs
   and rerun or fix setup before summarizing.
-- Discovery backlog has open `coverage-gap` or `followup-scope` rows: carry
-  them as coverage work. They are not findings and should not appear in a bug
-  list unless a later execution-backed audit confirms one.
+- Discovery backlog has open `agent-runnable` rows: continue coverage, append
+  map coverage, or prioritize the referenced scopes. They are not findings and
+  should not appear in a bug list unless a later execution-backed audit confirms
+  one.
 - Findings are only `suspected`: make the target buildable and run verify or
   dig again.
 - Findings are confirmed locally but not reproduced: run confirm.

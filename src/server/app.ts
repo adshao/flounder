@@ -293,7 +293,7 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "GET", path: "/api/projects/:uuid/backlog",
-    summary: "List discovery backlog rows for a project: coverage gaps, resource requests, and follow-up scopes from audit runs. Filter with ?kind=coverage-gap|resource-request|followup-scope and ?status=open|resolved|stale|ignored|all.",
+    summary: "List discovery backlog rows for a project: coverage gaps, resource requests, and follow-up scopes from audit runs. Rows include actionability metadata so agents can run agent-runnable items and leave resource/decision blockers visible. Filter with ?kind=coverage-gap|resource-request|followup-scope and ?status=open|resolved|stale|ignored|all.",
     params: { uuid: "project UUID" },
     query: { kind: "coverage-gap|resource-request|followup-scope?", status: "open|resolved|stale|ignored|all? (default open)", limit: "number? (default 100)", offset: "number? (default 0)" },
     handler: projectBacklogGet,
@@ -1303,9 +1303,55 @@ function scopeApiRows(scopes: Array<Record<string, unknown>>): Array<Record<stri
 }
 
 function discoveryBacklogDisplayRow(row: Record<string, unknown>): Record<string, unknown> {
+  const payload = safeParse(row.payload_json);
   return {
     ...row,
-    payload: safeParse(row.payload_json),
+    payload,
+    ...discoveryBacklogActionMeta(row, payload),
+  };
+}
+
+function discoveryBacklogActionMeta(row: Record<string, unknown>, payload: unknown): Record<string, unknown> {
+  const kind = stringValue(row.kind);
+  const payloadRecord = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
+  const scopeId = stringValue(row.scope_id) || stringValue(payloadRecord.scope_id ?? payloadRecord.scopeId ?? payloadRecord.id);
+  if (kind === "resource-request") {
+    return {
+      actionability: "needs-resource",
+      action_owner: "user",
+      recommended_action: "supply-resource",
+      primary_action_label: "Review setup",
+      autonomous: false,
+      action_reason: "A resource, credential, dependency, sandbox, or toolchain must be supplied before an agent can continue.",
+    };
+  }
+  if (kind === "coverage-gap") {
+    return {
+      actionability: "agent-runnable",
+      action_owner: "agent",
+      recommended_action: scopeId ? "prioritize-scope" : "expand-map",
+      primary_action_label: scopeId ? "Prioritize scope" : "Expand map",
+      autonomous: true,
+      action_reason: scopeId ? "The agent can prioritize this mapped gap for the next dig batch." : "The agent can append map coverage to turn this gap into concrete scopes.",
+    };
+  }
+  if (kind === "followup-scope") {
+    return {
+      actionability: "agent-runnable",
+      action_owner: "agent",
+      recommended_action: scopeId ? "prioritize-scope" : "continue",
+      primary_action_label: scopeId ? "Prioritize scope" : "Continue",
+      autonomous: true,
+      action_reason: scopeId ? "The agent can move this follow-up scope to the front of the dig queue." : "The agent can continue coverage and audit follow-up work.",
+    };
+  }
+  return {
+    actionability: "needs-decision",
+    action_owner: "decision",
+    recommended_action: "review",
+    primary_action_label: "Review",
+    autonomous: false,
+    action_reason: "This backlog kind is not mapped to an automatic action yet.",
   };
 }
 

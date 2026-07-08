@@ -224,6 +224,7 @@ test("api: project detail exposes discovery health and operator backlog actions"
     store.replaceDiscoveryBacklog(created.id, runId, [
       { kind: "resource-request", status: "open", title: "Foundry dependencies", location: "dependency", reason: "forge build needs package install", nextAction: "Run npm install at the package root", priority: "high", payload: { id: "R1" } },
       { kind: "followup-scope", status: "open", scopeId: "FU1", title: "Permit replay domain", location: "src/Permit.sol:40", reason: "Follow-up from S1", nextAction: "Dig this pending scope", priority: 8, payload: { id: "FU1" } },
+      { kind: "coverage-gap", status: "open", title: "Router settlement path", location: "src/Router.sol", reason: "Map did not cover settlement obligations", nextAction: "Expand map around settlement", priority: "medium", payload: { gapId: "G1" } },
     ]);
     store.finishRun(runId, "done");
     store.close();
@@ -231,19 +232,30 @@ test("api: project detail exposes discovery health and operator backlog actions"
     let detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
     assert.equal(detail.latestRunHealth.status, "needs-resource");
     assert.equal(detail.latestRunHealth.signals.resourceRequests, 1);
-    assert.equal(detail.backlogCounts.open, 2);
+    assert.equal(detail.backlogCounts.open, 3);
     assert.equal(detail.backlogCounts["resource-request"], 1);
-    assert.equal(detail.discoveryBacklog.length, 2);
+    assert.equal(detail.backlogCounts["coverage-gap"], 1);
+    assert.equal(detail.discoveryBacklog.length, 3);
     assert.equal(detail.openResourceRequests[0].title, "Foundry dependencies");
+    const resource = detail.discoveryBacklog.find((row) => row.kind === "resource-request");
+    const followup = detail.discoveryBacklog.find((row) => row.kind === "followup-scope");
+    const gap = detail.discoveryBacklog.find((row) => row.kind === "coverage-gap");
+    assert.equal(resource.actionability, "needs-resource");
+    assert.equal(resource.autonomous, false);
+    assert.equal(followup.actionability, "agent-runnable");
+    assert.equal(followup.recommended_action, "prioritize-scope");
+    assert.equal(gap.actionability, "agent-runnable");
+    assert.equal(gap.recommended_action, "expand-map");
 
     const backlog = await json(await fetch(base + `/api/projects/${created.uuid}/backlog?kind=resource-request`));
     assert.equal(backlog.total, 1);
     assert.equal(backlog.backlog[0].payload.id, "R1");
+    assert.equal(backlog.backlog[0].action_owner, "user");
 
     const patched = await json(await patch(`/api/backlog/${backlog.backlog[0].id}`, { status: "resolved" }));
     assert.equal(patched.ok, true);
     detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
-    assert.equal(detail.backlogCounts.open, 1);
+    assert.equal(detail.backlogCounts.open, 2);
     assert.equal(detail.openResourceRequests.length, 0);
 
     const artifact = await fetch(base + `/api/runs/${runId}/artifact?name=run_health.json`);

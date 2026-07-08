@@ -105,7 +105,7 @@ Flounder is built for the parts of security work that usually require a human to
 | Exploit construction | Writes local PoCs, tests, fixtures, or harnesses inside an isolated workspace. |
 | Sandboxed execution | Runs model-generated tests and PoCs away from the host source tree, credentials, and user environment. |
 | Execution proof | Runs the proof locally and only upgrades findings when command evidence exists. |
-| Discovery health | Writes run-health and backlog artifacts so a zero-finding run can be distinguished from a shallow run, a missing-resource blocker, or coverage that still needs a later dig. Toolchain warm-up failures are captured as resource requests even when the model did not write one itself. |
+| Discovery health | Writes run-health and backlog artifacts so a zero-finding run can be distinguished from a shallow run, a missing-resource blocker, or coverage that still needs a later dig. Toolchain warm-up failures are captured as resource requests even when the model did not write one itself, and backlog rows are classified for the project Next Actions queue. |
 | Real-target confirmation | Reproduces confirmed findings against real-world ground truth, such as a local fork of a deployed target. |
 | Reporting | Tracks status, artifacts, confirm decisions, formal reports, and submission state across projects. |
 
@@ -389,11 +389,11 @@ The dashboard stores metadata, run health, discovery backlog rows, and artifact 
 
 `flounder ui` is a local control plane and dashboard for projects, daemons, provider profiles, runs, scopes, findings, reports, and live activity. A project is pinned to an execution daemon and a default provider profile, with optional per-phase provider overrides for prepare, map, dig, and confirm. The selected daemon must be authenticated for every provider profile the project can use. New projects start from a prominent task/clue input, can run immediately after creation, and default their daemon workspace directory to the project UUID.
 
-The project view shows the prepare -> map -> dig -> synthesize -> verify -> confirm -> report workflow, current phase, scope coverage, run health, discovery backlog, live model activity, findings as they land, per-finding confirm actions, real-target reproduction status, and reports. The primary action is **Run** before the first pipeline run and **Continue** after one exists; finer-grained Prepare, Map, Dig, Verify, Confirm, and Report actions live under More actions. The project list can pin projects, archive them to Settings, unarchive them later, and drag active projects into a manual order.
+The project view shows the prepare -> map -> dig -> synthesize -> verify -> confirm -> report workflow, current phase, scope coverage, run health, a **Next Actions** queue, live model activity, findings as they land, per-finding confirm actions, real-target reproduction status, and reports. Next Actions groups discovery backlog rows into agent-runnable work, resource blockers, and decision-only rows; the agent-runnable group can be advanced with Continue, Expand map, or scope prioritization. The primary action is **Run** before the first pipeline run and **Continue** after one exists; finer-grained Prepare, Map, Dig, Verify, Confirm, and Report actions live under More actions. The project list can pin projects, archive them to Settings, unarchive them later, and drag active projects into a manual order.
 
 A cross-project Findings view tracks every finding through submission states. It supports project, audit-status, and tracking filters; the default Active view hides findings marked `ignored`, and the Ignored view lets an operator recover machine-reported false positives later by changing them back to `open`.
 
-Every UI operation is also a REST call. `GET /api` returns the API catalog, `GET /api/projects/:uuid/backlog` lists discovery backlog rows, `PATCH /api/backlog/:id` updates their operator state, and `GET /api/runs/:id/log` streams the executing daemon's live model output, tool calls, and milestones.
+Every UI operation is also a REST call. `GET /api` returns the API catalog, `GET /api/projects/:uuid/backlog` lists discovery backlog rows with `actionability`, `action_owner`, and `recommended_action` metadata, `PATCH /api/backlog/:id` updates their operator state, and `GET /api/runs/:id/log` streams the executing daemon's live model output, tool calls, and milestones.
 
 ## White-Hat Boundary
 

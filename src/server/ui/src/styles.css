@@ -2244,6 +2244,87 @@ small {
   flex-wrap: nowrap;
 }
 
+.next-actions-head,
+.next-action-group-head {
+  display: flex;
+  align-items: flex-start;
+  justify-content: space-between;
+  gap: 12px;
+  min-width: 0;
+}
+
+.next-actions-head > div,
+.next-action-group-head > div {
+  display: grid;
+  gap: 3px;
+  min-width: 0;
+}
+
+.next-action-metrics {
+  margin-top: 14px;
+}
+
+.next-action-groups {
+  display: grid;
+  gap: 16px;
+  margin-top: 16px;
+}
+
+.next-action-group {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+}
+
+.next-action-card {
+  border-left: 3px solid var(--border);
+}
+
+.next-action-card.agent-runnable {
+  border-left-color: var(--accent);
+}
+
+.next-action-card.needs-resource {
+  border-left-color: var(--warning);
+}
+
+.next-action-card.needs-decision {
+  border-left-color: var(--fg-subtle);
+}
+
+.next-action-title {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  min-width: 0;
+}
+
+.next-action-title strong {
+  min-width: 0;
+}
+
+.next-action-reason {
+  color: var(--fg-muted);
+}
+
+.backlog-owner.agent-runnable {
+  color: var(--accent);
+  background: var(--sel-bg);
+  border-color: transparent;
+}
+
+.backlog-owner.needs-resource {
+  color: var(--warning);
+  background: color-mix(in srgb, var(--warning) 10%, var(--canvas));
+  border-color: color-mix(in srgb, var(--warning) 25%, var(--border));
+}
+
+.backlog-owner.needs-decision {
+  color: var(--fg-muted);
+  background: var(--canvas-subtle);
+}
+
 .resource-list-more {
   display: flex;
   justify-content: center;
@@ -4030,8 +4111,20 @@ small {
   }
 
   .scope-row,
-  .run-row {
+  .run-row,
+  .backlog-card {
     grid-template-columns: 1fr;
+  }
+
+  .next-actions-head,
+  .next-action-group-head {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .backlog-card .resource-actions {
+    justify-content: start;
+    flex-wrap: wrap;
   }
 
   .run-log-entry {

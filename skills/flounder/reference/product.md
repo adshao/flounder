@@ -112,7 +112,11 @@ Audit runs may write discovery-health artifacts in addition to findings:
 
 These rows are not findings. They explain what to do next when a run has few or
 zero bugs: fix resource blockers, continue coverage, or prioritize follow-up
-scopes. Mark non-actionable backlog rows `ignored`; mark handled blockers
+scopes. The API and dashboard classify each row as `agent-runnable`,
+`needs-resource`, or `needs-decision`. Agents may autonomously continue,
+append-map, or prioritize scopes for `agent-runnable` rows; resource and
+decision rows stay visible until the blocker is handled or intentionally
+ignored. Mark non-actionable backlog rows `ignored`; mark handled blockers
 `resolved`; keep unresolved coverage rows `open`.
 
 Resource requests can be model-authored or product-owned. Prepare and toolchain
