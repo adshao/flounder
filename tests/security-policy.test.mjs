@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "../dist/security/policy.js";
+import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, openWorldCommandNeedsNetwork } from "../dist/security/policy.js";
 
 const cmd = (program, ...args) => ({ program, args });
 
@@ -218,6 +218,31 @@ test("confirm-mode bash MAY fork and read live networks (the open-world differen
   }
   // run mode blocks a remote fork; confirm allows it — the capability difference is real.
   assert.equal(analyzeAgentBashCommandSafety(cmd("forge", "test", "--fork-url", "https://eth.llamarpc.com")).blocked, true);
+});
+
+test("open-world egress is granted per command instead of per phase", () => {
+  for (const c of [
+    cmd("forge", "test", "--fork-url", "https://eth.llamarpc.com"),
+    cmd("cast", "call", "--rpc-url", "https://mainnet.example", "0xabc", "balanceOf()"),
+    cmd("curl", "-fsSL", "https://example.com/spec.json"),
+    cmd("git", "clone", "https://github.com/example/project"),
+  ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), true, `${c.program} should receive read-only egress`);
+
+  for (const c of [
+    cmd("node", "repro.mjs"),
+    cmd("node", "-e", "fetch('https:'+'//mainnet.example',{method:'POST',body:'eth_'+'sendRawTransaction'})"),
+    cmd("curl", "-X", "POST", "https://mainnet.example", "--data", "{}"),
+    cmd("curl", "--config", "poc/curl.conf", "https://mainnet.example"),
+    cmd("wget", "--config=poc/wgetrc", "https://mainnet.example"),
+    cmd("git", "clone", "ext::sh -c id"),
+    cmd("git", "clone", "--upload-pack=touch-pwned", "https://github.com/example/project"),
+    cmd("git", "push", "origin", "main"),
+    cmd("gh", "api", "repos/example/project/issues", "--method", "POST"),
+    cmd("gh", "repo", "clone", "example/project", "--", "--upload-pack=touch-pwned"),
+  ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), false, `${c.program} must remain network-sealed`);
+
+  assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "install"), "build"), true);
+  assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "test"), "confirm"), false);
 });
 
 test("confirm-mode bash cannot smuggle remote URLs into generated test files", () => {

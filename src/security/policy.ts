@@ -16,6 +16,8 @@ export interface StructuredReproductionCommand {
   args: string[];
 }
 
+export type AgentCommandPurpose = "inspect" | "build" | "confirm";
+
 export const DEFAULT_COMMAND_SAFETY_POLICY: CommandSafetyPolicy = {
   liveNetworkPatterns: [
     /\bmainnet\b/i,
@@ -151,11 +153,10 @@ export const CONFIRM_BROADCAST_PATTERNS: RegExp[] = [
 /**
  * CONFIRM-mode bash policy: the open-world counterpart to analyzeAgentBashCommandSafety.
  * It KEEPS the structural guards (plain program name, simple argv, workspace-contained
- * paths) and the white-hat line, but DROPS the local-only network enforcement and the
- * test/build/inspect allowlist — confirm must reach the network (fork the live chain,
- * stand up a real node, fetch/search) and the model picks the tools for whatever target
- * it faces. The one network rule kept: never broadcast a transaction to a NON-LOCAL
- * network (reading/forking live state, and broadcasting to a LOCAL fork, are both fine).
+ * paths) and the white-hat no-broadcast line, while allowing the model to choose the
+ * local tooling needed for reproduction. Network egress is decided separately by
+ * openWorldCommandNeedsNetwork: only an explicit read/fork/fetch capability surface is
+ * network-enabled; arbitrary accepted programs still execute in a sealed sandbox.
  */
 export function analyzeConfirmBashCommandSafety(command: StructuredReproductionCommand): CommandSafetyDecision {
   const program = command.program.trim();
@@ -183,6 +184,104 @@ export function analyzeConfirmBashCommandSafety(command: StructuredReproductionC
     };
   }
   return { blocked: false };
+}
+
+/**
+ * Open-world phases do not grant blanket network access to model-selected code.
+ * Only a small capability surface of read/fork/fetch commands receives egress;
+ * every other accepted command still runs, but in the network-sealed sandbox.
+ * This makes lexical command checks defense-in-depth rather than the boundary.
+ */
+export function openWorldCommandNeedsNetwork(command: StructuredReproductionCommand, purpose: AgentCommandPurpose): boolean {
+  const normalized = unwrapSafeEnvCommand(command);
+  if (!normalized) return false;
+  const program = normalized.program.trim().toLowerCase();
+  const args = normalized.args.map((arg) => String(arg));
+  if (purpose === "build" && isAllowedBuildCommand(program, args)) return true;
+  if (program === "curl") return isReadOnlyCurl(args);
+  if (program === "wget") return isReadOnlyWget(args);
+  if (program === "git") return isReadOnlyGitNetworkCommand(args);
+  if (program === "gh") return isReadOnlyGitHubCommand(args);
+  if (program === "cast") return isReadOnlyCastCommand(args);
+  if (program === "forge") return isReadOnlyForgeForkCommand(args);
+  if (program === "anvil") return hasRemoteForkTarget(args) && !args.some((arg) => /broadcast|transaction/i.test(arg));
+  return false;
+}
+
+function isReadOnlyCurl(args: string[]): boolean {
+  const forbidden = /^(?:-d|--data(?:-|$)|-F$|--form(?:-|$)|-T$|--upload-file$|--json$|--url-query$|-K|--config(?:=|$))/i;
+  if (args.some((arg) => forbidden.test(arg) || /^--(?:data|form|upload-file|json)=/i.test(arg))) return false;
+  const requestIndex = args.findIndex((arg) => arg === "-X" || arg === "--request");
+  const inlineRequest = args.find((arg) => /^--request=/i.test(arg));
+  const method = requestIndex >= 0 ? args[requestIndex + 1] : inlineRequest?.split("=", 2)[1];
+  if (method && method.toUpperCase() !== "GET" && method.toUpperCase() !== "HEAD") return false;
+  return args.some((arg) => Boolean(firstNonLocalRemoteUrl(arg)));
+}
+
+function isReadOnlyWget(args: string[]): boolean {
+  if (args.some((arg) => /^(?:--post-|--method|--body-|--upload-file|--execute|--config|-e$)/i.test(arg))) return false;
+  return args.some((arg) => Boolean(firstNonLocalRemoteUrl(arg)));
+}
+
+function isReadOnlyGitNetworkCommand(args: string[]): boolean {
+  if (args.some((arg) =>
+    arg === "-c"
+    || arg.startsWith("-c=")
+    || arg === "--config-env"
+    || arg.startsWith("--config-env=")
+    || arg === "--upload-pack"
+    || arg === "-u"
+    || arg.startsWith("--upload-pack=")
+  )) return false;
+  const verbIndex = args.findIndex((arg) => arg === "clone" || arg === "fetch" || arg === "ls-remote");
+  if (verbIndex < 0) return false;
+  const remoteArgs = args.slice(verbIndex + 1).filter((arg) => !arg.startsWith("-"));
+  return remoteArgs.some(isHttpsGitRemote);
+}
+
+function isHttpsGitRemote(arg: string): boolean {
+  try {
+    const url = new URL(arg);
+    return url.protocol === "https:" && Boolean(url.hostname);
+  } catch {
+    return false;
+  }
+}
+
+function isReadOnlyGitHubCommand(args: string[]): boolean {
+  if (args.some((arg, idx) => (arg === "--method" || arg === "-X") && !/^(?:GET|HEAD)$/i.test(args[idx + 1] ?? ""))) return false;
+  if (args.some((arg) => /^--method=(?!GET$|HEAD$)/i.test(arg))) return false;
+  const verb = args.find((arg) => !arg.startsWith("-"));
+  if (verb === "search") return true;
+  if (verb === "api") return !args.some((arg) => /^(?:-f|--field|-F|--raw-field|--input)$/i.test(arg));
+  if (verb === "repo") {
+    if (args.includes("clone") && args.some((arg) => arg === "--" || /upload-pack|config-env|core\./i.test(arg))) return false;
+    return args.some((arg) => arg === "clone" || arg === "view");
+  }
+  if (verb === "issue" || verb === "pr" || verb === "release") return args.some((arg) => arg === "list" || arg === "view");
+  return false;
+}
+
+function isReadOnlyCastCommand(args: string[]): boolean {
+  const verb = args.find((arg) => !arg.startsWith("-"));
+  const readOnly = new Set(["call", "balance", "code", "storage", "block", "logs", "receipt", "tx", "chain-id", "client", "gas-price", "nonce"]);
+  return Boolean(verb && readOnly.has(verb) && targetsNonLocalNetwork(args));
+}
+
+function isReadOnlyForgeForkCommand(args: string[]): boolean {
+  const verb = args.find((arg) => !arg.startsWith("-"));
+  return verb === "test"
+    && hasRemoteForkTarget(args)
+    && !args.some((arg) => arg === "--ffi" || arg === "--broadcast" || /send-?raw-?transaction/i.test(arg));
+}
+
+function hasRemoteForkTarget(args: string[]): boolean {
+  for (let idx = 0; idx < args.length; idx += 1) {
+    const arg = args[idx] ?? "";
+    if (arg === "--fork-url" && firstNonLocalRemoteUrl(args[idx + 1] ?? "")) return true;
+    if (arg.startsWith("--fork-url=") && firstNonLocalRemoteUrl(arg.slice("--fork-url=".length))) return true;
+  }
+  return false;
 }
 
 function analyzeInlineGeneratedFileWriteSafety(program: string, args: string[]): CommandSafetyDecision {

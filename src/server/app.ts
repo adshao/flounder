@@ -3984,6 +3984,41 @@ function daemonAuth(c: Ctx): Record<string, unknown> | null {
   return daemon;
 }
 
+function authorizedDaemonJob(c: Ctx, daemon: Record<string, unknown>, jobId: number): Record<string, unknown> | null {
+  if (!Number.isInteger(jobId) || jobId <= 0) {
+    sendJson(c.res, 400, { error: "a valid job id is required" });
+    return null;
+  }
+  const job = c.store.getJob(jobId);
+  if (!job) {
+    sendJson(c.res, 404, { error: "no such job" });
+    return null;
+  }
+  if (Number(job.daemon_id) !== Number(daemon.id)) {
+    sendJson(c.res, 403, { error: "job is assigned to another daemon" });
+    return null;
+  }
+  return job;
+}
+
+function authorizedDaemonRun(c: Ctx, daemon: Record<string, unknown>, runId: number): { run: Record<string, unknown>; job: Record<string, unknown> } | null {
+  if (!Number.isInteger(runId) || runId <= 0) {
+    sendJson(c.res, 400, { error: "a valid run id is required" });
+    return null;
+  }
+  const run = c.store.getRun(runId);
+  if (!run) {
+    sendJson(c.res, 404, { error: "no such run" });
+    return null;
+  }
+  const job = c.store.getJobByRun(runId);
+  if (!job || Number(job.daemon_id) !== Number(daemon.id)) {
+    sendJson(c.res, 403, { error: "run is assigned to another daemon" });
+    return null;
+  }
+  return { run, job };
+}
+
 async function daemonRegister(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
@@ -4041,9 +4076,10 @@ async function daemonRunStart(c: Ctx): Promise<void> {
   const name = (body.project ?? "").trim();
   if (!name || !body.runDir) return sendJson(c.res, 400, { error: "project and runDir are required" });
   if (typeof body.jobId !== "number" || !Number.isFinite(body.jobId)) return sendJson(c.res, 400, { error: "jobId is required" });
-  const job = c.store.getJob(body.jobId);
-  if (!job) return sendJson(c.res, 404, { error: "no such job" });
-  if (job.daemon_id != null && Number(job.daemon_id) !== Number(daemon.id)) return sendJson(c.res, 403, { error: "job is assigned to another daemon" });
+  const job = authorizedDaemonJob(c, daemon, body.jobId);
+  if (!job) return;
+  if (name !== String(job.project)) return sendJson(c.res, 403, { error: "run project does not match the claimed job" });
+  if (body.kind !== undefined && !isRunKind(body.kind)) return sendJson(c.res, 400, { error: "kind must be run, map, audit, verify, confirm, prepare, or report" });
   const additional = body.additional === true;
   if (job.run_id != null && !additional) return sendJson(c.res, 200, { runId: Number(job.run_id), existing: true });
   if ((!additional && job.status !== "dispatched") || (additional && job.status !== "running")) {
@@ -4068,8 +4104,9 @@ async function daemonRunUpdate(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
   const runId = Number(c.params.id);
-  const run = c.store.getRun(runId);
-  if (!run) return sendJson(c.res, 404, { error: "no such run" });
+  const authorized = authorizedDaemonRun(c, daemon, runId);
+  if (!authorized) return;
+  const { run } = authorized;
   if (run.status !== "running") return sendJson(c.res, 200, { ok: true, stale: true });
   const projectId = Number(run.project_id);
   const body = (await readBody(c.req)) as {
@@ -4085,6 +4122,7 @@ async function daemonRunUpdate(c: Ctx): Promise<void> {
     backlog?: Parameters<MetadataStore["replaceDiscoveryBacklog"]>[2];
     finish?: { status: Parameters<MetadataStore["finishRun"]>[1]; coverage?: Coverage; findingsTotal?: number };
   };
+  if (body.finish && !isRunTerminalStatus(body.finish.status)) return sendJson(c.res, 400, { error: "finish.status must be done, error, or killed" });
   if (body.scopes) {
     c.store.replaceScopes(projectId, body.scopes);
     c.store.updateRunCoverage(runId, c.store.scopeProgress(projectId));
@@ -4117,21 +4155,32 @@ async function daemonRunActivity(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
   const runId = Number(c.params.id);
-  const run = c.store.getRun(runId);
-  if (!run) return sendJson(c.res, 404, { error: "no such run" });
+  const authorized = authorizedDaemonRun(c, daemon, runId);
+  if (!authorized) return;
+  const { run } = authorized;
   if (run.status !== "running") return sendJson(c.res, 200, { ok: true, stale: true });
   const body = (await readBody(c.req)) as { events?: Array<{ kind: string; delta?: string; tool?: string; step?: number }> };
+  if (body.events !== undefined && !Array.isArray(body.events)) return sendJson(c.res, 400, { error: "events must be an array" });
+  const events = (body.events ?? []).slice(0, 1000);
+  if (events.some((ev) => !ev || typeof ev !== "object" || typeof ev.kind !== "string")) {
+    return sendJson(c.res, 400, { error: "each activity event requires a string kind" });
+  }
   const bus = c.plane.bus(runId);
-  for (const ev of body.events ?? []) bus.push(ev);
+  for (const ev of events) bus.push(ev);
   sendJson(c.res, 200, { ok: true });
 }
 
 async function daemonPipelineWorklist(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
-  const body = (await readBody(c.req)) as { project?: string; phase?: string; verifyFromStart?: boolean };
+  const body = (await readBody(c.req)) as { jobId?: number; project?: string; phase?: string; verifyFromStart?: boolean };
+  if (typeof body.jobId !== "number") return sendJson(c.res, 400, { error: "jobId is required" });
+  const job = authorizedDaemonJob(c, daemon, body.jobId);
+  if (!job) return;
+  if (job.status !== "running") return sendJson(c.res, 409, { error: "pipeline worklists require a running job" });
   const projectName = typeof body.project === "string" ? body.project.trim() : "";
   if (!projectName) return sendJson(c.res, 400, { error: "project is required" });
+  if (projectName !== String(job.project)) return sendJson(c.res, 403, { error: "pipeline project does not match the claimed job" });
   const phase = body.phase === "verify" || body.phase === "confirm" || body.phase === "report" ? body.phase : "";
   if (!phase) return sendJson(c.res, 400, { error: "phase must be verify, confirm, or report" });
   const project = c.store.getProject(projectName);
@@ -4203,9 +4252,11 @@ async function daemonJobStatus(c: Ctx): Promise<void> {
   const jobId = Number(c.params.id);
   const body = (await readBody(c.req)) as { status?: string; error?: string };
   const status = body.status ?? "done";
-  const before = c.store.getJob(jobId);
-  if (before && before.status === "canceled" && status !== "canceled") {
-    return sendJson(c.res, 200, { ok: true, stale: true });
+  if (!isJobTerminalStatus(status)) return sendJson(c.res, 400, { error: "status must be done, error, or canceled" });
+  const before = authorizedDaemonJob(c, daemon, jobId);
+  if (!before) return;
+  if (isJobTerminalStatus(before.status)) {
+    return sendJson(c.res, 200, { ok: true, stale: before.status !== status });
   }
   c.store.setJobStatus(jobId, status, body.error);
   // If the daemon died/aborted before its run reached a terminal state, reconcile the run.
@@ -4218,6 +4269,18 @@ async function daemonJobStatus(c: Ctx): Promise<void> {
     }
   }
   sendJson(c.res, 200, { ok: true });
+}
+
+function isRunKind(value: unknown): value is RunKind {
+  return value === "run" || value === "map" || value === "audit" || value === "verify" || value === "confirm" || value === "prepare" || value === "report";
+}
+
+function isRunTerminalStatus(value: unknown): value is "done" | "error" | "killed" {
+  return value === "done" || value === "error" || value === "killed";
+}
+
+function isJobTerminalStatus(value: unknown): value is "done" | "error" | "canceled" {
+  return value === "done" || value === "error" || value === "canceled";
 }
 
 // ---- shared -----------------------------------------------------------------

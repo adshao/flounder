@@ -965,6 +965,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const store = MetadataStore.openForOutput(out);
     let token;
     let suspectedId;
+    let jobId;
     try {
       const daemon = store.createDaemonToken("pipeline-verify-daemon");
       token = daemon.token;
@@ -979,6 +980,9 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
           confidence: 0.82,
         },
       ], "synthesis");
+      jobId = store.enqueueJob("pipeline-verify-worklist", { verb: "run", pipeline: true }, daemon.id);
+      assert.equal(store.claimJob(daemon.id)?.id, jobId);
+      store.setJobRun(jobId, runId);
       suspectedId = Number(store.listFindings(created.id)[0].id);
       store.upsertFindings(created.id, runId, [
         {
@@ -1041,7 +1045,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const verify = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "verify" }),
+      body: JSON.stringify({ jobId, project: "pipeline-verify-worklist", phase: "verify" }),
     }));
     assert.equal(verify.phase, "verify");
     assert.equal(verify.verifyFindings.length, 1);
@@ -1052,7 +1056,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const restartVerify = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "verify", verifyFromStart: true }),
+      body: JSON.stringify({ jobId, project: "pipeline-verify-worklist", phase: "verify", verifyFromStart: true }),
     }));
     assert.equal(restartVerify.phase, "verify");
     assert.equal(restartVerify.verifyFromStart, true);
@@ -1061,7 +1065,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const confirm = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "confirm" }),
+      body: JSON.stringify({ jobId, project: "pipeline-verify-worklist", phase: "confirm" }),
     }));
     assert.ok(confirm.confirmKeys.includes("confirmed-bug"));
     assert.ok(confirm.confirmKeys.includes("kgateblocked"), "confirm worklist retries reproduced needs-human decisions whose submission gates remain open");

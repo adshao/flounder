@@ -75,8 +75,13 @@ export async function prepareSandboxWorkspace(sourcePaths: string[], runDir: str
   const relative = relativeDir;
   const absolute = path.join(runDir, ...relative.split("/"));
   await mkdir(absolute, { recursive: true });
-  if (sourcePaths.length === 1 && (await isDirectory(sourcePaths[0] ?? ""))) {
-    await copyDirectoryContents(sourcePaths[0] ?? "", absolute);
+  const onlySource = sourcePaths[0] ?? "";
+  if (sourcePaths.length === 1 && (await isDirectory(onlySource))) {
+    const sourceInfo = await lstat(onlySource);
+    if (sourceInfo.isSymbolicLink()) {
+      throw new Error("Sandbox source root must not be a symbolic link.");
+    }
+    await copyDirectoryContents(onlySource, absolute);
   } else {
     for (const sourcePath of sourcePaths) {
       await copySourcePath(sourcePath, path.join(absolute, path.basename(sourcePath)));
@@ -881,6 +886,9 @@ function sandboxEnv(workspace: string, tmpDir: string, cacheDir?: string): NodeJ
   const pkgCache = cacheDir ?? tmpDir;
   const out: NodeJS.ProcessEnv = {
     CI: "1",
+    // Foundry can otherwise inherit an ffi=true project setting and let a test
+    // escape the command classifier by spawning a second arbitrary process.
+    FOUNDRY_FFI: "false",
     HOME: workspace,
     TMPDIR: tmpDir,
     TEMP: tmpDir,

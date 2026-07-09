@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import path from "node:path";
 import { sandboxExecutionOptions, sandboxNetworkForPurpose, type AuditorConfig } from "../config.js";
-import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "../security/policy.js";
+import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, openWorldCommandNeedsNetwork } from "../security/policy.js";
 import { prepareResourceRequests, prepareToolVersionBlockingIssue, prepareWorkspaceToolchain } from "./prepare.js";
 import {
   firstBlockedSandboxFile,
@@ -68,6 +68,7 @@ export interface AgentFinding {
 export interface CommandRunRecord {
   id: string;
   purpose?: "inspect" | "build" | "confirm";
+  network?: "none" | "enabled";
   passed: boolean;
   targetLinked?: boolean;
   targetLinkReason?: string;
@@ -336,8 +337,9 @@ const bashTool: AgentTool = {
   async run(args, ctx) {
     const normalized = normalizeBashCommand(args, ctx.cfg);
     if ("error" in normalized) return { observation: normalized.error };
-    // CONFIRM mode swaps to the network-enabled policy (fork/read live networks, fetch,
-    // search — never broadcast); `flounder run` keeps the network-sealed local-only policy.
+    // Open-world phases accept a broader local command set, but network egress is
+    // granted below only to explicit read/fork/fetch capabilities. Arbitrary model
+    // programs remain network-sealed; every phase still enforces the no-broadcast line.
     const blocked = (ctx.cfg.confirmMode || ctx.cfg.prepareMode)
       ? analyzeConfirmBashCommandSafety(normalized.command)
       : analyzeAgentBashCommandSafety(normalized.command);
@@ -359,13 +361,17 @@ const bashTool: AgentTool = {
       purpose: normalized.purpose,
       command: normalized.raw,
     });
+    const phaseNetwork = sandboxNetworkForPurpose(ctx.cfg, normalized.purpose);
+    const commandNetwork = (ctx.cfg.confirmMode || ctx.cfg.prepareMode) && phaseNetwork === "enabled"
+      ? (openWorldCommandNeedsNetwork(normalized.command, normalized.purpose) ? "enabled" : "none")
+      : phaseNetwork;
     const result = await runSandboxCommand(
       normalized.command,
       workspace.absolute,
       ctx.cfg.reproductionMaxLogBytes,
       ctx.cfg.sourcePaths,
       ctx.session.buildCacheDir,
-      sandboxExecutionOptions(ctx.cfg, sandboxNetworkForPurpose(ctx.cfg, normalized.purpose)),
+      sandboxExecutionOptions(ctx.cfg, commandNetwork),
     );
     const exitMatched = result.exitCode === result.expectedExitCode && !result.timedOut;
     const isConfirm = normalized.purpose === "confirm";
@@ -390,6 +396,7 @@ const bashTool: AgentTool = {
       targetLinked: targetLink.linked,
       targetLinkReason: targetLink.reason,
       command: normalized.raw,
+      network: commandNetwork,
       commandSpec: normalized.command,
       successPatterns: normalized.successPatterns,
       matched: patternCheck.matched,
@@ -405,6 +412,7 @@ const bashTool: AgentTool = {
     await ctx.logger.event("audit_command_run", {
       runId,
       purpose: normalized.purpose,
+      network: commandNetwork,
       ok: exitMatched,
       passed,
       exitCode: result.exitCode,
