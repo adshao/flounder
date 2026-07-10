@@ -6,6 +6,7 @@ import {
   resolveWorkspacePathForRead,
   runSandboxCommand,
   writeSandboxFiles,
+  type SandboxNetworkMode,
   type SandboxWorkspace,
 } from "../security/sandbox.js";
 import type { RunLogger } from "../trace/logger.js";
@@ -28,6 +29,20 @@ export interface DifferentialResult {
   patchedMatched: string[];
   patchedMissing: string[];
   exploitStillReproduces: boolean;
+}
+
+/**
+ * A differential rerun must never gain more egress than the exploit run that
+ * earned confirmation. CommandRunRecord is persisted model output, so missing
+ * or unknown historical provenance fails closed to a sealed rerun.
+ */
+export function differentialNetworkForExploitRun(
+  cfg: AuditorConfig,
+  exploitRun: Pick<CommandRunRecord, "network">,
+): SandboxNetworkMode {
+  return cfg.confirmMode && cfg.sandboxConfirmNetwork === "enabled" && exploitRun.network === "enabled"
+    ? "enabled"
+    : "none";
 }
 
 export async function runDifferentialConfirmation(input: {
@@ -85,7 +100,7 @@ export async function runDifferentialConfirmation(input: {
       input.cfg.reproductionMaxLogBytes,
       input.cfg.sourcePaths,
       input.cacheDir,
-      sandboxExecutionOptions(input.cfg, input.cfg.confirmMode ? input.cfg.sandboxConfirmNetwork : "none"),
+      sandboxExecutionOptions(input.cfg, differentialNetworkForExploitRun(input.cfg, exploitRun)),
     );
   } finally {
     // Always restore the pristine target source so other findings see a clean tree.

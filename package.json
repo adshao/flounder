@@ -41,10 +41,12 @@
     "test": "npm run build && node --test tests/*.test.mjs",
     "check:api-catalog": "npm run build && npm run check:api-catalog:dist",
     "check:api-catalog:dist": "node scripts/check-api-catalog.mjs",
+    "check:db-upgrade": "npm run build:server && npm run check:db-upgrade:dist",
+    "check:db-upgrade:dist": "node scripts/check-db-upgrade.mjs",
     "check:public": "node scripts/check-public-surface.mjs",
     "check:public:commit": "node scripts/check-public-surface.mjs --head-only",
     "hooks:install": "git config core.hooksPath .githooks",
-    "verify": "npm run check && npm test && npm run check:api-catalog:dist && npm run mock-audit && npm run check:public",
+    "verify": "npm run check && npm test && npm run check:api-catalog:dist && npm run check:db-upgrade:dist && npm run mock-audit && npm run check:public",
     "sandbox:build": "docker build -f docker/flounder-sandbox.Dockerfile -t flounder-sandbox:latest .",
     "sandbox:cairo:build": "docker build -f docker/flounder-sandbox-cairo.Dockerfile -t flounder-sandbox:cairo .",
     "sandbox:cairo:target": "node scripts/cairo-sandbox-image.mjs",
@@ -114,13 +116,13 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": "*",
-    "@earendil-works/pi-coding-agent": "*",
+    "@earendil-works/pi-ai": ">=0.80.6 <0.81",
+    "@earendil-works/pi-coding-agent": ">=0.80.6 <0.81",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.80.2",
-    "@earendil-works/pi-coding-agent": "0.80.2",
+    "@earendil-works/pi-ai": "0.80.6",
+    "@earendil-works/pi-coding-agent": "0.80.6",
     "@types/node": "^24.13.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

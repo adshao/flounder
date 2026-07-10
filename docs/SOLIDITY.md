@@ -20,7 +20,7 @@ flounder run \
   --source <target>/src <target>/contracts \
   --corpus <target>/README.md <target>/docs <target>/specs \
   --provider openai-codex \
-  --model gpt-5.5 \
+  --model gpt-5.6-sol \
   --thinking xhigh \
   --map-steps 60 --dig-steps 60
 ```

@@ -242,7 +242,7 @@ async function runPipelineJob(
   });
   await ctx.flushTracker();
 
-  const verify = await pipelineWorklist(base, headers, spec.target, "verify", spec.verifyFromStart === true);
+  const verify = await pipelineWorklist(base, headers, ctx.jobId, spec.target, "verify", spec.verifyFromStart === true);
   if (verify.verifyFindings.length > 0) {
     const verifySpec: LaunchSpec = {
       ...spec,
@@ -273,7 +273,7 @@ async function runPipelineJob(
   }
 
   await drainPipelineConfirmWork(
-    () => pipelineWorklist(base, headers, spec.target, "confirm"),
+    () => pipelineWorklist(base, headers, ctx.jobId, spec.target, "confirm"),
     async (confirm) => {
       const confirmSpec: LaunchSpec = {
         ...spec,
@@ -305,7 +305,7 @@ async function runPipelineJob(
     },
   );
 
-  const report = await pipelineWorklist(base, headers, spec.target, "report");
+  const report = await pipelineWorklist(base, headers, ctx.jobId, spec.target, "report");
   if (report.reportFindings.length > 0) {
     const reportSpec: LaunchSpec = {
       ...spec,
@@ -361,11 +361,11 @@ function pipelineConfirmWorkFingerprint(work: PipelineWorklist): string {
   return [...new Set(work.confirmKeys.map((key) => key.trim()).filter(Boolean))].sort().join("\n");
 }
 
-async function pipelineWorklist(base: string, headers: Record<string, string>, project: string, phase: "verify" | "confirm" | "report", verifyFromStart = false): Promise<PipelineWorklist> {
+async function pipelineWorklist(base: string, headers: Record<string, string>, jobId: number, project: string, phase: "verify" | "confirm" | "report", verifyFromStart = false): Promise<PipelineWorklist> {
   const res = await fetch(base + "/api/daemon/pipeline-worklist", {
     method: "POST",
     headers,
-    body: JSON.stringify({ project, phase, ...(phase === "verify" && verifyFromStart ? { verifyFromStart: true } : {}) }),
+    body: JSON.stringify({ jobId, project, phase, ...(phase === "verify" && verifyFromStart ? { verifyFromStart: true } : {}) }),
   });
   if (!res.ok) throw new Error(`pipeline ${phase} worklist failed (${res.status})`);
   const body = (await res.json().catch(() => ({}))) as {

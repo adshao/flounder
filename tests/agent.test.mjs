@@ -15,7 +15,7 @@ import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareM
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
 import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
-import { runDifferentialConfirmation } from "../dist/agent/differential.js";
+import { differentialNetworkForExploitRun, runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
@@ -173,6 +173,7 @@ test("driver routing: real pi providers use the continuous session, mock/CLI fal
 });
 
 test("pi session preserves the configured xhigh thinking level", () => {
+  assert.equal(defaultConfig().auditModel, "gpt-5.6-sol");
   assert.equal(defaultConfig().thinkingLevel, "xhigh");
   assert.equal(mapThinkingLevel("off"), "off");
   assert.equal(mapThinkingLevel("minimal"), "minimal");
@@ -1549,6 +1550,15 @@ test("differential confirmation: a real fix blocks the exploit; a no-op fix does
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("differential confirmation never grants a rerun more network than the cited exploit run", () => {
+  const cfg = { ...defaultConfig(), confirmMode: true, sandboxConfirmNetwork: "enabled" };
+  assert.equal(differentialNetworkForExploitRun(cfg, { network: "enabled" }), "enabled");
+  assert.equal(differentialNetworkForExploitRun(cfg, { network: "none" }), "none");
+  assert.equal(differentialNetworkForExploitRun(cfg, {}), "none");
+  assert.equal(differentialNetworkForExploitRun({ ...cfg, sandboxConfirmNetwork: "none" }, { network: "enabled" }), "none");
+  assert.equal(differentialNetworkForExploitRun({ ...cfg, confirmMode: false }, { network: "enabled" }), "none");
 });
 
 test("disclosure report only labels patch-blocking patterns after differential confirmation", () => {

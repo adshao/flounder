@@ -49,7 +49,7 @@ body {
   margin: 0;
   background: var(--canvas-subtle);
   color: var(--fg);
-  font: 13.5px/1.5 var(--sans);
+  font: 16px/1.5 var(--sans);
   letter-spacing: 0;
   -webkit-font-smoothing: antialiased;
   text-rendering: optimizeLegibility;
@@ -188,7 +188,7 @@ code, pre {
 
 .icon-btn,
 .btn {
-  min-height: 34px;
+  min-height: 40px;
   border-radius: 7px;
   border: 1px solid var(--border);
   background: var(--canvas);
@@ -203,8 +203,8 @@ code, pre {
 }
 
 .icon-btn {
-  min-width: 36px;
-  min-height: 36px;
+  min-width: 40px;
+  min-height: 40px;
   padding: 0;
   color: var(--fg-muted);
   border-color: transparent;
@@ -264,9 +264,9 @@ code, pre {
 }
 
 .btn.sm {
-  min-height: 28px;
-  padding: 3px 9px;
-  font-size: 12px;
+  min-height: 34px;
+  padding: 4px 10px;
+  font-size: 13px;
   box-shadow: none;
 }
 
@@ -4350,6 +4350,20 @@ small {
 
   .command-back {
     padding-top: 72px;
+  }
+}
+
+@media (pointer: coarse) {
+  #root button,
+  #root input:not([type="checkbox"]):not([type="radio"]),
+  #root summary,
+  #root select {
+    min-height: 44px;
+  }
+
+  #root button.icon-btn {
+    min-width: 44px;
+    height: auto;
   }
 }
 

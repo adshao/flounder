@@ -200,7 +200,7 @@ broadcast or write to live systems.
 The dashboard stores provider profiles:
 
 - provider id, such as `openai-codex`
-- model, such as `gpt-5.5`
+- model, such as `gpt-5.6-sol`
 - thinking level, such as `xhigh`
 - optional role defaults
 
@@ -208,7 +208,7 @@ Projects select a default provider profile and may override it per phase:
 prepare, map, dig, confirm. The selected daemon must authenticate every provider
 profile the project can use.
 
-Fresh stores seed starter profiles named `openai-codex · gpt-5.5 · xhigh` and
+Fresh stores seed starter profiles named `openai-codex · gpt-5.6-sol · xhigh` and
 `claude-code · opus 4.8 max`.
 
 ## REST API

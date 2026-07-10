@@ -136,6 +136,7 @@ export interface RoleModel {
 
 export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
 export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const DEFAULT_AUDIT_MODEL = "gpt-5.6-sol";
 
 export function flounderHomeDir(): string {
   return path.join(os.homedir(), ".flounder");
@@ -192,7 +193,7 @@ export function defaultConfig(): AuditorConfig {
     corpusPaths: [],
     outputDir: defaultOutputDir(),
     provider: "openai-codex",
-    auditModel: "gpt-5.5",
+    auditModel: DEFAULT_AUDIT_MODEL,
     maxTokens: 8000,
     thinkingLevel: "xhigh",
     projectContext: {},

@@ -110,6 +110,48 @@ test("sandbox execution options keep sealed runs offline except build warm-up", 
   assert.equal(sandboxNetworkForPurpose(cfg, "confirm"), "enabled");
 });
 
+test("network-enabled fetch tools run with clean config and protocol constraints", async () => {
+  const workspace = await tempDir("flounder-sandbox-clean-network-config-");
+  const bin = path.join(workspace, "bin");
+  const previousPath = process.env.PATH;
+  await mkdir(bin, { recursive: true });
+  const probe = `#!/bin/sh
+printf 'CURL_HOME=%s\\n' "$CURL_HOME"
+printf 'WGETRC=%s\\n' "$WGETRC"
+printf 'GIT_CONFIG_NOSYSTEM=%s\\n' "$GIT_CONFIG_NOSYSTEM"
+printf 'GIT_CONFIG_GLOBAL=%s\\n' "$GIT_CONFIG_GLOBAL"
+printf 'GIT_CONFIG_SYSTEM=%s\\n' "$GIT_CONFIG_SYSTEM"
+printf 'GIT_ALLOW_PROTOCOL=%s\\n' "$GIT_ALLOW_PROTOCOL"
+`;
+  try {
+    for (const tool of ["curl", "wget", "git"]) {
+      const executable = path.join(bin, tool);
+      await writeFile(executable, probe);
+      await chmod(executable, 0o755);
+    }
+    process.env.PATH = `${bin}${path.delimiter}${previousPath ?? ""}`;
+    const options = { backend: "host", image: "unused", allowHostFallback: true, network: "enabled" };
+    const curl = await runSandboxCommand({ program: "curl", args: ["https://example.com"] }, workspace, 4000, [], undefined, options);
+    assert.deepEqual(curl.command.args.slice(0, 5), ["--disable", "--proto", "=http,https", "--proto-redir", "=http,https"]);
+    assert.match(curl.stdout, /CURL_HOME=\/dev\/null/);
+
+    const wget = await runSandboxCommand({ program: "wget", args: ["https://example.com"] }, workspace, 4000, [], undefined, options);
+    assert.equal(wget.command.args[0], "--no-config");
+    assert.match(wget.stdout, /WGETRC=\/dev\/null/);
+
+    const git = await runSandboxCommand({ program: "git", args: ["clone", "https://example.com/repo"] }, workspace, 4000, [], undefined, options);
+    assert.deepEqual(git.command.args.slice(0, 6), ["-c", "core.hooksPath=/dev/null", "-c", "init.templateDir=", "-c", "credential.helper="]);
+    assert.match(git.stdout, /GIT_CONFIG_NOSYSTEM=1/);
+    assert.match(git.stdout, /GIT_CONFIG_GLOBAL=\/dev\/null/);
+    assert.match(git.stdout, /GIT_CONFIG_SYSTEM=\/dev\/null/);
+    assert.match(git.stdout, /GIT_ALLOW_PROTOCOL=https/);
+  } finally {
+    if (previousPath === undefined) delete process.env.PATH;
+    else process.env.PATH = previousPath;
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
 test("sandbox auto preference is limited to Apple silicon macOS", () => {
   assert.equal(autoPrefersAppleContainer("darwin", "arm64"), true);
   assert.equal(autoPrefersAppleContainer("darwin", "x64"), false);

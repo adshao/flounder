@@ -1,8 +1,10 @@
 import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
 import test from "node:test";
 import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { DatabaseSync } from "node:sqlite";
 import { toFindingRow } from "../dist/db/record.js";
 import { MetadataStore } from "../dist/db/store.js";
 
@@ -18,6 +20,19 @@ async function tempDb() {
 async function tempDbPath() {
   const dir = await mkdtemp(path.join(os.tmpdir(), "flounder-db-"));
   return { dir, dbPath: path.join(dir, "flounder.db") };
+}
+
+function waitForChild(child) {
+  return new Promise((resolve, reject) => {
+    let stderr = "";
+    child.stderr?.setEncoding("utf8");
+    child.stderr?.on("data", (chunk) => { stderr += chunk; });
+    child.once("error", reject);
+    child.once("exit", (code, signal) => {
+      if (code === 0) resolve();
+      else reject(new Error(`concurrent store process failed (${signal ?? code}): ${stderr}`));
+    });
+  });
 }
 
 test("store: project + run lifecycle is recorded and queryable", async () => {
@@ -303,6 +318,39 @@ test("store: startup migration repairs verify artifact refutations and report ru
   db.close();
 });
 
+test("store: concurrent startup serializes additive schema migrations", async () => {
+  const { dir, dbPath } = await tempDbPath();
+  const startFile = path.join(dir, "start");
+  const store = new MetadataStore(dbPath);
+  store.close();
+
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec("ALTER TABLE daemon DROP COLUMN workspace");
+  legacy.close();
+
+  const moduleUrl = new URL("../dist/db/store.js", import.meta.url).href;
+  const childSource = `
+    import { existsSync } from "node:fs";
+    import { MetadataStore } from ${JSON.stringify(moduleUrl)};
+    while (!existsSync(process.env.START_FILE)) {}
+    const store = new MetadataStore(process.env.DB_PATH);
+    store.close();
+  `;
+  const children = Array.from({ length: 8 }, () => spawn(
+    process.execPath,
+    ["--input-type=module", "--eval", childSource],
+    { env: { ...process.env, DB_PATH: dbPath, START_FILE: startFile }, stdio: ["ignore", "ignore", "pipe"] },
+  ));
+  const completions = children.map(waitForChild);
+  await writeFile(startFile, "go");
+  await Promise.all(completions);
+
+  const migrated = new DatabaseSync(dbPath, { readOnly: true });
+  const columns = migrated.prepare("PRAGMA table_info(daemon)").all().map((row) => row.name);
+  migrated.close();
+  assert.equal(columns.includes("workspace"), true);
+});
+
 test("store: finding aggregates + pagination + filter scale to many findings", async () => {
   const db = await tempDb();
   const projectId = db.upsertProject({ name: "big" });
@@ -392,6 +440,17 @@ test("store: daemon tokens + job queue (claim is FIFO and one-shot; cancel is ob
   assert.deepEqual(db.canceledJobIds(), []); // no longer running → not reported
   assert.equal(db.cancelJob(pinned), true); // queued/dispatched/running jobs are operator-cancelable
   assert.equal(db.getJob(pinned).status, "canceled");
+  db.close();
+});
+
+test("store: daemon terminal updates cannot overwrite an operator cancellation", async () => {
+  const db = await tempDb();
+  const { id: daemonId } = db.createDaemonToken("terminal-race");
+  const jobId = db.enqueueJob("proj", { verb: "run" }, daemonId);
+  assert.equal(db.claimJob(daemonId)?.id, jobId);
+  assert.equal(db.cancelJob(jobId), true);
+  assert.equal(db.setActiveJobTerminalStatus(jobId, "done"), false);
+  assert.equal(db.getJob(jobId).status, "canceled");
   db.close();
 });
 

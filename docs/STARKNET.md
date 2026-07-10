@@ -42,7 +42,7 @@ flounder run \
   --corpus <target>/README.md <target>/docs <target>/specs \
   --sandbox-image flounder-sandbox:cairo \
   --provider openai-codex \
-  --model gpt-5.5 \
+  --model gpt-5.6-sol \
   --thinking xhigh \
   --map-steps 60 --dig-steps 60
 ```

@@ -14,9 +14,9 @@
 
 ## Built-In Guardrails
 
-The pi extension installs a command safety policy for bash tool calls and direct user bash commands. It blocks commands that combine public live-network wording with exploit/broadcast/value-transfer actions.
+Model-generated commands run in a copied workspace through the configured sandbox backend. Sealed audit commands have no external network; open-world prepare/confirm commands receive egress only when they match an explicit read/fork/fetch capability such as a read-only HTTP request, HTTPS Git fetch, chain read, or local-fork test. Arbitrary model-selected programs remain network-sealed. Foundry FFI is disabled, target-source files are immutable to the model, and public-network broadcast remains denied.
 
-This guardrail is intentionally conservative, but it is not a complete sandbox. Treat it as a backstop, not as authorization to run risky commands.
+The command policy is defense in depth, not a substitute for process isolation. The default OCI/Apple-container backends enforce the filesystem and network boundary. The explicit `host --allow-host-execution` escape hatch cannot provide kernel-level isolation and is only for trusted deterministic fixtures, never untrusted dependencies or real model-generated exploit code.
 
 ## Reporting Vulnerabilities in This Project
 

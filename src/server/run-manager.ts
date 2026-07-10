@@ -5,6 +5,7 @@
 // the daemon (src/server/daemon.ts); this module holds no run state.
 
 import path from "node:path";
+import { existsSync, lstatSync, realpathSync } from "node:fs";
 import { defaultConfig, defaultOutputDir, THINKING_LEVELS, type AuditorConfig, type AuditNextAction } from "../config.js";
 import type { RunKind, ProviderRoles } from "../db/store.js";
 import type { SandboxBackend, SandboxNetworkMode } from "../security/sandbox.js";
@@ -141,9 +142,10 @@ export interface ReportFindingSpec {
 export function specToConfig(spec: LaunchSpec, out: string, workspace?: string): AuditorConfig {
   const cfg = defaultConfig();
   cfg.targetName = spec.target;
-  const root = spec.dir !== undefined ? resolveUnder(path.resolve(workspace ?? "."), spec.dir, "project dir") : undefined;
-  const resolveMat = (p: string): string => (root ? resolveUnder(root, p, "project material") : p);
-  const resolveSeed = (p: string): string => (root && !path.isAbsolute(p) ? resolveUnder(root, p, "append-map seed") : p);
+  const workspaceRoot = path.resolve(workspace ?? ".");
+  const root = spec.dir !== undefined ? resolveUnder(workspaceRoot, spec.dir, "project dir", workspaceRoot) : undefined;
+  const resolveMat = (p: string): string => (root ? resolveUnder(root, p, "project material", workspaceRoot) : p);
+  const resolveSeed = (p: string): string => (root && !path.isAbsolute(p) ? resolveUnder(root, p, "append-map seed", workspaceRoot) : p);
   cfg.sourcePaths = spec.sourcePaths.map(resolveMat);
   cfg.corpusPaths = (spec.corpusPaths ?? []).map(resolveMat);
   cfg.auditAppendMapSeedPaths = (spec.appendMapSeedPaths ?? []).map(resolveSeed);
@@ -200,7 +202,7 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   return cfg;
 }
 
-function resolveUnder(root: string, input: string, label: string): string {
+function resolveUnder(root: string, input: string, label: string, boundary = root): string {
   if (path.isAbsolute(input)) throw new Error(`Unsafe ${label}: absolute paths are not allowed in project-relative launch specs.`);
   const normalized = path.normalize(input);
   if (!normalized || normalized === ".." || normalized.startsWith(`..${path.sep}`)) {
@@ -211,7 +213,33 @@ function resolveUnder(root: string, input: string, label: string): string {
   if (target !== base && !target.startsWith(`${base}${path.sep}`)) {
     throw new Error(`Unsafe ${label}: ${input}`);
   }
+  assertRealPathContained(boundary, target, label, input);
   return target;
+}
+
+/**
+ * Lexical containment is insufficient when a project or material path crosses a
+ * symlink. Resolve the nearest existing ancestor and keep the effective path under
+ * the daemon workspace. Exact material symlinks are rejected even when they point
+ * back inside the workspace so the authorized root has one unambiguous identity.
+ */
+function assertRealPathContained(boundary: string, target: string, label: string, input: string): void {
+  if (!existsSync(boundary)) throw new Error(`Unsafe ${label}: daemon workspace does not exist.`);
+  const boundaryReal = realpathSync(boundary);
+  let cursor = target;
+  while (!existsSync(cursor)) {
+    const parent = path.dirname(cursor);
+    if (parent === cursor) return;
+    cursor = parent;
+  }
+  if (cursor === target && lstatSync(target).isSymbolicLink()) {
+    throw new Error(`Unsafe ${label}: ${input} resolves through a symbolic link.`);
+  }
+  const cursorReal = realpathSync(cursor);
+  const relative = path.relative(boundaryReal, cursorReal);
+  if (relative === ".." || relative.startsWith(`..${path.sep}`) || path.isAbsolute(relative)) {
+    throw new Error(`Unsafe ${label}: ${input} resolves outside the daemon workspace.`);
+  }
 }
 
 // Translate a launch spec into `flounder` CLI argv — NOT used to run (the manager runs in-process),

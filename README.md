@@ -47,7 +47,7 @@ The installed skill should trigger from requests about Flounder audits, public-s
 - **Autonomous audit loop.** `flounder run <clue>` can execute prepare -> map -> dig -> synthesize -> verify -> confirm -> report as a tracked workflow. Prepare can turn a transaction, address, project, repository, or link into staged source and materials; map inventories the audit surface; dig writes and runs proof tests; synthesize composes cross-scope candidates; verify confirms or refutes candidates by local execution; confirm reproduces findings on the real target; report packages reproduced bugs into Markdown reports. The operator does not have to build a custom scenario pipeline for each target.
 - **Framework-agnostic reasoning.** Flounder does not encode a Solidity/EVM, ZK/proof-system, Rust, Go, JavaScript, protocol, or crypto-specific audit strategy. Source, corpus, and optional profiles are inputs; the audit strategy comes from the model. As coding models improve, the audit capability can improve without rewriting the framework around every new stack.
 - **Execution-grounded findings.** A finding is not real because the model says it is plausible. It must cite a passing local command that exercises the vulnerable path. Stronger findings also pass differential confirmation, independent refutation, and faithful-PoC appeal checks.
-- **Blind discovery plus open-world reproduction.** Discovery runs network-sealed, so findings are derived from the target material rather than copied from disclosures. `flounder confirm` then opens the network only for white-hat reproduction, novelty checks, and submit/no-submit decision sheets.
+- **Blind discovery plus capability-scoped reproduction.** Discovery runs network-sealed, so findings are derived from the target material rather than copied from disclosures. During `flounder confirm`, only explicit read/fork/fetch commands receive egress for white-hat reproduction and novelty checks; arbitrary model code remains network-sealed.
 - **Sandboxed execution boundary.** Model-generated code, PoCs, dependency installs, and local tests run in a copied workspace, not directly in the host checkout. The default OCI backend refuses silent host execution, bind-mounts only the copied workspace and package cache, drops Linux capabilities, uses `no-new-privileges`, read-only root filesystems and tmpfs temp dirs, applies process/memory/CPU limits when configured, and disables network for sealed audit commands. This reduces the blast radius of malicious dependencies, unsafe PoCs, and model mistakes before they can pollute the host machine.
 - **Multiple audit scenarios.** Use the same product for blind capability audits, incident investigation from suspicious on-chain evidence, open-world bug-bounty audits, targeted follow-up on suspected findings, and disclosure preparation. Whether Flounder prepares the target itself or you provide source paths is an input path, not the scenario.
 - **Strong fit for Solidity and ZK.** Solidity/EVM targets work well because local forks and Foundry/Hardhat tests can prove real on-chain effects. ZK/proof-system targets work well because local prover and constraint harnesses can turn subtle missing constraints into executable counterexamples. These are high-signal examples, not hard-coded limits.
@@ -151,7 +151,7 @@ the same provider is already logged in through pi at `~/.pi/agent/auth.json`,
 Flounder imports that provider entry into its daemon-local auth file on
 `login`/`check`.
 
-Then create a project in the dashboard, describe the audit task in the task/clue box, choose its execution daemon and default provider profile, and start a run. The project directory defaults to the project UUID under the daemon workspace, so it stays stable even if the display name changes. A fresh install seeds starter profiles for `openai-codex · gpt-5.5 · xhigh` and `claude-code · opus 4.8 max`; each selected daemon still needs local auth for the providers it will run. The CLI can drive the same control plane:
+Then create a project in the dashboard, describe the audit task in the task/clue box, choose its execution daemon and default provider profile, and start a run. The project directory defaults to the project UUID under the daemon workspace, so it stays stable even if the display name changes. A fresh install seeds starter profiles for `openai-codex · gpt-5.6-sol · xhigh` and `claude-code · opus 4.8 max`; each selected daemon still needs local auth for the providers it will run. Existing projects keep their explicitly selected profile until an operator changes it. The CLI can drive the same control plane:
 
 ```bash
 # Recommended default: let Flounder prepare the target, then audit, confirm, and report.
@@ -299,7 +299,7 @@ flounder run --source ./src --build-root . --sandbox-image your-audit-image:late
 
 Image construction is part of the trusted execution base. The audit model may report missing toolchains or propose an image recipe, but it should not receive unrestricted `docker build` / `docker pull` capability inside the audit loop. A safe automation path is to generate a reviewable target-specific image plan, build it in a controlled daemon/operator step, then pin and reuse that image by name or digest.
 
-For trusted local smoke tests only, use `--sandbox-backend host --allow-host-execution` or set `FLOUNDER_ALLOW_HOST_EXECUTION=1`. Host mode still uses the copied workspace plus isolated `HOME` and package-cache paths, but it does not provide kernel-level filesystem or network isolation and should not be used for untrusted targets, malicious dependencies, or real model-generated exploit code.
+For trusted local smoke tests only, use `--sandbox-backend host --allow-host-execution` or set `FLOUNDER_ALLOW_HOST_EXECUTION=1`. Host mode still uses the copied workspace plus isolated `HOME` and package-cache paths, but it cannot enforce command-level network sealing or provide kernel-level filesystem isolation and should not be used for untrusted targets, malicious dependencies, or real model-generated exploit code.
 
 ## Use It Yourself
 
@@ -403,9 +403,12 @@ Flounder supports white-hat audits of publicly available source, your own code, 
 
 - [Usage](docs/USAGE.md): commands, sandbox setup, dashboard, API, materials, providers, daemon setup, and outputs.
 - [Architecture](docs/ARCHITECTURE.md): thin-agent design, sandbox boundary, confirmation boundary, control/execution split, and tracking model.
+- [Product validation](docs/VALIDATION.md): current release-readiness evidence, limits, and remaining validation work.
+- [Capability expansion plan](docs/PRODUCT_CAPABILITY_PLAN.md): accepted design direction for future batch, evidence, and target-preparation capabilities.
 - [Agent skill](skills/flounder/SKILL.md): Codex / Claude Code operating manual.
 - [Domain profiles](configs/README.md): optional answer-free context packs. They are not product modes and are off by default.
 - [Optional Solidity/EVM notes](docs/SOLIDITY.md), [Cairo/Starknet notes](docs/STARKNET.md), [TON/FunC notes](docs/TON.md), and [ZK constraint profile](configs/zk-constraint-audit.default.json): high-signal context examples and verification-environment setup, not Flounder's core limit.
+- [Reports](reports/README.md): public-safe incident investigations and vulnerability reports produced with Flounder.
 
 ## Contributing
 

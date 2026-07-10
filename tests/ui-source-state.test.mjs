@@ -3,14 +3,14 @@ import { readFileSync } from "node:fs";
 import { test } from "node:test";
 import ts from "typescript";
 
-async function loadDomainModule() {
-  const source = readFileSync(new URL("../src/server/ui/src/domain.ts", import.meta.url), "utf8");
+async function loadTsModule(relativePath) {
+  const source = readFileSync(new URL(relativePath, import.meta.url), "utf8");
   const compiled = ts.transpileModule(source, {
     compilerOptions: {
       module: ts.ModuleKind.ES2022,
       target: ts.ScriptTarget.ES2022,
     },
-    fileName: "domain.ts",
+    fileName: relativePath,
     reportDiagnostics: true,
   });
   const diagnostics = compiled.diagnostics?.filter((entry) => entry.category === ts.DiagnosticCategory.Error) ?? [];
@@ -18,7 +18,17 @@ async function loadDomainModule() {
   return import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`);
 }
 
-const { bugBountyEngagementLabel, contestReviewState, phaseState, projectSourceState, runProgress, sortConfirmDecisionsForSubmission } = await loadDomainModule();
+const { bugBountyEngagementLabel, contestReviewState, phaseState, projectSourceState, runProgress, sortConfirmDecisionsForSubmission } = await loadTsModule("../src/server/ui/src/domain.ts");
+const { nextDialogFocusIndex } = await loadTsModule("../src/server/ui/src/dialog-focus.ts");
+
+test("ui: modal focus traversal wraps in both directions", () => {
+  assert.equal(nextDialogFocusIndex(0, 3, false), 1);
+  assert.equal(nextDialogFocusIndex(2, 3, false), 0);
+  assert.equal(nextDialogFocusIndex(0, 3, true), 2);
+  assert.equal(nextDialogFocusIndex(-1, 3, false), 0);
+  assert.equal(nextDialogFocusIndex(-1, 3, true), 2);
+  assert.equal(nextDialogFocusIndex(0, 0, false), -1);
+});
 
 test("ui: source setup is ready when configured source paths exist", () => {
   assert.deepEqual(projectSourceState(null, ["src"]), { kind: "configured", ok: true });

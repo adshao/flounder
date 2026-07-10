@@ -1,4 +1,4 @@
-import type { ConfirmDecision, ContestStrategy, Coverage, EngagementConfig, FindingRow, PhaseConfig, ProjectDetail, RunRow, ScopeRow } from "./api";
+import type { ConfirmDecision, ContestStrategy, Coverage, EngagementConfig, FindingRow, PhaseConfig, ProjectDetail, ProjectSnapshot, RunRow, ScopeRow } from "./api";
 
 export const STATUSES = ["confirmed-differential", "confirmed-executable", "confirmed-source", "needs-evidence", "suspected", "discharged", "refuted"] as const;
 export const TRACKING = ["open", "triaging", "submitted", "accepted", "fixed", "duplicate", "rejected", "ignored"] as const;
@@ -48,16 +48,18 @@ export interface PhaseInfo {
 
 export type PhaseState = Record<(typeof PHASES)[number], PhaseInfo>;
 
-function needsRealTargetConfirmation(detail: ProjectDetail): boolean {
-  if (contestStrategy(projectConfig(detail).cfg).skipRealTargetConfirm) return false;
-  return detail.prepareSummary?.realTarget?.requiresConfirmation !== false;
+export function needsRealTargetConfirmation(detail: ProjectDetail | ProjectSnapshot | null | undefined): boolean {
+  if (!detail) return true;
+  const cfg = "project" in detail ? projectConfig(detail).cfg : detail.config ?? {};
+  if (contestStrategy(cfg).skipRealTargetConfirm) return false;
+  return ("prepareSummary" in detail ? detail.prepareSummary : undefined)?.realTarget?.requiresConfirmation !== false;
 }
 
-function isExecutionConfirmedFinding(finding: FindingRow): boolean {
+export function isExecutionConfirmedFinding(finding: FindingRow): boolean {
   return finding.status === "confirmed-executable" || finding.status === "confirmed-differential";
 }
 
-function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
+export function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
   const members = parseJsonArray(decision.members_json);
   const keys = new Set<string>();
   const add = (value: string) => {
@@ -75,6 +77,63 @@ function confirmDecisionMemberKeys(decision: ConfirmDecision): string[] {
     if (embedded) add(embedded);
   }
   return [...keys];
+}
+
+export function activeFindings(rows: FindingRow[] | undefined): FindingRow[] {
+  return (rows ?? []).filter((finding) => (finding.tracking_status ?? "open") !== "ignored");
+}
+
+export function pendingConfirmFindings(rows: FindingRow[] | undefined, requiresConfirmation = true, decisions?: ConfirmDecision[]): FindingRow[] {
+  if (!requiresConfirmation) return [];
+  const decidedFindingKeys = new Set((decisions ?? []).flatMap(confirmDecisionMemberKeys));
+  return activeFindings(rows).filter((finding) =>
+    isExecutionConfirmedFinding(finding)
+    && !finding.confirm_status
+    && !(finding.finding_key && decidedFindingKeys.has(finding.finding_key.toLowerCase()))
+  );
+}
+
+export function localVerifiedFindings(rows: FindingRow[] | undefined): FindingRow[] {
+  return activeFindings(rows).filter(isExecutionConfirmedFinding);
+}
+
+export function pendingVerifyFindings(rows: FindingRow[] | undefined): FindingRow[] {
+  return topCandidateFindings(activeFindings(rows).filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source"));
+}
+
+export function rawPendingVerifyCount(rows: FindingRow[] | undefined): number {
+  return activeFindings(rows).filter((finding) => finding.status === "suspected" || finding.status === "confirmed-source").length;
+}
+
+export function reportableFindings(rows: FindingRow[] | undefined, requiresConfirmation = true): FindingRow[] {
+  return activeFindings(rows).filter((finding) => requiresConfirmation ? finding.confirm_status === "reproduced" : isExecutionConfirmedFinding(finding));
+}
+
+export function pendingFormalReports(rows: FindingRow[] | undefined, requiresConfirmation = true): FindingRow[] {
+  return reportableFindings(rows, requiresConfirmation).filter((finding) => !finding.has_report);
+}
+
+export function reportableDecisions(decisions: ConfirmDecision[] | undefined): ConfirmDecision[] {
+  return sortConfirmDecisionsForSubmission(decisions).filter(isSubmissionReadyDecision);
+}
+
+export function pendingDecisionReports(decisions: ConfirmDecision[] | undefined): ConfirmDecision[] {
+  return reportableDecisions(decisions).filter((decision) => !decision.has_report);
+}
+
+function severityScore(finding: FindingRow): number {
+  const severity = SEV_RANK[finding.severity ?? ""] ?? 0;
+  const status = finding.status.startsWith("confirmed") ? 2 : finding.status === "suspected" ? 1 : 0;
+  return status * 100 + severity * 10 + (finding.confidence ?? 0);
+}
+
+export function topCandidateFindings(rows: FindingRow[] | undefined): FindingRow[] {
+  const ranked = rankCandidates(rows);
+  if (ranked.length) return ranked.slice(0, 8);
+  return [...(rows ?? [])]
+    .filter((finding) => finding.status.startsWith("confirmed") || finding.status === "suspected")
+    .sort((a, b) => severityScore(b) - severityScore(a))
+    .slice(0, 8);
 }
 
 function parseJsonArray(raw?: string | null): unknown[] {

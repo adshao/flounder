@@ -230,6 +230,8 @@ test("daemon: full job handoff — enqueue → claim → run start → ingest �
     assert.equal(claim.job.spec.verb, "run");
     assert.equal((await asDaemon(base, token, "POST", "/api/daemon/claim").then(j)).job, undefined); // queue drained
 
+    const invalidStart = await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId: launch.jobId, project: "acme", kind: "arbitrary", runDir: "/tmp/acme-run-invalid" });
+    assert.equal(invalidStart.status, 400);
     const start = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId: launch.jobId, project: "acme", kind: "run", runDir: "/tmp/acme-run-1", budgets: { model: "m" } }));
     assert.equal(typeof start.runId, "number");
     const runId = start.runId;
@@ -261,6 +263,45 @@ test("daemon: full job handoff — enqueue → claim → run start → ingest �
     const finished = await j(await ui(base, "GET", `/api/runs/${runId}`));
     assert.equal(finished.run.status, "done");
     assert.equal(finished.run.findings_total, 1);
+    const staleTerminal = await j(await asDaemon(base, token, "POST", `/api/daemon/jobs/${launch.jobId}/status`, { status: "error", error: "late update" }));
+    assert.equal(staleTerminal.stale, true);
+    assert.equal((await j(await ui(base, "GET", `/api/jobs/${launch.jobId}`))).job.status, "done");
+  });
+});
+
+test("daemon: a valid token cannot read or mutate another daemon's job and run", async () => {
+  await withServerAndToken(async ({ base, token: ownerToken, out }) => {
+    const seed = MetadataStore.openForOutput(out);
+    const attacker = seed.createDaemonToken("attacker-daemon");
+    seed.upsertProject({ name: "owned-project" });
+    seed.close();
+
+    const ownerRegistration = await j(await asDaemon(base, ownerToken, "POST", "/api/daemon/register", { name: "owner" }));
+    await asDaemon(base, attacker.token, "POST", "/api/daemon/register", { name: "attacker" });
+    const store = MetadataStore.openForOutput(out);
+    const jobId = store.enqueueJob("owned-project", { verb: "run", target: "owned-project", sourcePaths: ["."] }, ownerRegistration.daemonId);
+    store.close();
+
+    const claim = await j(await asDaemon(base, ownerToken, "POST", "/api/daemon/claim"));
+    assert.equal(claim.job.id, jobId);
+    const started = await j(await asDaemon(base, ownerToken, "POST", "/api/daemon/runs", {
+      jobId,
+      project: "owned-project",
+      kind: "run",
+      runDir: path.join(out, "owned-run"),
+    }));
+
+    assert.equal((await asDaemon(base, attacker.token, "PATCH", `/api/daemon/runs/${started.runId}`, { finish: { status: "done" } })).status, 403);
+    assert.equal((await asDaemon(base, attacker.token, "POST", `/api/daemon/runs/${started.runId}/activity`, { events: [{ kind: "forged" }] })).status, 403);
+    assert.equal((await asDaemon(base, attacker.token, "POST", "/api/daemon/pipeline-worklist", { jobId, project: "owned-project", phase: "verify" })).status, 403);
+    assert.equal((await asDaemon(base, attacker.token, "POST", `/api/daemon/jobs/${jobId}/status`, { status: "error" })).status, 403);
+
+    const after = MetadataStore.openForOutput(out);
+    assert.equal(after.getRun(started.runId).status, "running");
+    assert.equal(after.getJob(jobId).status, "running");
+    after.close();
+
+    assert.equal((await asDaemon(base, ownerToken, "PATCH", `/api/daemon/runs/${started.runId}`, { finish: { status: "running" } })).status, 400);
   });
 });
 
@@ -305,6 +346,10 @@ test("daemon: activity POSTs surface on the run's live SSE log", async () => {
     const { jobId } = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true }));
     await asDaemon(base, token, "POST", "/api/daemon/claim");
     const { runId } = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId, project: "p", kind: "run", runDir: "/tmp/p-1", budgets: {} }));
+
+    // A malformed batch is rejected atomically; its valid prefix must not leak into the bus.
+    const malformed = await asDaemon(base, token, "POST", `/api/daemon/runs/${runId}/activity`, { events: [{ kind: "poison-prefix" }, { delta: "missing kind" }] });
+    assert.equal(malformed.status, 400);
 
     // Daemon pushes a batch of token-level activity (as the live audit would).
     await asDaemon(base, token, "POST", `/api/daemon/runs/${runId}/activity`, { events: [{ kind: "thinking_delta", delta: "weighing the invariant" }, { kind: "step", tool: "bash", step: 1 }] });

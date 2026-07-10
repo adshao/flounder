@@ -15,7 +15,11 @@ answer-bearing material were not supplied as corpus.
 - Control plane reachable through the Flounder UI/API.
 - Three execution daemons were online.
 - No validation jobs were active when this report was written.
-- The default provider profile was `openai-codex · gpt-5.5 · xhigh`; daemon-local auth was required before live model work.
+- At the 2026-06-23 validation snapshot, the default provider profile was
+  `openai-codex · gpt-5.5 · xhigh`; daemon-local auth was required before live
+  model work. Fresh stores now default to `openai-codex · gpt-5.6-sol · xhigh`;
+  the validation results below remain the historical evidence from that dated
+  snapshot rather than a claim that they were rerun with the newer model.
 - Current source/material state is versioned by Prepare and Map boundaries; old
   findings and scopes remain inspectable as historical data but no longer count
   in the current project view after a newer Prepare or Map.

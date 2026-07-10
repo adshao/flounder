@@ -215,7 +215,7 @@ For repository development or local builds, use Node 24 LTS from `.nvmrc` /
 
 5. Create or reuse a provider profile in Settings. A provider profile selects
    provider, model, and thinking level. Fresh stores seed `openai-codex ·
-   gpt-5.5 · xhigh` and `claude-code · opus 4.8 max`; the selected daemon still
+   gpt-5.6-sol · xhigh` and `claude-code · opus 4.8 max`; the selected daemon still
    needs local auth for every provider the project can use. A project can
    override the profile per phase: prepare, map, dig, confirm.
 
@@ -332,7 +332,7 @@ prerequisite for local sealed audit.
    - local source/build/corpus paths if available;
    - a task/clue naming the project, repo, bounty page, deployment, or package;
    - an online daemon;
-   - a provider profile such as `openai-codex · gpt-5.5 · xhigh`.
+   - a provider profile such as `openai-codex · gpt-5.6-sol · xhigh`.
 3. Leave **Run after create** checked when the user wants immediate execution.
 4. Monitor `GET /api/runs/:id/log` and `GET /api/projects/:uuid`.
 5. Treat `limited` prepare as audit-ready unless it has blocking issues; carry

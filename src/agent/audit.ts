@@ -1,5 +1,6 @@
 import path from "node:path";
 import { readFileSync } from "node:fs";
+import { createHash } from "node:crypto";
 import { withRole, type AuditorConfig } from "../config.js";
 import { deriveScopeNote } from "../scope-note.js";
 import { loadCorpus, loadSource } from "../ingest/source.js";
@@ -468,7 +469,7 @@ export async function runAudit(
         recorder.scopes(scopeInventory);
         const digT0 = Date.now();
         try {
-          const ws = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, `audit/dig-${safeScopeDir(scope.id)}`);
+          const ws = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, `audit/dig-${scopeWorkspaceKey(scope.id)}`);
           const digSession = newSession();
           digSession.workspace = ws;
           digSession.baselineFiles = await listWorkspaceFiles(ws.absolute);
@@ -492,7 +493,7 @@ export async function runAudit(
           for (const finding of unioned) {
             if (finding.commandRunId) finding.commandRunId = `${scope.id}:${finding.commandRunId}`;
           }
-          const scopedScratchFiles = [...digSession.scratchFiles.entries()].map(([scratchPath, content]) => [`dig-${safeScopeDir(scope.id)}/${scratchPath}`, content] as [string, string]);
+          const scopedScratchFiles = [...digSession.scratchFiles.entries()].map(([scratchPath, content]) => [`dig-${scopeWorkspaceKey(scope.id)}/${scratchPath}`, content] as [string, string]);
           scope.status = "audited";
           scope.digSeconds = Math.max(1, Math.round((Date.now() - digT0) / 1000));
           await logger.event("audit_dig_done", { scope: scope.id, samples, findings: unioned.length, concurrent: true, digSeconds: scope.digSeconds });
@@ -1295,9 +1296,13 @@ async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item
   return results;
 }
 
-/** Sanitize a scope id into a safe per-dig workspace directory name. */
-function safeScopeDir(id: string): string {
-  return id.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "").slice(0, 48) || "scope";
+/** Sanitize a scope id without allowing normalization/truncation collisions. */
+export function scopeWorkspaceKey(id: string): string {
+  const normalized = id.replace(/[^a-zA-Z0-9_.-]+/g, "_").replace(/^_+|_+$/g, "");
+  if (normalized === id && normalized.length <= 48 && normalized.length > 0) return normalized;
+  const prefix = normalized.slice(0, 32) || "scope";
+  const digest = createHash("sha256").update(id).digest("hex").slice(0, 12);
+  return `${prefix}-${digest}`;
 }
 
 function mergeResourceRequests(existing: ResourceRequest[], next: ResourceRequest[]): ResourceRequest[] {

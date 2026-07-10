@@ -34,7 +34,7 @@ flounder run \
   --corpus <target>/README.md <target>/docs <target>/audits \
   --sandbox-image flounder-sandbox:ton \
   --provider openai-codex \
-  --model gpt-5.5 \
+  --model gpt-5.6-sol \
   --thinking xhigh
 ```
 

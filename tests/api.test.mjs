@@ -965,6 +965,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const store = MetadataStore.openForOutput(out);
     let token;
     let suspectedId;
+    let jobId;
     try {
       const daemon = store.createDaemonToken("pipeline-verify-daemon");
       token = daemon.token;
@@ -979,6 +980,9 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
           confidence: 0.82,
         },
       ], "synthesis");
+      jobId = store.enqueueJob("pipeline-verify-worklist", { verb: "run", pipeline: true }, daemon.id);
+      assert.equal(store.claimJob(daemon.id)?.id, jobId);
+      store.setJobRun(jobId, runId);
       suspectedId = Number(store.listFindings(created.id)[0].id);
       store.upsertFindings(created.id, runId, [
         {
@@ -1041,7 +1045,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const verify = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "verify" }),
+      body: JSON.stringify({ jobId, project: "pipeline-verify-worklist", phase: "verify" }),
     }));
     assert.equal(verify.phase, "verify");
     assert.equal(verify.verifyFindings.length, 1);
@@ -1052,7 +1056,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const restartVerify = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "verify", verifyFromStart: true }),
+      body: JSON.stringify({ jobId, project: "pipeline-verify-worklist", phase: "verify", verifyFromStart: true }),
     }));
     assert.equal(restartVerify.phase, "verify");
     assert.equal(restartVerify.verifyFromStart, true);
@@ -1061,7 +1065,7 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     const confirm = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",
       headers: authHeaders,
-      body: JSON.stringify({ project: "pipeline-verify-worklist", phase: "confirm" }),
+      body: JSON.stringify({ jobId, project: "pipeline-verify-worklist", phase: "confirm" }),
     }));
     assert.ok(confirm.confirmKeys.includes("confirmed-bug"));
     assert.ok(confirm.confirmKeys.includes("kgateblocked"), "confirm worklist retries reproduced needs-human decisions whose submission gates remain open");
@@ -3561,6 +3565,35 @@ test("api: stale auditing scopes recover when no job is active", async () => {
   });
 });
 
+test("api: one corrupt historical scope inventory does not break project listings", async () => {
+  await withServer(async (base, out) => {
+    const json = (response) => response.json();
+    const post = (route, body) => fetch(base + route, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const damaged = await json(await post("/api/projects", { name: "scope-corrupt", sourcePaths: ["./src"] }));
+    const healthy = await json(await post("/api/projects", { name: "scope-healthy", sourcePaths: ["./src"] }));
+    const inventoryDir = projectHistoryDir({ outputDir: out, targetName: damaged.name });
+    await mkdir(inventoryDir, { recursive: true });
+    await writeFile(path.join(inventoryDir, "scopes.json"), "[{\"id\":\"truncated\"");
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(damaged.id, [{ scopeId: "stale", title: "Stale scope", status: "auditing", score: 10 }]);
+      store.upsertScopes(healthy.id, [{ scopeId: "ready", title: "Ready scope", status: "pending", score: 9 }]);
+    } finally {
+      store.close();
+    }
+
+    const response = await fetch(base + "/api/projects");
+    assert.equal(response.status, 200);
+    const list = await json(response);
+    assert.ok(list.projects.some((project) => project.uuid === damaged.uuid));
+    assert.ok(list.projects.some((project) => project.uuid === healthy.uuid));
+    assert.equal((await fetch(base + `/api/projects/${healthy.uuid}`)).status, 200);
+    assert.equal((await fetch(base + `/api/projects/${damaged.uuid}`)).status, 200);
+    await assert.rejects(loadScopeInventory(inventoryDir), /Could not load scope inventory/);
+  });
+});
+
 test("api: active jobs keep auditing scopes in flight", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
@@ -4511,10 +4544,10 @@ test("api: provider profiles — seed + CRUD + per-phase roles; pi discovery", a
     // a fresh store is seeded with starter profiles
     const seeded = (await json(await fetch(base + "/api/providers"))).providers;
     assert.ok(seeded.length >= 1 && seeded.some((p) => p.provider === "openai-codex"), "expected seeded providers");
-    const codexDefault = seeded.find((p) => p.name === "openai-codex · gpt-5.5 · xhigh");
-    assert.ok(codexDefault, "expected codex gpt-5.5 xhigh starter profile");
+    const codexDefault = seeded.find((p) => p.name === "openai-codex · gpt-5.6-sol · xhigh");
+    assert.ok(codexDefault, "expected codex gpt-5.6-sol xhigh starter profile");
     assert.equal(codexDefault.provider, "openai-codex");
-    assert.equal(codexDefault.model, "gpt-5.5");
+    assert.equal(codexDefault.model, "gpt-5.6-sol");
     assert.equal(codexDefault.thinking, "xhigh");
     const opusMax = seeded.find((p) => p.name === "claude-code · opus 4.8 max");
     assert.ok(opusMax, "expected opus 4.8 max starter profile");
@@ -4528,8 +4561,9 @@ test("api: provider profiles — seed + CRUD + per-phase roles; pi discovery", a
     const discoveredModels = (await json(await fetch(base + "/api/pi/models/openai-codex"))).models;
     assert.ok(discoveredModels.length >= 1, "expected pi model discovery");
     assert.ok(discoveredModels.every((m) => Array.isArray(m.thinkingLevels) && m.thinkingLevels.length >= 1));
-    const gpt55 = discoveredModels.find((m) => m.id === "gpt-5.5");
-    if (gpt55) assert.ok(gpt55.thinkingLevels.includes("xhigh"), "gpt-5.5 should expose xhigh through pi metadata");
+    const gpt56sol = discoveredModels.find((m) => m.id === "gpt-5.6-sol");
+    assert.ok(gpt56sol, "the pinned pi runtime must expose the default gpt-5.6-sol model");
+    assert.ok(gpt56sol.thinkingLevels.includes("xhigh"), "gpt-5.6-sol should expose xhigh through pi metadata");
 
     // create with a per-phase override (map cheaper than dig), then read it back
     const created = await json(await post("/api/providers", { name: "prof-x", provider: "openai-codex", model: "gpt-5.5", thinking: "high", roles: { map: { thinking: "low" } } }));

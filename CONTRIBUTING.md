@@ -37,11 +37,13 @@ npm run hooks:install
 
 ## Product Direction
 
-Flounder is an autonomous white-hat security auditor. The product should stay centered on the prepare -> map -> dig -> confirm -> report workflow:
+Flounder is an autonomous white-hat security auditor. The product should stay centered on the prepare -> map -> dig -> synthesize -> verify -> confirm -> report workflow:
 
 - prepare authorized source, corpus, dependency closure, and deployment-match evidence;
 - map the audit surface without producing findings;
 - dig selected scopes with local proof tests;
+- synthesize cross-scope candidates without bypassing the evidence gate;
+- verify suspected and synthesized candidates by local execution;
 - confirm reproduced findings against real-world ground truth under the white-hat no-broadcast policy;
 - report reproduced or source-provided locally confirmed bugs as private Markdown packages.
 

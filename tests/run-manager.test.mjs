@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdtemp } from "node:fs/promises";
+import { mkdir, mkdtemp, rm, symlink } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { buildArgs, specToConfig, ActivityBus } from "../dist/server/run-manager.js";
@@ -116,10 +116,10 @@ test("buildArgs/specToConfig: append-map can carry extra seed inventories", () =
   const cfg = specToConfig(
     { verb: "map", target: "p", dir: "proj", sourcePaths: ["src"], appendMap: true, appendMapSeedPaths: ["/old/audit_scopes.json", "local/scopes.json"] },
     "runs",
-    "/ws",
+    os.tmpdir(),
   );
   assert.equal(cfg.auditAppendMap, true);
-  assert.deepEqual(cfg.auditAppendMapSeedPaths, ["/old/audit_scopes.json", path.resolve("/ws/proj/local/scopes.json")]);
+  assert.deepEqual(cfg.auditAppendMapSeedPaths, ["/old/audit_scopes.json", path.resolve(os.tmpdir(), "proj/local/scopes.json")]);
 });
 
 test("buildArgs: confirm without a run dir is rejected", () => {
@@ -203,27 +203,56 @@ test("specToConfig: a project dir + relative materials resolve under the daemon 
   const cfg = specToConfig(
     { verb: "run", target: "p", dir: "myproj", sourcePaths: ["src", "lib"], buildRoot: ".", corpusPaths: ["docs/specs"] },
     "runs",
-    "/ws",
+    os.tmpdir(),
   );
-  assert.equal(cfg.sourcePaths[0], path.resolve("/ws/myproj/src"));
-  assert.equal(cfg.sourcePaths[1], path.resolve("/ws/myproj/lib"));
-  assert.equal(cfg.buildRoot, path.resolve("/ws/myproj")); // "." resolves to the project root
-  assert.equal(cfg.corpusPaths[0], path.resolve("/ws/myproj/docs/specs"));
+  assert.equal(cfg.sourcePaths[0], path.resolve(os.tmpdir(), "myproj/src"));
+  assert.equal(cfg.sourcePaths[1], path.resolve(os.tmpdir(), "myproj/lib"));
+  assert.equal(cfg.buildRoot, path.resolve(os.tmpdir(), "myproj")); // "." resolves to the project root
+  assert.equal(cfg.corpusPaths[0], path.resolve(os.tmpdir(), "myproj/docs/specs"));
 });
 
 test("specToConfig: project-relative specs cannot escape the daemon workspace", () => {
   assert.throws(
-    () => specToConfig({ verb: "run", target: "p", dir: "../outside", sourcePaths: ["src"] }, "runs", "/ws"),
+    () => specToConfig({ verb: "run", target: "p", dir: "p", sourcePaths: ["src"] }, "runs", path.join(os.tmpdir(), `flounder-missing-workspace-${process.pid}-${Date.now()}`)),
+    /daemon workspace does not exist/,
+  );
+  assert.throws(
+    () => specToConfig({ verb: "run", target: "p", dir: "../outside", sourcePaths: ["src"] }, "runs", os.tmpdir()),
     /Unsafe project dir/,
   );
   assert.throws(
-    () => specToConfig({ verb: "run", target: "p", dir: "p", sourcePaths: ["../secret"] }, "runs", "/ws"),
+    () => specToConfig({ verb: "run", target: "p", dir: "p", sourcePaths: ["../secret"] }, "runs", os.tmpdir()),
     /Unsafe project material/,
   );
   assert.throws(
-    () => specToConfig({ verb: "run", target: "p", dir: "p", sourcePaths: ["/abs/secret"] }, "runs", "/ws"),
+    () => specToConfig({ verb: "run", target: "p", dir: "p", sourcePaths: ["/abs/secret"] }, "runs", os.tmpdir()),
     /absolute paths are not allowed/,
   );
+});
+
+test("specToConfig: real paths cannot escape through project or material symlinks", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "flounder-spec-realpath-"));
+  try {
+    const workspace = path.join(root, "workspace");
+    const outside = path.join(root, "outside");
+    await mkdir(workspace);
+    await mkdir(outside);
+    await symlink(outside, path.join(workspace, "linked-project"), "dir");
+    assert.throws(
+      () => specToConfig({ verb: "run", target: "p", dir: "linked-project", sourcePaths: ["."] }, "runs", workspace),
+      /symbolic link|outside the daemon workspace/,
+    );
+
+    const project = path.join(workspace, "project");
+    await mkdir(project);
+    await symlink(outside, path.join(project, "linked-source"), "dir");
+    assert.throws(
+      () => specToConfig({ verb: "run", target: "p", dir: "project", sourcePaths: ["linked-source"] }, "runs", workspace),
+      /symbolic link|outside the daemon workspace/,
+    );
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
 });
 
 test("specToConfig: per-phase models from the profile land on cfg.models; no dir = materials as-is", () => {

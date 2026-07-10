@@ -377,6 +377,50 @@ CREATE TABLE IF NOT EXISTS provider(
 );
 `;
 
+const ADDITIVE_COLUMNS = [
+  ["project", "provider_id", "ALTER TABLE project ADD COLUMN provider_id INTEGER"],
+  ["project", "daemon_id", "ALTER TABLE project ADD COLUMN daemon_id INTEGER"],
+  ["project", "dir", "ALTER TABLE project ADD COLUMN dir TEXT"],
+  ["project", "uuid", "ALTER TABLE project ADD COLUMN uuid TEXT"],
+  ["project", "archived_at", "ALTER TABLE project ADD COLUMN archived_at TEXT"],
+  ["project", "pinned_at", "ALTER TABLE project ADD COLUMN pinned_at TEXT"],
+  ["project", "sort_order", "ALTER TABLE project ADD COLUMN sort_order INTEGER"],
+  ["daemon", "workspace", "ALTER TABLE daemon ADD COLUMN workspace TEXT"],
+  ["run", "run_scopes_target", "ALTER TABLE run ADD COLUMN run_scopes_target INTEGER"],
+  ["run", "run_scopes_done", "ALTER TABLE run ADD COLUMN run_scopes_done INTEGER"],
+  ["run", "dig_started_at", "ALTER TABLE run ADD COLUMN dig_started_at TEXT"],
+  ["scope", "dig_seconds", "ALTER TABLE scope ADD COLUMN dig_seconds INTEGER"],
+  ["scope", "priority", "ALTER TABLE scope ADD COLUMN priority INTEGER DEFAULT 0"],
+  ["finding", "tracking_status", "ALTER TABLE finding ADD COLUMN tracking_status TEXT"],
+  ["finding", "confirm_status", "ALTER TABLE finding ADD COLUMN confirm_status TEXT"],
+  ["finding", "duplicate_of_finding_id", "ALTER TABLE finding ADD COLUMN duplicate_of_finding_id INTEGER REFERENCES finding(id)"],
+  ["finding", "report_markdown", "ALTER TABLE finding ADD COLUMN report_markdown TEXT"],
+  ["finding", "description", "ALTER TABLE finding ADD COLUMN description TEXT"],
+  ["finding", "evidence", "ALTER TABLE finding ADD COLUMN evidence TEXT"],
+  ["finding", "exploit_sketch", "ALTER TABLE finding ADD COLUMN exploit_sketch TEXT"],
+  ["finding", "fix", "ALTER TABLE finding ADD COLUMN fix TEXT"],
+  ["finding", "confidence", "ALTER TABLE finding ADD COLUMN confidence REAL"],
+  ["run", "stages_json", "ALTER TABLE run ADD COLUMN stages_json TEXT"],
+  ["run", "health_status", "ALTER TABLE run ADD COLUMN health_status TEXT"],
+  ["run", "health_reasons_json", "ALTER TABLE run ADD COLUMN health_reasons_json TEXT"],
+  ["run", "health_signals_json", "ALTER TABLE run ADD COLUMN health_signals_json TEXT"],
+  ["scope", "source", "ALTER TABLE scope ADD COLUMN source TEXT"],
+  ["scope", "parent_scope_id", "ALTER TABLE scope ADD COLUMN parent_scope_id TEXT"],
+  ["confirm_decision", "distinct_fix", "ALTER TABLE confirm_decision ADD COLUMN distinct_fix TEXT"],
+  ["confirm_decision", "repro_evidence", "ALTER TABLE confirm_decision ADD COLUMN repro_evidence TEXT"],
+  ["confirm_decision", "corroboration", "ALTER TABLE confirm_decision ADD COLUMN corroboration TEXT"],
+  ["confirm_decision", "novelty", "ALTER TABLE confirm_decision ADD COLUMN novelty TEXT"],
+  ["confirm_decision", "human_gates", "ALTER TABLE confirm_decision ADD COLUMN human_gates TEXT"],
+  ["confirm_decision", "engagement_profile_json", "ALTER TABLE confirm_decision ADD COLUMN engagement_profile_json TEXT"],
+  ["confirm_decision", "adjudication_json", "ALTER TABLE confirm_decision ADD COLUMN adjudication_json TEXT"],
+  ["confirm_decision", "merged_from_json", "ALTER TABLE confirm_decision ADD COLUMN merged_from_json TEXT"],
+  ["confirm_decision", "repro_command_id", "ALTER TABLE confirm_decision ADD COLUMN repro_command_id TEXT"],
+  ["confirm_decision", "severity", "ALTER TABLE confirm_decision ADD COLUMN severity TEXT"],
+  ["confirm_decision", "evidence_level", "ALTER TABLE confirm_decision ADD COLUMN evidence_level TEXT"],
+  ["confirm_decision", "submission_confidence", "ALTER TABLE confirm_decision ADD COLUMN submission_confidence TEXT"],
+  ["confirm_decision", "report_markdown", "ALTER TABLE confirm_decision ADD COLUMN report_markdown TEXT"],
+] as const;
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -634,84 +678,22 @@ export class MetadataStore {
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    // WAL + busy timeout: one writer at a time, concurrent readers, retries instead of
-    // SQLITE_BUSY when several flounder processes (multi-project) write the shared DB.
-    this.db.exec("PRAGMA journal_mode = WAL");
+    // Install the busy handler before changing journal mode: journal_mode itself
+    // takes a database lock, so concurrent first opens must wait here too instead
+    // of failing before the later schema-migration transaction can serialize them.
     this.db.exec("PRAGMA busy_timeout = 5000");
+    this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(SCHEMA);
-    // Additive migrations for DBs created before these columns existed (CREATE IF NOT EXISTS
-    // won't add them). Each is a no-op if the column is already present.
-    for (const alter of [
-      "ALTER TABLE project ADD COLUMN provider_id INTEGER",
-      "ALTER TABLE project ADD COLUMN daemon_id INTEGER",
-      "ALTER TABLE project ADD COLUMN dir TEXT",
-      "ALTER TABLE project ADD COLUMN uuid TEXT",
-      "ALTER TABLE project ADD COLUMN archived_at TEXT",
-      "ALTER TABLE project ADD COLUMN pinned_at TEXT",
-      "ALTER TABLE project ADD COLUMN sort_order INTEGER",
-      "ALTER TABLE daemon ADD COLUMN workspace TEXT",
-      "ALTER TABLE run ADD COLUMN run_scopes_target INTEGER",
-      "ALTER TABLE run ADD COLUMN run_scopes_done INTEGER",
-      "ALTER TABLE run ADD COLUMN dig_started_at TEXT", // map->dig boundary for splitting a combined run's elapsed
-      "ALTER TABLE scope ADD COLUMN dig_seconds INTEGER", // per-scope deep-audit duration
-      "ALTER TABLE scope ADD COLUMN priority INTEGER DEFAULT 0", // manual dig-queue ordering, separate from score
-      "ALTER TABLE finding ADD COLUMN tracking_status TEXT", // submission tracking: open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored
-      "ALTER TABLE finding ADD COLUMN confirm_status TEXT", // per-finding real-target confirm state
-      "ALTER TABLE finding ADD COLUMN duplicate_of_finding_id INTEGER REFERENCES finding(id)",
-      "ALTER TABLE finding ADD COLUMN report_markdown TEXT", // user-facing per-finding report markdown
-      "ALTER TABLE finding ADD COLUMN description TEXT", // rich finding content, previously only in run-dir artifacts
-      "ALTER TABLE finding ADD COLUMN evidence TEXT",
-      "ALTER TABLE finding ADD COLUMN exploit_sketch TEXT",
-      "ALTER TABLE finding ADD COLUMN fix TEXT",
-      "ALTER TABLE finding ADD COLUMN confidence REAL",
-      "ALTER TABLE run ADD COLUMN stages_json TEXT", // funnel: post-dig stage outcomes
-      "ALTER TABLE run ADD COLUMN health_status TEXT", // audit discovery health verdict
-      "ALTER TABLE run ADD COLUMN health_reasons_json TEXT",
-      "ALTER TABLE run ADD COLUMN health_signals_json TEXT",
-      "ALTER TABLE scope ADD COLUMN source TEXT", // map | followup | coverage-gap
-      "ALTER TABLE scope ADD COLUMN parent_scope_id TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN distinct_fix TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN repro_evidence TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN corroboration TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN novelty TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN human_gates TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN engagement_profile_json TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN adjudication_json TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN merged_from_json TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN repro_command_id TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN severity TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN evidence_level TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN submission_confidence TEXT",
-      "ALTER TABLE confirm_decision ADD COLUMN report_markdown TEXT",
-    ]) {
-      try {
-        this.db.exec(alter);
-      } catch {
-        // column already exists
+    // CREATE IF NOT EXISTS does not add columns to old tables. Take the SQLite
+    // write reservation before inspecting the schema so concurrent processes
+    // cannot both decide to add the same column. Unexpected migration failures
+    // (permissions, corruption, malformed SQL) still surface.
+    this.transaction(() => {
+      for (const [table, column, alter] of ADDITIVE_COLUMNS) {
+        if (!this.hasColumn(table, column)) this.db.exec(alter);
       }
-    }
-    this.db.exec(`
-      CREATE TABLE IF NOT EXISTS discovery_backlog(
-        id INTEGER PRIMARY KEY,
-        project_id INTEGER NOT NULL REFERENCES project(id),
-        run_id INTEGER REFERENCES run(id),
-        kind TEXT NOT NULL,
-        status TEXT NOT NULL DEFAULT 'open',
-        scope_id TEXT,
-        title TEXT,
-        location TEXT,
-        reason TEXT,
-        next_action TEXT,
-        priority TEXT,
-        payload_json TEXT,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL
-      );
-      CREATE INDEX IF NOT EXISTS idx_backlog_project_status ON discovery_backlog(project_id, status);
-      CREATE INDEX IF NOT EXISTS idx_backlog_project_kind ON discovery_backlog(project_id, kind);
-      CREATE UNIQUE INDEX IF NOT EXISTS idx_backlog_run_item ON discovery_backlog(run_id, kind, title, location, scope_id);
-    `);
+    }, "immediate");
     this.ensureProjectUuids();
     this.reconcileConfirmStatuses();
     this.runDataMigrations();
@@ -766,6 +748,11 @@ export class MetadataStore {
       this.reconcileRefutedVerifyArtifacts();
       this.reconcileConfirmDecisionReports();
     });
+  }
+
+  private hasColumn(table: string, column: string): boolean {
+    const rows = this.db.prepare(`PRAGMA table_info(${table})`).all() as Array<{ name: string }>;
+    return rows.some((row) => row.name === column);
   }
 
   private reconcileConfirmDecisionReports(): void {
@@ -1883,6 +1870,14 @@ export class MetadataStore {
     this.db.prepare("UPDATE job SET status = ?, error = ?, updated_at = ? WHERE id = ?").run(status, error ?? null, now(), jobId);
   }
 
+  /** Terminal daemon updates may race an operator cancellation. Never revive or rewrite a terminal job. */
+  setActiveJobTerminalStatus(jobId: number, status: "done" | "error" | "canceled", error?: string): boolean {
+    const info = this.db
+      .prepare("UPDATE job SET status = ?, error = ?, updated_at = ? WHERE id = ? AND status IN ('dispatched','running')")
+      .run(status, error ?? null, now(), jobId);
+    return Number(info.changes) > 0;
+  }
+
   cancelRunJob(jobId: number, error = "canceled by operator"): boolean {
     const info = this.db
       .prepare("UPDATE job SET status = 'canceled', cancel = 1, error = ?, updated_at = ? WHERE id = ? AND status IN ('queued','dispatched','running')")
@@ -1999,8 +1994,8 @@ export class MetadataStore {
 
   // --- internals ------------------------------------------------------------
 
-  private transaction(fn: () => void): void {
-    this.db.exec("BEGIN");
+  private transaction(fn: () => void, mode: "deferred" | "immediate" = "deferred"): void {
+    this.db.exec(mode === "immediate" ? "BEGIN IMMEDIATE" : "BEGIN");
     try {
       fn();
       this.db.exec("COMMIT");
