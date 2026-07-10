@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFile, lstat, mkdir, readdir, realpath, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeReproductionCommandSafety } from "./policy.js";
@@ -22,6 +22,7 @@ export type SandboxNetworkMode = "none" | "enabled";
 export const DEFAULT_SANDBOX_IMAGE = "flounder-sandbox:latest";
 const APPLE_CONTAINER_SEALED_NETWORK = "flounder-sealed";
 const APPLE_CONTAINER_NETWORK_DNS = ["1.1.1.1", "8.8.8.8"] as const;
+const CACHE_TEMP_PREFIX = ".flounder-cache-";
 
 export interface SandboxExecutionOptions {
   backend?: SandboxBackend;
@@ -212,13 +213,23 @@ export function hardenNetworkEnabledCommand(command: ReproductionCommand, networ
 }
 
 async function restoreSandboxToolCaches(workspaceAbsolute: string, cacheDir?: string): Promise<void> {
+  const workspaceSvm = path.join(workspaceAbsolute, ".svm");
+  // Foundry can leave the final solc path behind when a compiler download is
+  // interrupted. A workspace is private to one run, so remove only artifacts
+  // that are provably truncated before the next command can execute them.
+  await removeTruncatedFoundryCompilers(workspaceSvm);
   if (!cacheDir) return;
-  await mergeDirectoryContents(path.join(cacheDir, "foundry-svm"), path.join(workspaceAbsolute, ".svm"));
+  await mergeDirectoryContents(path.join(cacheDir, "foundry-svm"), workspaceSvm, {
+    acceptFile: isCompleteFoundryCacheFile,
+  });
 }
 
 async function persistSandboxToolCaches(workspaceAbsolute: string, cacheDir?: string): Promise<void> {
   if (!cacheDir) return;
-  await mergeDirectoryContents(path.join(workspaceAbsolute, ".svm"), path.join(cacheDir, "foundry-svm"));
+  await mergeDirectoryContents(path.join(workspaceAbsolute, ".svm"), path.join(cacheDir, "foundry-svm"), {
+    acceptFile: isCompleteFoundryCacheFile,
+    atomicFiles: true,
+  });
 }
 
 function normalizeSandboxExecutionOptions(input: SandboxExecutionOptions): SandboxProcessOptions {
@@ -673,10 +684,167 @@ async function copyDirectoryContents(sourceDir: string, targetDir: string): Prom
   }
 }
 
-async function mergeDirectoryContents(sourceDir: string, targetDir: string): Promise<void> {
+interface DirectoryMergeOptions {
+  acceptFile?: (sourcePath: string) => Promise<boolean>;
+  atomicFiles?: boolean;
+}
+
+async function mergeDirectoryContents(sourceDir: string, targetDir: string, options: DirectoryMergeOptions = {}): Promise<void> {
   if (!(await isDirectory(sourceDir))) return;
   await mkdir(targetDir, { recursive: true });
-  await copyDirectoryContents(sourceDir, targetDir);
+  const entries = await readdir(sourceDir, { withFileTypes: true });
+  for (const entry of entries) {
+    if (shouldSkipCopyName(entry.name) || entry.name.startsWith(CACHE_TEMP_PREFIX)) continue;
+    const sourcePath = path.join(sourceDir, entry.name);
+    const targetPath = path.join(targetDir, entry.name);
+    const info = await lstat(sourcePath);
+    if (info.isSymbolicLink()) continue;
+    if (info.isDirectory()) {
+      await mergeDirectoryContents(sourcePath, targetPath, options);
+      continue;
+    }
+    if (!info.isFile()) continue;
+    if (options.acceptFile && !(await options.acceptFile(sourcePath))) continue;
+    await mkdir(path.dirname(targetPath), { recursive: true });
+    if (options.atomicFiles) await copyFileAtomically(sourcePath, targetPath);
+    else await copyFile(sourcePath, targetPath);
+  }
+}
+
+async function copyFileAtomically(sourcePath: string, targetPath: string): Promise<void> {
+  const tempPath = path.join(
+    path.dirname(targetPath),
+    `${CACHE_TEMP_PREFIX}${process.pid}-${randomBytes(8).toString("hex")}.tmp`,
+  );
+  try {
+    await copyFile(sourcePath, tempPath);
+    await rename(tempPath, targetPath);
+  } finally {
+    await rm(tempPath, { force: true });
+  }
+}
+
+async function removeTruncatedFoundryCompilers(root: string): Promise<void> {
+  if (!(await isDirectory(root))) return;
+  const entries = await readdir(root, { withFileTypes: true });
+  for (const entry of entries) {
+    if (entry.name.startsWith(CACHE_TEMP_PREFIX)) continue;
+    const entryPath = path.join(root, entry.name);
+    if (entry.isDirectory()) {
+      await removeTruncatedFoundryCompilers(entryPath);
+      continue;
+    }
+    if (entry.isFile() && isFoundryCompilerName(entry.name) && await isDefinitelyTruncatedElf(entryPath)) {
+      await rm(entryPath, { force: true });
+    }
+  }
+}
+
+async function isCompleteFoundryCacheFile(sourcePath: string): Promise<boolean> {
+  return !isFoundryCompilerName(path.basename(sourcePath)) || !(await isDefinitelyTruncatedElf(sourcePath));
+}
+
+function isFoundryCompilerName(name: string): boolean {
+  return name.startsWith("solc-");
+}
+
+/**
+ * Detect only ELF files whose declared structure extends beyond EOF. Unknown
+ * formats are allowed so explicit host backends and future platforms keep
+ * working; this is a truncation guard, not an authenticity check.
+ */
+async function isDefinitelyTruncatedElf(filePath: string): Promise<boolean> {
+  const handle = await open(filePath, "r");
+  try {
+    const fileInfo = await handle.stat();
+    const fileSize = BigInt(fileInfo.size);
+    const header = Buffer.alloc(64);
+    const headerRead = await handle.read(header, 0, header.length, 0);
+    if (headerRead.bytesRead < 4 || header[0] !== 0x7f || header[1] !== 0x45 || header[2] !== 0x4c || header[3] !== 0x46) {
+      return false;
+    }
+    // Once the ELF magic is present, a partial e_ident is conclusively an
+    // interrupted ELF file rather than an unknown executable format.
+    if (headerRead.bytesRead < 16) return true;
+
+    const elfClass = header[4];
+    const dataEncoding = header[5];
+    if ((elfClass !== 1 && elfClass !== 2) || (dataEncoding !== 1 && dataEncoding !== 2)) return false;
+    const is64Bit = elfClass === 2;
+    const littleEndian = dataEncoding === 1;
+    const headerSize = is64Bit ? 64 : 52;
+    if (headerRead.bytesRead < headerSize) return true;
+
+    const programOffset = readElfInteger(header, is64Bit ? 32 : 28, is64Bit ? 8 : 4, littleEndian);
+    const sectionOffset = readElfInteger(header, is64Bit ? 40 : 32, is64Bit ? 8 : 4, littleEndian);
+    const programEntrySize = Number(readElfInteger(header, is64Bit ? 54 : 42, 2, littleEndian));
+    const programCount = Number(readElfInteger(header, is64Bit ? 56 : 44, 2, littleEndian));
+    const sectionEntrySize = Number(readElfInteger(header, is64Bit ? 58 : 46, 2, littleEndian));
+    const sectionCount = Number(readElfInteger(header, is64Bit ? 60 : 48, 2, littleEndian));
+
+    // Extended ELF counts require section-zero interpretation. They are rare
+    // for executables; allow them rather than risk deleting a complete binary.
+    if (programCount === 0xffff || (sectionCount === 0 && sectionOffset !== 0n)) return false;
+    if (tableExtendsPastEnd(programOffset, programEntrySize, programCount, fileSize)) return true;
+    if (tableExtendsPastEnd(sectionOffset, sectionEntrySize, sectionCount, fileSize)) return true;
+
+    if (programCount > 0 && programCount <= 4096) {
+      const minimumEntrySize = is64Bit ? 56 : 32;
+      if (programEntrySize >= minimumEntrySize) {
+        for (let index = 0; index < programCount; index += 1) {
+          const entryOffset = programOffset + BigInt(index * programEntrySize);
+          const entry = await readElfEntry(handle, entryOffset, minimumEntrySize);
+          if (!entry) return true;
+          const segmentOffset = readElfInteger(entry, is64Bit ? 8 : 4, is64Bit ? 8 : 4, littleEndian);
+          const segmentSize = readElfInteger(entry, is64Bit ? 32 : 16, is64Bit ? 8 : 4, littleEndian);
+          if (segmentSize > 0n && segmentOffset + segmentSize > fileSize) return true;
+        }
+      }
+    }
+
+    if (sectionCount > 0 && sectionCount <= 8192) {
+      const minimumEntrySize = is64Bit ? 64 : 40;
+      if (sectionEntrySize >= minimumEntrySize) {
+        for (let index = 0; index < sectionCount; index += 1) {
+          const entryOffset = sectionOffset + BigInt(index * sectionEntrySize);
+          const entry = await readElfEntry(handle, entryOffset, minimumEntrySize);
+          if (!entry) return true;
+          const sectionType = Number(readElfInteger(entry, 4, 4, littleEndian));
+          if (sectionType === 8) continue; // SHT_NOBITS has no file-backed bytes.
+          const contentsOffset = readElfInteger(entry, is64Bit ? 24 : 16, is64Bit ? 8 : 4, littleEndian);
+          const contentsSize = readElfInteger(entry, is64Bit ? 32 : 20, is64Bit ? 8 : 4, littleEndian);
+          if (contentsSize > 0n && contentsOffset + contentsSize > fileSize) return true;
+        }
+      }
+    }
+
+    return false;
+  } finally {
+    await handle.close();
+  }
+}
+
+function tableExtendsPastEnd(offset: bigint, entrySize: number, count: number, fileSize: bigint): boolean {
+  if (count === 0) return false;
+  if (entrySize === 0) return false;
+  return offset + BigInt(entrySize) * BigInt(count) > fileSize;
+}
+
+async function readElfEntry(
+  handle: Awaited<ReturnType<typeof open>>,
+  offset: bigint,
+  size: number,
+): Promise<Buffer | undefined> {
+  if (offset > BigInt(Number.MAX_SAFE_INTEGER)) return undefined;
+  const entry = Buffer.alloc(size);
+  const result = await handle.read(entry, 0, size, Number(offset));
+  return result.bytesRead === size ? entry : undefined;
+}
+
+function readElfInteger(buffer: Buffer, offset: number, byteLength: 2 | 4 | 8, littleEndian: boolean): bigint {
+  if (byteLength === 2) return BigInt(littleEndian ? buffer.readUInt16LE(offset) : buffer.readUInt16BE(offset));
+  if (byteLength === 4) return BigInt(littleEndian ? buffer.readUInt32LE(offset) : buffer.readUInt32BE(offset));
+  return littleEndian ? buffer.readBigUInt64LE(offset) : buffer.readBigUInt64BE(offset);
 }
 
 async function copySourcePath(sourcePath: string, targetPath: string): Promise<void> {

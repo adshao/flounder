@@ -10,6 +10,38 @@ async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
 
+function truncatedElf64() {
+  const elf = Buffer.alloc(64);
+  elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  elf.writeUInt16LE(2, 16);
+  elf.writeUInt32LE(1, 20);
+  elf.writeBigUInt64LE(4096n, 40);
+  elf.writeUInt16LE(64, 52);
+  elf.writeUInt16LE(64, 58);
+  elf.writeUInt16LE(1, 60);
+  return elf;
+}
+
+function truncatedElfIdent() {
+  return Buffer.from([0x7f, 0x45, 0x4c, 0x46, 2]);
+}
+
+function completeElf64() {
+  const elf = Buffer.alloc(124);
+  elf.set([0x7f, 0x45, 0x4c, 0x46, 2, 1, 1]);
+  elf.writeUInt16LE(2, 16);
+  elf.writeUInt32LE(1, 20);
+  elf.writeBigUInt64LE(64n, 32);
+  elf.writeUInt16LE(64, 52);
+  elf.writeUInt16LE(56, 54);
+  elf.writeUInt16LE(1, 56);
+  elf.writeUInt32LE(1, 64);
+  elf.writeBigUInt64LE(120n, 72);
+  elf.writeBigUInt64LE(4n, 96);
+  elf.writeUInt32LE(0xdecafbad, 120);
+  return elf;
+}
+
 async function fakeContainerCli(options = {}) {
   const dir = await tempDir("flounder-fake-container-bin-");
   const bin = path.join(dir, "container");
@@ -489,6 +521,191 @@ test("sandbox reuses Foundry solc cache across isolated HOME directories", async
     assert.equal(await readFile(path.join(cache, "foundry-svm", "0.8.33", "solc-0.8.33"), "utf8"), "installed-solc");
   } finally {
     await rm(workspace, { recursive: true, force: true });
+    await rm(cache, { recursive: true, force: true });
+  }
+});
+
+test("sandbox does not restore truncated Foundry compiler caches", async () => {
+  const workspace = await tempDir("flounder-sandbox-svm-truncated-home-");
+  const cache = await tempDir("flounder-sandbox-svm-truncated-cache-");
+  const compiler = path.join(cache, "foundry-svm", "1.2.3", "solc-1.2.3");
+  try {
+    await mkdir(path.dirname(compiler), { recursive: true });
+    await writeFile(compiler, truncatedElf64());
+
+    const result = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: [
+          "-e",
+          "const fs = require('node:fs'); const path = require('node:path'); console.log('cached=' + fs.existsSync(path.join(process.env.HOME, '.svm', '1.2.3', 'solc-1.2.3')));",
+        ],
+        timeoutMs: 10_000,
+      },
+      workspace,
+      4000,
+      [cache],
+      cache,
+      { backend: "host", allowHostFallback: true, network: "none" },
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.match(result.stdout, /cached=false/);
+    assert.deepEqual(await readFile(compiler), truncatedElf64());
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(cache, { recursive: true, force: true });
+  }
+});
+
+test("sandbox rejects a compiler download interrupted inside the ELF identifier", async () => {
+  const workspace = await tempDir("flounder-sandbox-svm-ident-home-");
+  const cache = await tempDir("flounder-sandbox-svm-ident-cache-");
+  const compiler = path.join(cache, "foundry-svm", "1.2.3", "solc-1.2.3");
+  try {
+    await mkdir(path.dirname(compiler), { recursive: true });
+    await writeFile(compiler, truncatedElfIdent());
+
+    const result = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: [
+          "-e",
+          "const fs = require('node:fs'); const path = require('node:path'); console.log('cached=' + fs.existsSync(path.join(process.env.HOME, '.svm', '1.2.3', 'solc-1.2.3')));",
+        ],
+        timeoutMs: 10_000,
+      },
+      workspace,
+      4000,
+      [cache],
+      cache,
+      { backend: "host", allowHostFallback: true, network: "none" },
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.match(result.stdout, /cached=false/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(cache, { recursive: true, force: true });
+  }
+});
+
+test("sandbox neither persists nor reuses a truncated compiler from a failed command", async () => {
+  const workspace = await tempDir("flounder-sandbox-svm-failed-home-");
+  const cache = await tempDir("flounder-sandbox-svm-failed-cache-");
+  const encoded = truncatedElf64().toString("base64");
+  const cachedCompiler = path.join(cache, "foundry-svm", "1.2.3", "solc-1.2.3");
+  try {
+    const failed = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: [
+          "-e",
+          [
+            "const fs = require('node:fs');",
+            "const path = require('node:path');",
+            "const dir = path.join(process.env.HOME, '.svm', '1.2.3');",
+            "fs.mkdirSync(dir, { recursive: true });",
+            `fs.writeFileSync(path.join(dir, 'solc-1.2.3'), Buffer.from(${JSON.stringify(encoded)}, 'base64'));`,
+            "process.exit(7);",
+          ].join(" "),
+        ],
+        timeoutMs: 10_000,
+      },
+      workspace,
+      4000,
+      [cache],
+      cache,
+      { backend: "host", allowHostFallback: true, network: "none" },
+    );
+
+    assert.equal(failed.exitCode, 7);
+    await assert.rejects(() => readFile(cachedCompiler), (error) => error?.code === "ENOENT");
+
+    const retried = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: [
+          "-e",
+          "const fs = require('node:fs'); const path = require('node:path'); console.log('cached=' + fs.existsSync(path.join(process.env.HOME, '.svm', '1.2.3', 'solc-1.2.3')));",
+        ],
+        timeoutMs: 10_000,
+      },
+      workspace,
+      4000,
+      [cache],
+      cache,
+      { backend: "host", allowHostFallback: true, network: "none" },
+    );
+
+    assert.equal(retried.exitCode, 0);
+    assert.match(retried.stdout, /cached=false/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+    await rm(cache, { recursive: true, force: true });
+  }
+});
+
+test("sandbox heals a truncated compiler cache with a complete artifact even when the build fails", async () => {
+  const firstWorkspace = await tempDir("flounder-sandbox-svm-heal-first-");
+  const secondWorkspace = await tempDir("flounder-sandbox-svm-heal-second-");
+  const cache = await tempDir("flounder-sandbox-svm-heal-cache-");
+  const compiler = path.join(cache, "foundry-svm", "1.2.3", "solc-1.2.3");
+  const replacement = completeElf64();
+  const encoded = replacement.toString("base64");
+  try {
+    await mkdir(path.dirname(compiler), { recursive: true });
+    await writeFile(compiler, truncatedElf64());
+
+    const repaired = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: [
+          "-e",
+          [
+            "const fs = require('node:fs');",
+            "const path = require('node:path');",
+            "const compiler = path.join(process.env.HOME, '.svm', '1.2.3', 'solc-1.2.3');",
+            "console.log('cached=' + fs.existsSync(compiler));",
+            "fs.mkdirSync(path.dirname(compiler), { recursive: true });",
+            `fs.writeFileSync(compiler, Buffer.from(${JSON.stringify(encoded)}, 'base64'));`,
+            "process.exit(9);",
+          ].join(" "),
+        ],
+        timeoutMs: 10_000,
+      },
+      firstWorkspace,
+      4000,
+      [cache],
+      cache,
+      { backend: "host", allowHostFallback: true, network: "none" },
+    );
+
+    assert.equal(repaired.exitCode, 9);
+    assert.match(repaired.stdout, /cached=false/);
+    assert.deepEqual(await readFile(compiler), replacement);
+
+    const restored = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: [
+          "-e",
+          "const fs = require('node:fs'); const path = require('node:path'); const compiler = path.join(process.env.HOME, '.svm', '1.2.3', 'solc-1.2.3'); console.log('bytes=' + fs.readFileSync(compiler).length);",
+        ],
+        timeoutMs: 10_000,
+      },
+      secondWorkspace,
+      4000,
+      [cache],
+      cache,
+      { backend: "host", allowHostFallback: true, network: "none" },
+    );
+
+    assert.equal(restored.exitCode, 0);
+    assert.match(restored.stdout, /bytes=124/);
+  } finally {
+    await rm(firstWorkspace, { recursive: true, force: true });
+    await rm(secondWorkspace, { recursive: true, force: true });
     await rm(cache, { recursive: true, force: true });
   }
 });
