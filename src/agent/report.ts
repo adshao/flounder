@@ -68,10 +68,10 @@ export async function runReport(
   if (recorder.runDbId !== undefined) options.onRun?.(recorder.runDbId);
 
   try {
-    const source = await loadSource(reportCfg.sourcePaths);
+    const source = await loadSource(reportCfg.sourcePaths, { ...(reportCfg.buildRoot ? { publicRoot: reportCfg.buildRoot } : {}) });
     const corpus = reportCfg.corpusPaths.length ? await loadCorpus(reportCfg.corpusPaths) : [];
     if (source.length === 0) throw new Error("flounder report needs readable source paths so the daemon can verify report details");
-    const buildDocs = reportCfg.buildRoot ? await loadSource([reportCfg.buildRoot]) : [];
+    const buildDocs = reportCfg.buildRoot ? await loadSource([reportCfg.buildRoot], { publicRoot: reportCfg.buildRoot }) : [];
     reportCfg.materialFingerprint = materialFingerprint([
       { label: "source", docs: source },
       { label: "build", docs: buildDocs },

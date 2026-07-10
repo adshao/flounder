@@ -357,8 +357,8 @@ test("daemon: activity POSTs surface on the run's live SSE log", async () => {
     // The public log stream replays the backlogged events (this is the daemon → bus → SSE pipe).
     const ev = await readFirstActivity(base, runId, 2500);
     assert.ok(ev, "expected an activity event on the SSE log");
-    assert.equal(ev.kind, "thinking_delta");
-    assert.equal(ev.delta, "weighing the invariant");
+    assert.equal(ev.kind, "audit_thinking");
+    assert.equal(ev.detail, "weighing the invariant");
 
     const active = await j(await ui(base, "GET", "/api/active"));
     const row = active.active.find((item) => item.jobId === jobId);
@@ -421,7 +421,6 @@ test("daemon: JSON run log compacts token deltas for history views", async () =>
         { ts: "2026-01-01T00:00:03.200Z", kind: "step", tool: "bash", step: 1 },
       ],
     });
-
     const body = await j(await ui(base, "GET", `/api/runs/${runId}/log?tail=50&format=json`));
     assert.equal(body.events.some((ev) => ev.kind === "thinking_delta" || ev.kind === "text_delta"), false);
     assert.equal(body.events.filter((ev) => ev.kind === "audit_thinking").length, 1);
@@ -430,6 +429,54 @@ test("daemon: JSON run log compacts token deltas for history views", async () =>
     assert.equal(body.events.find((ev) => ev.kind === "audit_text")?.detail, "Confirmed candidate");
     assert.equal(body.events.filter((ev) => ev.kind === "step").length, 1);
     assert.equal(body.events.filter((ev) => ev.kind === "artifact" && ev.name === "confirm_decision.json").length, 1);
+
+    const replay = await readActivityEvents(base, runId, 4, 2500);
+    assert.equal(replay.filter((ev) => ev.kind === "audit_thinking").length, 1, "SSE must not replay persisted and live reasoning twice");
+    assert.equal(replay.filter((ev) => ev.kind === "audit_text").length, 1, "SSE must not replay persisted and live output twice");
+    assert.equal(replay.filter((ev) => ev.kind === "step").length, 1, "SSE must subscribe live-only after its combined replay");
+    assert.equal(replay.filter((ev) => ev.kind === "artifact").length, 1);
+  });
+});
+
+test("daemon: JSON run log keeps concurrent activity streams separate", async () => {
+  await withServerAndToken(async ({ base, token, out }) => {
+    await asDaemon(base, token, "POST", "/api/daemon/register", { name: "d1" });
+    const created = await j(await ui(base, "POST", "/api/projects", { name: "p-streams", sourcePaths: ["./src"] }));
+    const { jobId } = await j(await ui(base, "POST", `/api/projects/${created.uuid}/runs`, { verb: "run", mockLlm: true }));
+    await asDaemon(base, token, "POST", "/api/daemon/claim");
+    const runDir = path.join(out, "p-streams-1");
+    await mkdir(runDir, { recursive: true });
+    const { runId } = await j(await asDaemon(base, token, "POST", "/api/daemon/runs", { jobId, project: "p-streams", kind: "run", runDir, budgets: {} }));
+
+    await asDaemon(base, token, "POST", `/api/daemon/runs/${runId}/activity`, {
+      events: [
+        { ts: "2026-01-01T00:00:01.000Z", kind: "thinking_delta", streamId: "scope-a", delta: "Audit A " },
+        { ts: "2026-01-01T00:00:01.100Z", kind: "thinking_delta", streamId: "scope-b", delta: "Audit B " },
+        { ts: "2026-01-01T00:00:01.200Z", kind: "thinking_delta", streamId: "scope-a", delta: "continued" },
+        { ts: "2026-01-01T00:00:01.300Z", kind: "thinking_delta", streamId: "scope-b", delta: "continued" },
+      ],
+    });
+    const scopeUpdate = await asDaemon(base, token, "PATCH", `/api/daemon/runs/${runId}`, {
+      scopes: [
+        { scopeId: "scope-a", title: "A", status: "auditing" },
+        { scopeId: "scope-b", title: "B", status: "auditing" },
+        { scopeId: "scope-done", title: "Done", status: "audited" },
+      ],
+    });
+    assert.equal(scopeUpdate.status, 200);
+    const detail = await j(await ui(base, "GET", `/api/projects/${created.uuid}`));
+    assert.equal(detail.activeScopeCount, 2);
+    assert.deepEqual(detail.activeScopeIds, ["scope-a", "scope-b"]);
+
+    const body = await j(await ui(base, "GET", `/api/runs/${runId}/log?tail=50&format=json`));
+    const thoughts = body.events.filter((event) => event.kind === "audit_thinking");
+    assert.deepEqual(thoughts.map((event) => [event.streamId, event.detail]), [
+      ["scope-a", "Audit A continued"],
+      ["scope-b", "Audit B continued"],
+    ]);
+    const replay = await readActivityEvents(base, runId, 3, 2500);
+    const streamState = replay.find((event) => event.kind === "activity_stream_state");
+    assert.deepEqual(streamState?.activeStreams, ["scope-a", "scope-b"]);
   });
 });
 
@@ -506,4 +553,41 @@ async function readFirstActivity(base, runId, timeoutMs) {
     clearTimeout(timer);
   }
   return undefined;
+}
+
+async function readActivityEvents(base, runId, count, timeoutMs) {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  const events = [];
+  try {
+    const res = await fetch(`${base}/api/runs/${runId}/log`, { signal: controller.signal });
+    const reader = res.body.getReader();
+    const dec = new TextDecoder();
+    let buf = "";
+    while (events.length < count) {
+      const { value, done } = await reader.read();
+      if (done) break;
+      buf += dec.decode(value, { stream: true });
+      let nl;
+      while ((nl = buf.indexOf("\n\n")) >= 0) {
+        const frame = buf.slice(0, nl);
+        buf = buf.slice(nl + 2);
+        const line = frame.split("\n").find((entry) => entry.startsWith("data:"));
+        if (!line) continue;
+        try {
+          const event = JSON.parse(line.slice(5).trim());
+          if (event?.kind) events.push(event);
+        } catch {
+          // skip comments and malformed frames
+        }
+        if (events.length >= count) break;
+      }
+    }
+  } catch {
+    // timeout abort
+  } finally {
+    clearTimeout(timer);
+    controller.abort();
+  }
+  return events;
 }

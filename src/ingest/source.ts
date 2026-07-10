@@ -122,12 +122,18 @@ const SKIP_DIRS = new Set([
   ".tox",
 ]);
 
-export async function loadSource(paths: string[]): Promise<Doc[]> {
-  return walk(paths, SOURCE_EXTS, "source");
+export interface LoadDocsOptions {
+  /** Root that will become the sandbox workspace root. Source document paths
+   * are rendered relative to it so read/search paths match copied files. */
+  publicRoot?: string;
 }
 
-export async function loadCorpus(paths: string[]): Promise<Doc[]> {
-  return walk(paths, new Set([...SOURCE_EXTS, ...DOC_EXTS, ...PDF_EXTS]), "corpus");
+export async function loadSource(paths: string[], options: LoadDocsOptions = {}): Promise<Doc[]> {
+  return walk(paths, SOURCE_EXTS, "source", options.publicRoot);
+}
+
+export async function loadCorpus(paths: string[], options: LoadDocsOptions = {}): Promise<Doc[]> {
+  return walk(paths, new Set([...SOURCE_EXTS, ...DOC_EXTS, ...PDF_EXTS]), "corpus", options.publicRoot);
 }
 
 export function numberLines(content: string): string {
@@ -154,9 +160,9 @@ export function assemble(docs: Doc[], charBudget: number, withLineNumbers = fals
   return chunks.join("");
 }
 
-async function walk(paths: string[], exts: Set<string>, kind: Doc["kind"]): Promise<Doc[]> {
+async function walk(paths: string[], exts: Set<string>, kind: Doc["kind"], publicRoot?: string): Promise<Doc[]> {
   const docs: Doc[] = [];
-  const cwd = process.cwd();
+  const cwd = path.resolve(publicRoot ?? process.cwd());
   for (const root of await buildWalkRoots(paths, cwd)) {
     await walkOne(root.full, exts, kind, docs, root);
   }

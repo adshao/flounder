@@ -1072,6 +1072,7 @@ async function projectGet(c: Ctx): Promise<void> {
       : currentConfirmDecisions(c.store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes" && isRealTargetDecisionEvidence(stringValue(row.evidence_level))).length;
     const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, allRunsRaw);
+    const mappedScopeIds = new Set(scopeView.scopes.map((scope) => stringValue(scope.scope_id)).filter(Boolean));
     sendJson(c.res, 200, {
       project,
       progress,
@@ -1084,12 +1085,15 @@ async function projectGet(c: Ctx): Promise<void> {
       runsTotal: c.store.countRuns(id),
       currentRunsTotal: currentResultRunsRaw.length,
       activeScopeCount: scopeView.hasInventory ? c.store.countScopesByStatus(id, "auditing") : 0,
+      activeScopeIds: scopeView.hasInventory
+        ? c.store.listScopes(id).filter((scope) => scope.status === "auditing").map((scope) => stringValue(scope.scope_id)).filter(Boolean)
+        : [],
       confirmDecisions: confirmDecisions.map(confirmDecisionDisplayRow),
       scopes,
       latestRunHealth: runHealthDisplayRow(c.store.latestRunHealth(id)),
       backlogCounts: c.store.discoveryBacklogCounts(id),
-      discoveryBacklog: c.store.listDiscoveryBacklog(id, { status: "open", limit: 50 }).map(discoveryBacklogDisplayRow),
-      openResourceRequests: c.store.listDiscoveryBacklog(id, { kind: "resource-request", status: "open", limit: 10 }).map(discoveryBacklogDisplayRow),
+      discoveryBacklog: c.store.listDiscoveryBacklog(id, { status: "open", limit: 50 }).map((row) => discoveryBacklogDisplayRow(row, mappedScopeIds)),
+      openResourceRequests: c.store.listDiscoveryBacklog(id, { kind: "resource-request", status: "open", limit: 10 }).map((row) => discoveryBacklogDisplayRow(row, mappedScopeIds)),
       allFindings: findingSummaries,
       prepareSummary: activePrepareRefresh && currentRunsRaw.length === 0 ? null : latestPrepareSummary(runs),
       material: materialSummary(allRunsRaw, materialBoundary, activePrepareRefresh),
@@ -1348,9 +1352,6 @@ function currentScopeView(
   allowDbFallback = true,
 ): { scopes: Array<Record<string, unknown>>; progress: Coverage; total: number; hasInventory: boolean } {
   if (activePrepareRefreshStartedAt) return { scopes: [], progress: emptyProgress(), total: 0, hasInventory: false };
-  const boundaryCheckpoint = scopeBoundary ? latestScopeCheckpoint([scopeBoundary]) : null;
-  if (boundaryCheckpoint) return checkpointScopeView(store, projectId, boundaryCheckpoint);
-
   const latestRun = currentRuns.find(isScopeInventoryRun);
   if (!latestRun) {
     const total = store.countScopes(projectId);
@@ -1374,6 +1375,24 @@ function currentScopeView(
   if (stringValue(latestRun.status) === "running" && stringValue(latestRun.kind) === "map") {
     return { scopes: [], progress: emptyProgress(), total: 0, hasInventory: true };
   }
+
+  const storedTotal = store.countScopes(projectId);
+  if (storedTotal > 0) {
+    return {
+      scopes: store.listScopes(projectId),
+      progress: store.scopeProgress(projectId),
+      total: storedTotal,
+      hasInventory: true,
+    };
+  }
+
+  // The latest map is the current-material boundary, not necessarily the latest
+  // inventory. Continue/append-map runs merge novel scopes into later full
+  // checkpoints; preferring the original map here made the API and UI appear to
+  // lose every appended scope. It is only a last-resort fallback when neither a
+  // later checkpoint nor the active SQLite projection is available.
+  const boundaryCheckpoint = scopeBoundary ? latestScopeCheckpoint([scopeBoundary]) : null;
+  if (boundaryCheckpoint) return checkpointScopeView(store, projectId, boundaryCheckpoint);
 
   return {
     scopes: store.listScopes(projectId),
@@ -1475,8 +1494,9 @@ function projectBacklogGet(c: Ctx): void {
     const status = discoveryBacklogStatus(c.url.searchParams.get("status") ?? "open", true);
     if (kind) filter.kind = kind;
     if (status) filter.status = status;
+    const mappedScopeIds = new Set(c.store.listScopes(id).map((scope) => stringValue(scope.scope_id)).filter(Boolean));
     sendJson(c.res, 200, {
-      backlog: c.store.listDiscoveryBacklog(id, filter).map(discoveryBacklogDisplayRow),
+      backlog: c.store.listDiscoveryBacklog(id, filter).map((row) => discoveryBacklogDisplayRow(row, mappedScopeIds)),
       counts: c.store.discoveryBacklogCounts(id),
       total: c.store.countDiscoveryBacklog(id, filter),
       limit: filter.limit,
@@ -1497,19 +1517,20 @@ function scopeApiRows(scopes: Array<Record<string, unknown>>): Array<Record<stri
   });
 }
 
-function discoveryBacklogDisplayRow(row: Record<string, unknown>): Record<string, unknown> {
+function discoveryBacklogDisplayRow(row: Record<string, unknown>, mappedScopeIds: Set<string>): Record<string, unknown> {
   const payload = safeParse(row.payload_json);
   return {
     ...row,
     payload,
-    ...discoveryBacklogActionMeta(row, payload),
+    ...discoveryBacklogActionMeta(row, payload, mappedScopeIds),
   };
 }
 
-function discoveryBacklogActionMeta(row: Record<string, unknown>, payload: unknown): Record<string, unknown> {
+function discoveryBacklogActionMeta(row: Record<string, unknown>, payload: unknown, mappedScopeIds: Set<string>): Record<string, unknown> {
   const kind = stringValue(row.kind);
   const payloadRecord = payload && typeof payload === "object" && !Array.isArray(payload) ? payload as Record<string, unknown> : {};
   const scopeId = stringValue(row.scope_id) || stringValue(payloadRecord.scope_id ?? payloadRecord.scopeId ?? payloadRecord.id);
+  const mappedScope = Boolean(scopeId && mappedScopeIds.has(scopeId));
   if (kind === "resource-request") {
     return {
       actionability: "agent-resource",
@@ -1524,20 +1545,20 @@ function discoveryBacklogActionMeta(row: Record<string, unknown>, payload: unkno
     return {
       actionability: "agent-runnable",
       action_owner: "agent",
-      recommended_action: scopeId ? "prioritize-scope" : "expand-map",
-      primary_action_label: scopeId ? "Prioritize scope" : "Expand map",
+      recommended_action: mappedScope ? "prioritize-scope" : "expand-map",
+      primary_action_label: mappedScope ? "Prioritize scope" : "Expand map",
       autonomous: true,
-      action_reason: scopeId ? "The agent can prioritize this mapped gap for the next dig batch." : "The agent can append map coverage to turn this gap into concrete scopes.",
+      action_reason: mappedScope ? "The agent can prioritize this mapped gap for the next dig batch." : "The agent can append map coverage to turn this gap into a current mapped scope.",
     };
   }
   if (kind === "followup-scope") {
     return {
       actionability: "agent-runnable",
       action_owner: "agent",
-      recommended_action: scopeId ? "prioritize-scope" : "continue",
-      primary_action_label: scopeId ? "Prioritize scope" : "Continue",
+      recommended_action: mappedScope ? "prioritize-scope" : "expand-map",
+      primary_action_label: mappedScope ? "Prioritize scope" : "Expand map",
       autonomous: true,
-      action_reason: scopeId ? "The agent can move this follow-up scope to the front of the dig queue." : "The agent can continue coverage and audit follow-up work.",
+      action_reason: mappedScope ? "The agent can move this follow-up scope to the front of the dig queue." : "The agent can append map coverage so this follow-up becomes runnable in the current inventory.",
     };
   }
   return {
@@ -2688,8 +2709,9 @@ function pipelineRoundComplete(
 }
 
 function projectNextActions(store: MetadataStore, projectId: number): NonNullable<LaunchSpec["nextActions"]> {
+  const mappedScopeIds = new Set(store.listScopes(projectId).map((scope) => stringValue(scope.scope_id)).filter(Boolean));
   return store.listDiscoveryBacklog(projectId, { status: "open", limit: 50 })
-    .map(discoveryBacklogDisplayRow)
+    .map((row) => discoveryBacklogDisplayRow(row, mappedScopeIds))
     .map((row) => {
       const out: NonNullable<LaunchSpec["nextActions"]>[number] = {
         kind: stringValue(row.kind) || "unknown",
@@ -4387,15 +4409,30 @@ function runLog(c: Ctx): void {
     const limit = clampInt(c.url.searchParams.get("tail"), 200, 1, 2000);
     return sendJson(c.res, 200, { runId: id, events: combinedRunActivity(run, bus, limit), limit });
   }
-  streamFromBus(c.res, bus, persistedRunActivity(run, 200));
+  // One authoritative replay: persisted block events plus the compacted live
+  // buffer, already sorted and deduplicated. Subscribing must then be live-only;
+  // replaying the bus a second time is what used to duplicate recent activity.
+  streamFromBus(c.res, bus, [
+    ...combinedRunActivity(run, bus, 200),
+    currentRunActivityStreamState(c, run),
+  ]);
+}
+
+function currentRunActivityStreamState(c: Ctx, run: Record<string, unknown>): Record<string, unknown> {
+  const projectId = Number(run.project_id);
+  const activeStreams = run.status === "running" && Number.isFinite(projectId)
+    ? c.store.listScopes(projectId)
+      .filter((scope) => scope.status === "auditing")
+      .map((scope) => stringValue(scope.scope_id))
+      .filter(Boolean)
+    : [];
+  return { kind: "activity_stream_state", activeStreams, ts: new Date().toISOString() };
 }
 
 function streamFromBus(res: ServerResponse, bus: ActivityBus, replay: Array<Record<string, unknown>> = []): void {
   res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-cache", connection: "keep-alive" });
   res.write(": open\n\n"); // flush headers immediately so the client's EventSource opens even before the first event
   for (const ev of replay) res.write(`data: ${JSON.stringify(ev)}\n\n`);
-  // `let` + no-op default: subscribe() replays backlog synchronously, so the callback can fire
-  // before the real unsubscribe is assigned — guard against the temporal-dead-zone reference.
   let unsubscribe = (): void => {};
   unsubscribe = bus.subscribe((ev) => {
     try {
@@ -4403,7 +4440,7 @@ function streamFromBus(res: ServerResponse, bus: ActivityBus, replay: Array<Reco
     } catch {
       unsubscribe();
     }
-  });
+  }, false);
   res.on("close", () => unsubscribe());
 }
 
@@ -4440,14 +4477,15 @@ function dedupeRunActivity(events: Array<Record<string, unknown>>): Array<Record
 function activityDedupeKey(event: Record<string, unknown>): { key: string; windowMs: number } | undefined {
   const kind = stringValue(event.kind);
   if (!kind) return undefined;
+  const stream = stringValue(event.streamId);
   if (kind === "audit_thinking" || kind === "audit_text") {
     const body = normalizedActivityKey(activityBody(event));
-    return body ? { key: `${kind}:${body}`, windowMs: 30_000 } : undefined;
+    return body ? { key: `${kind}:${stream}:${body}`, windowMs: 30_000 } : undefined;
   }
   if (kind === "step") {
     const step = numberValue(event.step);
     const tool = stringValue(event.tool);
-    return step > 0 ? { key: `${kind}:${tool}:${step}`, windowMs: 10_000 } : undefined;
+    return step > 0 ? { key: `${kind}:${stream}:${tool}:${step}`, windowMs: 10_000 } : undefined;
   }
   if (kind === "artifact") {
     const name = stringValue(event.name);
@@ -4479,34 +4517,45 @@ function activityRichness(event: Record<string, unknown>): number {
   return Object.keys(event).length * 10 + activityBody(event).length + (typeof event.text === "string" ? 50 : 0);
 }
 
-function compactLiveActivity(events: Activity[]): Array<Record<string, unknown>> {
-  const out: Array<Record<string, unknown>> = [];
-  let streamKind: "audit_thinking" | "audit_text" | undefined;
-  let streamBody = "";
-  let streamTs: string | undefined;
-
-  const flush = (): void => {
-    const body = streamBody.trim();
-    if (streamKind && body) out.push({ kind: streamKind, ts: streamTs, detail: body, ok: true });
-    streamKind = undefined;
-    streamBody = "";
-    streamTs = undefined;
+export function compactLiveActivity(events: Activity[]): Array<Record<string, unknown>> {
+  type Pending = { kind: "audit_thinking" | "audit_text"; body: string; ts?: string; streamId?: string; order: number };
+  const out: Array<{ order: number; event: Record<string, unknown> }> = [];
+  const pending = new Map<string, Pending>();
+  const streamKey = (event: Activity): string => event.streamId?.trim() || "legacy";
+  const flush = (key: string): void => {
+    const item = pending.get(key);
+    if (!item) return;
+    const body = item.body.trim();
+    if (body) out.push({
+      order: item.order,
+      event: { kind: item.kind, ts: item.ts, detail: body, ok: true, ...(item.streamId ? { streamId: item.streamId } : {}) },
+    });
+    pending.delete(key);
   };
 
-  for (const ev of events) {
+  for (const [order, ev] of events.entries()) {
+    const key = streamKey(ev);
     const nextKind = ev.kind === "thinking_delta" ? "audit_thinking" : ev.kind === "text_delta" ? "audit_text" : undefined;
     if (!nextKind) {
-      flush();
-      out.push({ ts: ev.ts, ...ev });
+      flush(key);
+      out.push({ order, event: { ts: ev.ts, ...ev } });
       continue;
     }
-    if (streamKind && streamKind !== nextKind) flush();
-    streamKind = nextKind;
-    streamBody += ev.delta ?? "";
-    streamTs = ev.ts ?? streamTs;
+    const current = pending.get(key);
+    if (current && current.kind !== nextKind) flush(key);
+    const next = pending.get(key);
+    const item: Pending = {
+      kind: nextKind,
+      body: `${next?.body ?? ""}${ev.delta ?? ""}`,
+      ...(ev.streamId ? { streamId: ev.streamId } : {}),
+      order,
+    };
+    const ts = ev.ts ?? next?.ts;
+    if (ts) item.ts = ts;
+    pending.set(key, item);
   }
-  flush();
-  return out;
+  for (const key of pending.keys()) flush(key);
+  return out.sort((a, b) => a.order - b.order).map((item) => item.event);
 }
 
 function persistedRunActivity(run: Record<string, unknown>, limit: number): Array<Record<string, unknown>> {
@@ -4762,11 +4811,14 @@ async function daemonRunActivity(c: Ctx): Promise<void> {
   if (!authorized) return;
   const { run } = authorized;
   if (run.status !== "running") return sendJson(c.res, 200, { ok: true, stale: true });
-  const body = (await readBody(c.req)) as { events?: Array<{ kind: string; delta?: string; tool?: string; step?: number }> };
+  const body = (await readBody(c.req)) as { events?: Array<{ kind: string; delta?: string; tool?: string; step?: number; streamId?: string }> };
   if (body.events !== undefined && !Array.isArray(body.events)) return sendJson(c.res, 400, { error: "events must be an array" });
   const events = (body.events ?? []).slice(0, 1000);
   if (events.some((ev) => !ev || typeof ev !== "object" || typeof ev.kind !== "string")) {
     return sendJson(c.res, 400, { error: "each activity event requires a string kind" });
+  }
+  if (events.some((ev) => ev.streamId !== undefined && (typeof ev.streamId !== "string" || !ev.streamId.trim() || ev.streamId.length > 200))) {
+    return sendJson(c.res, 400, { error: "activity streamId must be a non-empty string of at most 200 characters" });
   }
   const bus = c.plane.bus(runId);
   for (const ev of events) bus.push(ev);

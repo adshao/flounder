@@ -61,30 +61,32 @@ export interface ToolVersionCheck {
   reason?: string;
 }
 
-export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorkspace; cfg: AuditorConfig; logger: RunLogger; cacheDir?: string; focusCommand?: ReproductionCommand }): Promise<PrepareReport> {
+export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorkspace; cfg: AuditorConfig; logger: RunLogger; cacheDir?: string; focusCommand?: ReproductionCommand; streamId?: string }): Promise<PrepareReport> {
+  const streamMeta = input.streamId ? { streamId: input.streamId } : {};
+  const artifactName = input.streamId ? `audit_prepare-${slug(input.streamId)}.json` : "audit_prepare.json";
   const allPlans = await detectToolchains(input.workspace.absolute);
   const plans = focusPlans(allPlans, input.focusCommand);
   const pinnedToolVersions = await detectPinnedToolVersions(input.workspace.absolute);
   const relevantPins = relevantPinnedToolVersions(pinnedToolVersions, plans);
   if (pinnedToolVersions.length > 0) {
-    await input.logger.event("audit_prepare_tool_versions", { pins: pinnedToolVersions });
+    await input.logger.event("audit_prepare_tool_versions", { pins: pinnedToolVersions, ...streamMeta });
   }
   const toolVersionChecks = await checkPinnedToolVersions(input, relevantPins);
   if (toolVersionChecks.length > 0) {
-    await input.logger.event("audit_prepare_tool_version_checks", { checks: toolVersionChecks });
+    await input.logger.event("audit_prepare_tool_version_checks", { checks: toolVersionChecks, ...streamMeta });
   }
   const failedChecks = toolVersionChecks.filter((check) => !check.ok);
   if (failedChecks.length > 0) {
-    await input.logger.event("audit_prepare_tool_version_mismatch", { checks: failedChecks });
-    await input.logger.artifact("audit_prepare.json", { detected: plans.map((plan) => plan.toolchain), pinnedToolVersions: relevantPins, toolVersionChecks, results: [] });
+    await input.logger.event("audit_prepare_tool_version_mismatch", { checks: failedChecks, ...streamMeta });
+    await input.logger.artifact(artifactName, { detected: plans.map((plan) => plan.toolchain), pinnedToolVersions: relevantPins, toolVersionChecks, results: [] });
     return { ran: false, detected: plans.map((plan) => plan.toolchain), pinnedToolVersions: relevantPins, toolVersionChecks, results: [] };
   }
   if (plans.length === 0) {
-    await input.logger.event("audit_prepare_skipped", { reason: "no supported toolchain manifest detected" });
+    await input.logger.event("audit_prepare_skipped", { reason: "no supported toolchain manifest detected", ...streamMeta });
     return { ran: false, detected: [], pinnedToolVersions: relevantPins, toolVersionChecks, results: [] };
   }
 
-  await input.logger.event("audit_prepare_start", { toolchains: plans.map((plan) => plan.toolchain), timeoutMs: input.cfg.auditPrepareTimeoutMs });
+  await input.logger.event("audit_prepare_start", { toolchains: plans.map((plan) => plan.toolchain), timeoutMs: input.cfg.auditPrepareTimeoutMs, ...streamMeta });
   const results: PrepareCommandResult[] = [];
   for (const plan of plans) {
     for (const argv of plan.commands) {
@@ -115,14 +117,14 @@ export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorks
         ...(ok ? {} : { diagnostic: prepareDiagnostic(run.stderr, run.stdout) }),
       };
       results.push(record);
-      await input.logger.event("audit_prepare_command", { toolchain: plan.toolchain, command: record.command, cwd: record.cwd, exitCode: run.exitCode, timedOut: run.timedOut, ok });
+      await input.logger.event("audit_prepare_command", { toolchain: plan.toolchain, command: record.command, cwd: record.cwd, exitCode: run.exitCode, timedOut: run.timedOut, ok, ...streamMeta });
       // If dependency fetch fails or times out, later commands for the same
       // toolchain will too; stop this toolchain but keep warming the others.
       if (!ok) break;
     }
   }
 
-  await input.logger.artifact("audit_prepare.json", { detected: plans.map((plan) => plan.toolchain), pinnedToolVersions: relevantPins, toolVersionChecks, results });
+  await input.logger.artifact(artifactName, { detected: plans.map((plan) => plan.toolchain), pinnedToolVersions: relevantPins, toolVersionChecks, results });
   return { ran: true, detected: plans.map((plan) => plan.toolchain), pinnedToolVersions: relevantPins, toolVersionChecks, results };
 }
 

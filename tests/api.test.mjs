@@ -233,9 +233,13 @@ test("api: project detail exposes discovery health and operator backlog actions"
       reasons: ["1 resource request blocks deeper exploration"],
       signals: { toolSteps: 7, resourceRequests: 1 },
     });
+    store.replaceScopes(created.id, [
+      { scopeId: "FU1", title: "Permit replay domain", location: "src/Permit.sol:40", status: "pending", source: "followup" },
+    ]);
     store.replaceDiscoveryBacklog(created.id, runId, [
       { kind: "resource-request", status: "open", title: "Foundry dependencies", location: "dependency", reason: "forge build needs package install", nextAction: "Run npm install at the package root", priority: "high", payload: { id: "R1" } },
       { kind: "followup-scope", status: "open", scopeId: "FU1", title: "Permit replay domain", location: "src/Permit.sol:40", reason: "Follow-up from S1", nextAction: "Dig this pending scope", priority: 8, payload: { id: "FU1" } },
+      { kind: "followup-scope", status: "open", scopeId: "FU2", title: "Unmapped settlement follow-up", location: "src/Settle.sol:20", reason: "Follow-up was recorded before it reached the current map", nextAction: "Expand the map", priority: 7, payload: { id: "FU2" } },
       { kind: "coverage-gap", status: "open", title: "Router settlement path", location: "src/Router.sol", reason: "Map did not cover settlement obligations", nextAction: "Expand map around settlement", priority: "medium", payload: { gapId: "G1" } },
     ]);
     store.finishRun(runId, "done");
@@ -244,13 +248,14 @@ test("api: project detail exposes discovery health and operator backlog actions"
     let detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
     assert.equal(detail.latestRunHealth.status, "needs-resource");
     assert.equal(detail.latestRunHealth.signals.resourceRequests, 1);
-    assert.equal(detail.backlogCounts.open, 3);
+    assert.equal(detail.backlogCounts.open, 4);
     assert.equal(detail.backlogCounts["resource-request"], 1);
     assert.equal(detail.backlogCounts["coverage-gap"], 1);
-    assert.equal(detail.discoveryBacklog.length, 3);
+    assert.equal(detail.discoveryBacklog.length, 4);
     assert.equal(detail.openResourceRequests[0].title, "Foundry dependencies");
     const resource = detail.discoveryBacklog.find((row) => row.kind === "resource-request");
-    const followup = detail.discoveryBacklog.find((row) => row.kind === "followup-scope");
+    const followup = detail.discoveryBacklog.find((row) => row.scope_id === "FU1");
+    const unmappedFollowup = detail.discoveryBacklog.find((row) => row.scope_id === "FU2");
     const gap = detail.discoveryBacklog.find((row) => row.kind === "coverage-gap");
     assert.equal(resource.actionability, "agent-resource");
     assert.equal(resource.action_owner, "agent");
@@ -258,6 +263,7 @@ test("api: project detail exposes discovery health and operator backlog actions"
     assert.equal(resource.autonomous, true);
     assert.equal(followup.actionability, "agent-runnable");
     assert.equal(followup.recommended_action, "prioritize-scope");
+    assert.equal(unmappedFollowup.recommended_action, "expand-map");
     assert.equal(gap.actionability, "agent-runnable");
     assert.equal(gap.recommended_action, "expand-map");
 
@@ -270,7 +276,7 @@ test("api: project detail exposes discovery health and operator backlog actions"
     assert.equal(launched.queued, true);
     const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
     const spec = JSON.parse(job.spec_json);
-    assert.equal(spec.nextActions.length, 3);
+    assert.equal(spec.nextActions.length, 4);
     const resourceAction = spec.nextActions.find((row) => row.kind === "resource-request");
     assert.equal(resourceAction.actionability, "agent-resource");
     assert.equal(resourceAction.recommendedAction, "resolve-resource");
@@ -279,7 +285,7 @@ test("api: project detail exposes discovery health and operator backlog actions"
     const patched = await json(await patch(`/api/backlog/${backlog.backlog[0].id}`, { status: "resolved" }));
     assert.equal(patched.ok, true);
     detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
-    assert.equal(detail.backlogCounts.open, 2);
+    assert.equal(detail.backlogCounts.open, 3);
     assert.equal(detail.openResourceRequests.length, 0);
 
     const artifact = await fetch(base + `/api/runs/${runId}/artifact?name=run_health.json`);
@@ -3519,6 +3525,62 @@ test("api: latest map checkpoint bounds current scope inventory despite stale db
     const list = await json(await fetch(base + "/api/projects"));
     const snapshot = list.projects.find((project) => project.uuid === created.uuid);
     assert.deepEqual(snapshot.progress, detail.progress);
+  });
+});
+
+test("api: a later continue checkpoint expands the current inventory beyond the original map", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "continued-scope-view", sourcePaths: ["./src"] }));
+    const projectPath = `/api/projects/${created.uuid}`;
+    const mapRunDir = await mkdtemp(path.join(out, "continued-scope-map-"));
+    const continueRunDir = await mkdtemp(path.join(out, "continued-scope-run-"));
+    await writeFile(path.join(mapRunDir, "audit_scopes.json"), JSON.stringify([
+      { id: "S1", obligation: "Bind the withdrawal recipient.", region: "src/Vault.sol:1-40", status: "audited", score: 10 },
+      { id: "S2", obligation: "Reject replayed permits.", region: "src/Permit.sol:1-30", status: "audited", score: 9 },
+    ]));
+    await writeFile(path.join(continueRunDir, "audit_scopes.json"), JSON.stringify([
+      { id: "S1", obligation: "Bind the withdrawal recipient.", region: "src/Vault.sol:1-40", status: "audited", score: 10 },
+      { id: "S2", obligation: "Reject replayed permits.", region: "src/Permit.sol:1-30", status: "audited", score: 9 },
+      { id: "S3", obligation: "Account for appended settlement coverage.", region: "src/Settle.sol:1-50", status: "audited", score: 8 },
+    ]));
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const mapRun = store.startRun({ projectId: created.id, kind: "map", runDir: mapRunDir });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T00:00:00.000Z", mapRun);
+      store.finishRun(mapRun, "done");
+      const continueRun = store.startRun({ projectId: created.id, kind: "run", runDir: continueRunDir });
+      store.db.prepare("UPDATE run SET started_at = ? WHERE id = ?").run("2026-01-01T01:00:00.000Z", continueRun);
+      store.finishRun(continueRun, "done");
+      store.replaceScopes(created.id, [
+        { scopeId: "S1", title: "Bind recipient", status: "audited", score: 10 },
+        { scopeId: "S2", title: "Reject replay", status: "audited", score: 9 },
+        { scopeId: "S3", title: "Appended settlement", status: "audited", score: 8 },
+      ]);
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + projectPath));
+    assert.deepEqual(detail.progress, { total: 3, audited: 3, deferred: 0, pending: 0 });
+    assert.deepEqual(detail.scopes.map((scope) => scope.scope_id), ["S1", "S2", "S3"]);
+
+    const scopes = await json(await fetch(base + `${projectPath}/scopes`));
+    assert.equal(scopes.total, 3);
+    assert.deepEqual(scopes.scopes.map((scope) => scope.scope_id), ["S1", "S2", "S3"]);
+
+    const after = MetadataStore.openForOutput(out);
+    try {
+      const killedRun = after.startRun({ projectId: created.id, kind: "run", runDir: path.join(out, "continued-scope-killed") });
+      after.finishRun(killedRun, "killed");
+    } finally {
+      after.close();
+    }
+    const afterKilled = await json(await fetch(base + projectPath));
+    assert.deepEqual(afterKilled.progress, { total: 3, audited: 3, deferred: 0, pending: 0 });
+    assert.deepEqual(afterKilled.scopes.map((scope) => scope.scope_id), ["S1", "S2", "S3"]);
   });
 });
 

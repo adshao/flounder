@@ -33,7 +33,7 @@ export interface DaemonOptions {
   workspace?: string; // root under which project dirs live; materials resolve here (default ~/.flounder/workspace)
 }
 
-type Activity = { kind: string; delta?: string; tool?: string; step?: number };
+type Activity = { kind: string; delta?: string; tool?: string; step?: number; streamId?: string };
 
 let defaultSandboxBuild: Promise<SandboxImageBuildResult> | undefined;
 
@@ -203,7 +203,10 @@ async function runPipelineJob(
     trackingProject: string;
   },
 ): Promise<void> {
-  let staged = spec.buildRoot ?? spec.sourcePaths[0];
+  const resolvedMaterials = resolvePipelineMaterials(spec, ctx.out, ctx.workspace);
+  let stagedSourcePaths = resolvedMaterials.sourcePaths;
+  let stagedBuildRoot = resolvedMaterials.buildRoot;
+  const stagedCorpusPaths = resolvedMaterials.corpusPaths;
   let derivedScopeNote: string | undefined;
   if (spec.clue) {
     const prepareCfg = specToConfig({ ...spec, verb: "prepare", sourcePaths: [], buildRoot: undefined, corpusPaths: [] }, ctx.out, ctx.workspace);
@@ -218,17 +221,19 @@ async function runPipelineJob(
       ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}),
     });
     await ctx.flushTracker();
-    staged = prepare.workspaceDir;
+    stagedSourcePaths = [prepare.workspaceDir];
+    stagedBuildRoot = prepare.workspaceDir;
     derivedScopeNote = deriveScopeNote(prepare.manifest);
   }
-  if (!staged) throw new Error("pipeline run needs a prepared workspace or a clue for Prepare");
+  if (stagedSourcePaths.length === 0 || !stagedBuildRoot) throw new Error("pipeline run needs a prepared workspace or a clue for Prepare");
   const scopeNote = [spec.scopeNote, derivedScopeNote].filter((entry): entry is string => Boolean(entry && entry.trim())).join("\n\n") || undefined;
   const auditSpec: LaunchSpec = {
     ...spec,
     verb: "run",
     dir: undefined,
-    sourcePaths: [staged],
-    buildRoot: staged,
+    sourcePaths: stagedSourcePaths,
+    buildRoot: stagedBuildRoot,
+    corpusPaths: stagedCorpusPaths,
     ...(scopeNote ? { scopeNote } : {}),
   };
   if (spec.pipelineStart !== "settle") {
@@ -251,8 +256,9 @@ async function runPipelineJob(
       ...spec,
       verb: "audit",
       dir: undefined,
-      sourcePaths: [staged],
-      buildRoot: staged,
+      sourcePaths: stagedSourcePaths,
+      buildRoot: stagedBuildRoot,
+      corpusPaths: stagedCorpusPaths,
       verifyFindings: verify.verifyFindings,
     };
     const verifyCfg = specToConfig(verifySpec, ctx.out, ctx.workspace);
@@ -282,8 +288,9 @@ async function runPipelineJob(
         ...spec,
         verb: "confirm",
         dir: undefined,
-        sourcePaths: [staged],
-        buildRoot: staged,
+        sourcePaths: stagedSourcePaths,
+        buildRoot: stagedBuildRoot,
+        corpusPaths: stagedCorpusPaths,
         inputRunDir: confirm.inputRunDir!,
         inputRunDirs: confirm.inputRunDirs,
         confirmKeys: confirm.confirmKeys,
@@ -314,8 +321,9 @@ async function runPipelineJob(
       ...spec,
       verb: "report",
       dir: undefined,
-      sourcePaths: [staged],
-      buildRoot: staged,
+      sourcePaths: stagedSourcePaths,
+      buildRoot: stagedBuildRoot,
+      corpusPaths: stagedCorpusPaths,
       reportFindings: report.reportFindings,
     };
     const reportCfg = specToConfig(reportSpec, ctx.out, ctx.workspace);
@@ -327,6 +335,25 @@ async function runPipelineJob(
       ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}),
     });
   }
+}
+
+/** Resolve project-relative materials before the pipeline drops `dir` for its
+ * phase-local specs. Without this boundary, a stored buildRoot of "." became
+ * the daemon process cwd and could stage an unrelated repository. Preserve the
+ * authorized source roots separately from the (possibly broader) build root. */
+export function resolvePipelineMaterials(spec: LaunchSpec, out: string, workspace: string): {
+  sourcePaths: string[];
+  buildRoot?: string;
+  corpusPaths: string[];
+} {
+  const cfg = specToConfig(spec, out, workspace);
+  const sourcePaths = [...cfg.sourcePaths];
+  const buildRoot = cfg.buildRoot ?? sourcePaths[0];
+  return {
+    sourcePaths,
+    ...(buildRoot ? { buildRoot } : {}),
+    corpusPaths: [...cfg.corpusPaths],
+  };
 }
 
 type PipelineWorklist = {

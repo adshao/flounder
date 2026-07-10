@@ -22,6 +22,29 @@ export const BUG_BOUNTY_KIND = "bug-bounty";
 export const DEFAULT_CONTEST_BATCH_SCOPES = 10;
 export const DEFAULT_CONTEST_DIG_CONCURRENCY = 5;
 
+/** Activity is plain text in the product UI. Remove transport-only model markers
+ * instead of exposing HTML comments and raw Markdown emphasis to operators. */
+export function normalizeActivityBody(value: string): string {
+  return value
+    .replace(/<!--[\s\S]*?-->/g, "")
+    .replace(/\*\*([^*]+)\*\*/g, "$1")
+    .replace(/\n{2,}/g, "\n")
+    .trimStart();
+}
+
+/** Providers may stream several human-readable reasoning summaries in one
+ * response block, separated by transport-only HTML comments. Keep those as
+ * separate timeline entries instead of presenting one oversized pseudo-CoT. */
+export function splitActivitySummaries(value: string): string[] {
+  const segments = value
+    .split(/<!--[\s\S]*?-->/g)
+    .map((segment) => normalizeActivityBody(segment).trim())
+    .filter(Boolean);
+  if (segments.length > 0) return segments;
+  const normalized = normalizeActivityBody(value).trim();
+  return normalized ? [normalized] : [];
+}
+
 const STATUS_RANK: Record<string, number> = {
   "confirmed-differential": 5,
   "confirmed-executable": 4,
@@ -986,6 +1009,13 @@ export function runProgress(run: RunRow, decisions: ConfirmDecision[]): string {
     return `${run.run_scopes_done ?? 0}/${run.run_scopes_target} scopes in this batch${run.scopes_total != null ? ` · ${run.scopes_audited ?? 0}/${run.scopes_total} total audited` : ""}`;
   }
   if (run.scopes_total != null) return `${run.scopes_audited ?? 0}/${run.scopes_total} scopes audited`;
+  if (run.status === "running") {
+    if (isVerifyRun(run)) return "Preparing candidate verification";
+    if (run.kind === "prepare") return "Preparing target";
+    if (run.kind === "report") return "Generating reports";
+    if (run.kind === "map" || run.kind === "run") return "Mapping project scope";
+    if (run.kind === "audit") return run.dig_started_at ? "Starting scope audits" : "Preparing scope audit";
+  }
   return run.findings_total != null ? `${run.findings_total} ${run.findings_total === 1 ? "finding" : "findings"}` : "No progress recorded yet";
 }
 

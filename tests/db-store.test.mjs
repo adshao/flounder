@@ -328,6 +328,43 @@ test("store: a newer backlog snapshot supersedes only the identical open action"
   db.close();
 });
 
+test("store: audited scopes resolve exact coverage backlog rows, including persisted legacy rows", async () => {
+  const { dbPath } = await tempDbPath();
+  let db = new MetadataStore(dbPath);
+  const projectId = db.upsertProject({ name: "scope-backlog-reconciliation" });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/scope-backlog-1" });
+  db.replaceScopes(projectId, [
+    { scopeId: "S1", title: "Settlement coverage", status: "pending" },
+  ]);
+  db.replaceDiscoveryBacklog(projectId, runId, [
+    { kind: "followup-scope", status: "open", scopeId: "S1", title: "Audit settlement", location: "src/Settle.sol" },
+    { kind: "coverage-gap", status: "open", scopeId: "S1", title: "Complete settlement", location: "src/Settle.sol" },
+    { kind: "resource-request", status: "open", scopeId: "S1", title: "Install compiler", location: "toolchain" },
+  ]);
+
+  db.replaceScopes(projectId, [
+    { scopeId: "S1", title: "Settlement coverage", status: "audited" },
+  ]);
+  let rows = db.listDiscoveryBacklog(projectId, { status: "all" });
+  assert.equal(rows.find((row) => row.kind === "followup-scope").status, "resolved");
+  assert.equal(rows.find((row) => row.kind === "coverage-gap").status, "resolved");
+  assert.equal(rows.find((row) => row.kind === "resource-request").status, "open");
+  db.close();
+
+  // Simulate a database written by an older release: the scope is complete but
+  // its exact coverage backlog rows were left open. Startup migration repairs it.
+  const legacy = new DatabaseSync(dbPath);
+  legacy.exec("UPDATE discovery_backlog SET status = 'open' WHERE kind IN ('followup-scope', 'coverage-gap')");
+  legacy.close();
+
+  db = new MetadataStore(dbPath);
+  rows = db.listDiscoveryBacklog(projectId, { status: "all" });
+  assert.equal(rows.find((row) => row.kind === "followup-scope").status, "resolved");
+  assert.equal(rows.find((row) => row.kind === "coverage-gap").status, "resolved");
+  assert.equal(rows.find((row) => row.kind === "resource-request").status, "open");
+  db.close();
+});
+
 test("store: finding status transitions land on a timeline", async () => {
   const db = await tempDb();
   const projectId = db.upsertProject({ name: "p" });

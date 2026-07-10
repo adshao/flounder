@@ -1091,6 +1091,7 @@ export class MetadataStore {
       this.reconcileFindingReportRunIds();
       this.reconcileRefutedVerifyArtifacts();
       this.reconcileConfirmDecisionReports();
+      this.reconcileAuditedScopeBacklog();
     }, "immediate");
   }
 
@@ -1603,6 +1604,7 @@ export class MetadataStore {
         stmt.run(projectId, s.scopeId, s.title ?? null, s.location ?? null, s.score ?? null, s.priority ?? null, s.status, s.source ?? null, s.parentScopeId ?? null, s.digSeconds ?? null, ts);
       }
     });
+    this.reconcileAuditedScopeBacklog(projectId);
   }
 
   /** Replace the active project inventory with a complete scope snapshot.
@@ -1634,6 +1636,7 @@ export class MetadataStore {
       const placeholders = ids.map(() => "?").join(", ");
       this.db.prepare(`DELETE FROM scope WHERE project_id = ? AND scope_id NOT IN (${placeholders})`).run(projectId, ...ids);
     });
+    this.reconcileAuditedScopeBacklog(projectId);
   }
 
   listScopes(projectId: number): Array<Record<string, unknown>> {
@@ -1677,6 +1680,7 @@ export class MetadataStore {
     const info = this.db
       .prepare("UPDATE scope SET status = ?, updated_at = ? WHERE project_id = ? AND scope_id = ?")
       .run(status, now(), projectId, scopeId);
+    if (status === "audited") this.reconcileAuditedScopeBacklog(projectId);
     return Number(info.changes);
   }
 
@@ -1710,7 +1714,10 @@ export class MetadataStore {
   replaceDiscoveryBacklog(projectId: number, runId: number, rows: DiscoveryBacklogInput[]): void {
     this.transaction(() => {
       this.db.prepare("DELETE FROM discovery_backlog WHERE run_id = ?").run(runId);
-      if (rows.length === 0) return;
+      if (rows.length === 0) {
+        this.reconcileAuditedScopeBacklog(projectId);
+        return;
+      }
       const reconcile = this.db.prepare(
         `UPDATE discovery_backlog
             SET status = ?, updated_at = ?
@@ -1746,7 +1753,33 @@ export class MetadataStore {
           ts,
         );
       }
+      this.reconcileAuditedScopeBacklog(projectId);
     });
+  }
+
+  /** Close coverage work whose exact mapped scope has completed. Older releases
+   * left these rows open forever, so this runs both after live scope/backlog
+   * updates and as an idempotent startup data migration. Resource requests are
+   * deliberately excluded: an audited scope does not prove its setup blocker
+   * was resolved. */
+  private reconcileAuditedScopeBacklog(projectId?: number): number {
+    const projectClause = projectId === undefined ? "" : "AND b.project_id = ?";
+    const params: Array<string | number> = [now()];
+    if (projectId !== undefined) params.push(projectId);
+    return Number(this.db.prepare(
+      `UPDATE discovery_backlog AS b
+          SET status = 'resolved', updated_at = ?
+        WHERE b.status = 'open'
+          AND b.kind IN ('coverage-gap', 'followup-scope')
+          AND b.scope_id IS NOT NULL
+          ${projectClause}
+          AND EXISTS (
+            SELECT 1 FROM scope AS s
+             WHERE s.project_id = b.project_id
+               AND s.scope_id = b.scope_id
+               AND s.status = 'audited'
+          )`,
+    ).run(...params).changes);
   }
 
   listDiscoveryBacklog(projectId: number, filter: DiscoveryBacklogFilter = {}): Array<Record<string, unknown>> {

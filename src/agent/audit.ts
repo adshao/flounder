@@ -76,16 +76,16 @@ export interface AuditRunControl {
 
 export async function runAudit(
   cfg: AuditorConfig,
-  options: { llm?: LlmClient; streamEvents?: boolean; kind?: RunKind; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory; control?: AuditRunControl } = {},
+  options: { llm?: LlmClient; streamEvents?: boolean; kind?: RunKind; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number; streamId?: string }) => void; makeTracker?: RunTrackerFactory; control?: AuditRunControl } = {},
 ): Promise<AuditRunResult> {
   const startedAt = new Date();
   const logger = new RunLogger(cfg.outputDir, cfg.targetName, startedAt, { streamEvents: options.streamEvents ?? false });
   await logger.init();
   await nonFatalAuditMaintenance(logger, "last_run_pointer_start", () => writeLastRunPointer(path.dirname(logger.runDir), logger.runDir, cfg.targetName));
 
-  const source = await loadSource(cfg.sourcePaths);
+  const source = await loadSource(cfg.sourcePaths, { ...(cfg.buildRoot ? { publicRoot: cfg.buildRoot } : {}) });
   const corpus = await loadCorpus(cfg.corpusPaths);
-  const buildDocs = cfg.buildRoot ? await loadSource([cfg.buildRoot]) : [];
+  const buildDocs = cfg.buildRoot ? await loadSource([cfg.buildRoot], { publicRoot: cfg.buildRoot }) : [];
   cfg.materialFingerprint = materialFingerprint([
     { label: "source", docs: source },
     { label: "build", docs: buildDocs },
@@ -173,7 +173,7 @@ export async function runAudit(
   const runPhase = async (
     phaseCfg: AuditorConfig,
     opts: { mode: "breadth" | "map" | "dig" | "verify" | "synthesize"; deepFocus?: string; verifySeed?: string; synthSeed?: string; maxSteps: number; mapExistingScopesPath?: string; mapExistingScopesCount?: number },
-    over?: { ctx: ToolContext; cwd: string },
+    over?: { ctx: ToolContext; cwd: string; activityStreamId?: string },
   ): Promise<{ steps: TranscriptStep[]; stoppedReason: string }> => {
     const phaseCtx = over?.ctx ?? ctx;
     const phaseCwd = over?.cwd ?? workspaceCwd;
@@ -197,6 +197,7 @@ export async function runAudit(
         ...(memoryHint ? { memoryHint } : {}),
         ...(opts.mapExistingScopesPath ? { mapExistingScopesPath: opts.mapExistingScopesPath } : {}),
         ...(opts.mapExistingScopesCount !== undefined ? { mapExistingScopesCount: opts.mapExistingScopesCount } : {}),
+        ...(over?.activityStreamId ? { activityStreamId: over.activityStreamId } : {}),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.onActivity ? { onActivity: options.onActivity } : {}),
         ...flags,
@@ -548,7 +549,7 @@ export async function runAudit(
       recorder.scopes(scopeInventory);
       await logger.event("audit_dig_requeued", { scope: scope.id, reason: options.signal?.aborted ? "aborted" : "interrupted" });
     };
-    const digSamples = async (scope: AuditScope, sess: AgentSession, over?: { ctx: ToolContext; cwd: string }): Promise<{ findings: AgentFinding[]; outcomes: ScopeOutcome[]; steps: TranscriptStep[] }> => {
+    const digSamples = async (scope: AuditScope, sess: AgentSession, over?: { ctx: ToolContext; cwd: string; activityStreamId?: string }): Promise<{ findings: AgentFinding[]; outcomes: ScopeOutcome[]; steps: TranscriptStep[] }> => {
       const deepFocus = buildDeepFocus(scope);
       const perScope: AgentFinding[] = [];
       const perScopeOutcomes: ScopeOutcome[] = [];
@@ -607,7 +608,7 @@ export async function runAudit(
           if (session.buildCacheDir) digSession.buildCacheDir = session.buildCacheDir; // shared dep cache; per-dig target/
           await copyCorpusIntoWorkspace(ws, corpus);
           const digCtx: ToolContext = { cfg: digCfg, source, corpus, memory, logger, session: digSession };
-          const { findings: unioned, outcomes, steps: digSteps } = await digSamples(scope, digSession, { ctx: digCtx, cwd: ws.absolute });
+          const { findings: unioned, outcomes, steps: digSteps } = await digSamples(scope, digSession, { ctx: digCtx, cwd: ws.absolute, activityStreamId: scope.id });
           for (const finding of unioned) {
             if (finding.confirmationStatus !== "confirmed-executable" || !finding.fixPatch || !finding.commandRunId) continue;
             const exploitRun = digSession.commandRuns.find((run) => run.id === finding.commandRunId);

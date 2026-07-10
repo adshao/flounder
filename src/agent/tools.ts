@@ -1,7 +1,7 @@
-import { readFile } from "node:fs/promises";
+import { mkdir, readFile } from "node:fs/promises";
 import path from "node:path";
 import { sandboxExecutionOptions, sandboxNetworkForPurpose, type AuditorConfig } from "../config.js";
-import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, openWorldCommandNeedsNetwork } from "../security/policy.js";
+import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, isAgentWorkspaceSetupCommand, openWorldCommandNeedsNetwork } from "../security/policy.js";
 import { prepareResourceRequests, prepareToolVersionBlockingIssue, prepareWorkspaceToolchain } from "./prepare.js";
 import {
   firstBlockedSandboxFile,
@@ -135,6 +135,12 @@ export interface ToolContext {
   logger: RunLogger;
   session: AgentSession;
   onCommandRun?: (record: CommandRunRecord) => void;
+  /** Identity of the concurrent map/dig/verify stream that owns this context. */
+  activityStreamId?: string;
+}
+
+function activityStreamMeta(ctx: ToolContext): { streamId?: string } {
+  return ctx.activityStreamId ? { streamId: ctx.activityStreamId } : {};
 }
 
 export interface ToolResult {
@@ -263,7 +269,7 @@ const readTool: AgentTool = {
     if (!target) return { observation: 'error: "path" is required' };
     if (!normalizeToolPath(target)) return { observation: 'error: "path" must be a safe relative path.' };
     const readable = await findReadable(ctx, target);
-    if (!readable) return { observation: `error: no loaded or sandbox file matches "${target}". Use bash with ls/find/rg to inspect the copied workspace.` };
+    if (!readable) return { observation: `error: no authorized source, corpus, build metadata, or scratch file matches "${target}".` };
     const allLines = readable.content.split(/\r?\n/);
     const total = allLines.length;
     const start = clampInt(args.start, 1, Math.max(1, total), 1);
@@ -300,7 +306,7 @@ const writeTool: AgentTool = {
     if (!workspace) return { observation: "error: write needs on-disk source roots (sourcePaths); none are configured for this run." };
     await writeSandboxFiles(workspace.absolute, [{ path: normalized, content }]);
     ctx.session.scratchFiles.set(normalized, content);
-    await ctx.logger.event("audit_write", { path: normalized, bytes: Buffer.byteLength(content, "utf8") });
+    await ctx.logger.event("audit_write", { path: normalized, bytes: Buffer.byteLength(content, "utf8"), ...activityStreamMeta(ctx) });
     return { observation: `wrote ${normalized} (${Buffer.byteLength(content, "utf8")} bytes) in sandbox workspace ${workspace.relative}.`, meta: { path: normalized } };
   },
 };
@@ -334,7 +340,7 @@ const editTool: AgentTool = {
 
     await writeSandboxFiles(workspace.absolute, [{ path: existing.path, content: next }]);
     ctx.session.scratchFiles.set(existing.path, next);
-    await ctx.logger.event("audit_edit", { path: existing.path, bytes: Buffer.byteLength(next, "utf8") });
+    await ctx.logger.event("audit_edit", { path: existing.path, bytes: Buffer.byteLength(next, "utf8"), ...activityStreamMeta(ctx) });
     return { observation: `edited ${existing.path} in sandbox workspace ${workspace.relative}.`, meta: { path: existing.path } };
   },
 };
@@ -354,6 +360,10 @@ const bashTool: AgentTool = {
       : analyzeAgentBashCommandSafety(normalized.command);
     if (blocked.blocked) return { observation: `blocked: ${blocked.reason ?? "command blocked by policy"}` };
 
+    if (sourceReadBoundaryActive(ctx) && isAgentWorkspaceSetupCommand(normalized.command)) {
+      return { observation: "blocked: sealed audits must create or modify files with write/edit; bash workspace setup cannot cross the authorized source boundary." };
+    }
+
     const workspace = await ensureWorkspace(ctx);
     if (!workspace) return { observation: "error: bash needs on-disk source roots (sourcePaths); none are configured for this run." };
     // Lazy warm-up: only a real test/build command needs dependencies, so prepare
@@ -369,14 +379,18 @@ const bashTool: AgentTool = {
       runId,
       purpose: normalized.purpose,
       command: normalized.raw,
+      ...activityStreamMeta(ctx),
     });
     const phaseNetwork = sandboxNetworkForPurpose(ctx.cfg, normalized.purpose);
     const commandNetwork = (ctx.cfg.confirmMode || ctx.cfg.prepareMode) && phaseNetwork === "enabled"
       ? (openWorldCommandNeedsNetwork(normalized.command, normalized.purpose) ? "enabled" : "none")
       : phaseNetwork;
+    const commandWorkspace = sourceReadBoundaryActive(ctx) && isAgentInspectionCommand(normalized.command)
+      ? await prepareInspectionWorkspace(ctx, workspace, runId)
+      : workspace;
     const result = await runSandboxCommand(
       normalized.command,
-      workspace.absolute,
+      commandWorkspace.absolute,
       ctx.cfg.reproductionMaxLogBytes,
       ctx.cfg.sourcePaths,
       ctx.session.buildCacheDir,
@@ -430,6 +444,7 @@ const bashTool: AgentTool = {
       matched: patternCheck.matched.length,
       missing: patternCheck.missing.length,
       ...(includeOutput && output ? { output } : {}),
+      ...activityStreamMeta(ctx),
     });
     try {
       ctx.onCommandRun?.(record);
@@ -477,6 +492,7 @@ const stagePackageSourceTool: AgentTool = {
         version: result.version,
         stagedPath: result.stagedPath,
         files: result.fileCount,
+        ...activityStreamMeta(ctx),
       });
       const manifestHint = {
         component: result.componentTemplate,
@@ -606,6 +622,10 @@ export function commandFileArgsForTest(command: ReproductionCommand, session: Pi
 
 export function confirmCommandTargetLinkForTest(command: ReproductionCommand, session: Pick<AgentSession, "scratchFiles" | "baselineFiles">): { linked: boolean; reason: string } {
   return confirmCommandTargetLink(command, session as AgentSession);
+}
+
+export function splitCommandLineForTest(input: string): { argv: string[] } | { error: string } {
+  return splitCommandLine(input);
 }
 
 function addCommandFileArg(out: string[], value: string, roots: string[], session: Pick<AgentSession, "scratchFiles" | "baselineFiles">): void {
@@ -865,7 +885,14 @@ async function ensurePrepared(ctx: ToolContext, workspace: SandboxWorkspace, foc
   if (ctx.session.prepareBlock) return ctx.session.prepareBlock;
   if (ctx.session.prepared) return undefined;
   ctx.session.prepared = true; // set before awaiting so a second test command does not re-trigger
-  const report = await prepareWorkspaceToolchain({ workspace, cfg: ctx.cfg, logger: ctx.logger, ...(ctx.session.buildCacheDir ? { cacheDir: ctx.session.buildCacheDir } : {}), ...(focusCommand ? { focusCommand } : {}) });
+  const report = await prepareWorkspaceToolchain({
+    workspace,
+    cfg: ctx.cfg,
+    logger: ctx.logger,
+    ...(ctx.session.buildCacheDir ? { cacheDir: ctx.session.buildCacheDir } : {}),
+    ...(focusCommand ? { focusCommand } : {}),
+    ...(ctx.activityStreamId ? { streamId: ctx.activityStreamId } : {}),
+  });
   const resourceRequests = prepareResourceRequests(report, focusCommand);
   if (resourceRequests.length > 0) ctx.session.resourceRequests = mergeResourceRequests(ctx.session.resourceRequests ?? [], resourceRequests);
   const issue = prepareToolVersionBlockingIssue(report);
@@ -895,7 +922,7 @@ async function ensureWorkspace(ctx: ToolContext): Promise<SandboxWorkspace | und
   const workspace = await prepareSandboxWorkspace(ctx.cfg.sourcePaths, ctx.logger.runDir, "audit/workspace");
   ctx.session.workspace = workspace;
   ctx.session.baselineFiles = await listWorkspaceFiles(workspace.absolute);
-  await ctx.logger.event("audit_workspace", { workspace: workspace.relative });
+  await ctx.logger.event("audit_workspace", { workspace: workspace.relative, ...activityStreamMeta(ctx) });
   return workspace;
 }
 
@@ -905,11 +932,54 @@ async function findReadable(ctx: ToolContext, target: string): Promise<{ path: s
   if (ctx.session.scratchFiles.has(normalized)) {
     return { path: normalized, content: ctx.session.scratchFiles.get(normalized) as string, kind: "scratch" };
   }
-  const workspaceContent = await readWorkspaceCandidate(ctx, normalized);
-  if (workspaceContent) return { ...workspaceContent, kind: "sandbox" };
   const doc = findDoc(ctx, normalized);
   if (doc) return { path: doc.path, content: doc.content, kind: doc.kind };
+  if (!sourceReadBoundaryActive(ctx) || isBuildMetadataPath(normalized)) {
+    const workspaceContent = await readWorkspaceCandidate(ctx, normalized);
+    if (workspaceContent) return { ...workspaceContent, kind: "sandbox" };
+  }
   return undefined;
+}
+
+function sourceReadBoundaryActive(ctx: ToolContext): boolean {
+  const buildRoot = ctx.cfg.buildRoot ? path.resolve(ctx.cfg.buildRoot) : undefined;
+  if (!buildRoot || ctx.cfg.prepareMode) return false;
+  return ctx.cfg.sourcePaths.length !== 1 || path.resolve(ctx.cfg.sourcePaths[0] ?? "") !== buildRoot;
+}
+
+async function prepareInspectionWorkspace(ctx: ToolContext, workspace: SandboxWorkspace, runId: string): Promise<SandboxWorkspace> {
+  const relative = `${workspace.relative}-source-view-${runId}`;
+  const absolute = path.join(ctx.logger.runDir, ...relative.split("/"));
+  await mkdir(absolute, { recursive: true });
+  const visible = new Map<string, string>();
+  for (const doc of ctx.source) {
+    const safe = normalizeRelativePath(doc.path);
+    if (safe) visible.set(safe, doc.content);
+  }
+  const corpusSeen = new Set<string>();
+  for (const [index, doc] of ctx.corpus.entries()) {
+    const safe = normalizeRelativePath(doc.path) ?? `doc-${index}`;
+    let relativeCorpus = `corpus/${safe}`;
+    while (corpusSeen.has(relativeCorpus)) relativeCorpus = `corpus/${index}-${safe}`;
+    corpusSeen.add(relativeCorpus);
+    visible.set(relativeCorpus, doc.content);
+  }
+  for (const [scratchPath, content] of ctx.session.scratchFiles) visible.set(scratchPath, content);
+  for (const filePath of ctx.session.baselineFiles ?? []) {
+    if (!isBuildMetadataPath(filePath) || visible.has(filePath)) continue;
+    try {
+      visible.set(filePath, await readFile(await resolveWorkspacePathForRead(workspace.absolute, filePath), "utf8"));
+    } catch {
+      // Binary or unreadable metadata is not needed for source inspection.
+    }
+  }
+  await writeSandboxFiles(absolute, [...visible].map(([filePath, content]) => ({ path: filePath, content })));
+  return { absolute, relative };
+}
+
+function isBuildMetadataPath(filePath: string): boolean {
+  const name = path.posix.basename(filePath.replaceAll("\\", "/"));
+  return /^(?:Cargo\.(?:toml|lock)|go\.(?:mod|sum)|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock|foundry\.toml|remappings\.txt|rust-toolchain(?:\.toml)?|pyproject\.toml|uv\.lock|requirements[^/]*\.txt|Makefile|CMakeLists\.txt|\.gitmodules|tsconfig[^/]*\.json|hardhat\.config\.[cm]?[jt]s)$/.test(name);
 }
 
 async function readWorkspaceCandidate(ctx: ToolContext, target: string): Promise<{ path: string; content: string } | undefined> {
@@ -943,10 +1013,11 @@ function findDoc(ctx: ToolContext, target: string): Doc | undefined {
   const normalized = normalizeToolPath(target);
   if (!normalized) return undefined;
   const all = [...ctx.source, ...ctx.corpus];
+  const withoutCorpusPrefix = normalized.startsWith("corpus/") ? normalized.slice("corpus/".length) : normalized;
   return (
-    all.find((doc) => doc.path === normalized) ??
-    all.find((doc) => doc.path.endsWith(`/${normalized}`) || doc.path.endsWith(normalized)) ??
-    all.find((doc) => doc.path.includes(normalized))
+    all.find((doc) => doc.path === normalized || doc.path === withoutCorpusPrefix) ??
+    all.find((doc) => doc.path.endsWith(`/${withoutCorpusPrefix}`) || doc.path.endsWith(withoutCorpusPrefix)) ??
+    all.find((doc) => doc.path.includes(withoutCorpusPrefix))
   );
 }
 
@@ -1173,7 +1244,19 @@ function splitCommandLine(input: string): { argv: string[] } | { error: string }
       continue;
     }
     if (ch === "\\" && quote !== "'") {
-      escaping = true;
+      if (quote === '"') {
+        const next = input[idx + 1];
+        // POSIX shells preserve a backslash inside double quotes unless it
+        // escapes $, `, ", \\, or a newline. Regexes such as "for \\(" must
+        // therefore reach rg with the backslash intact.
+        if (next !== undefined && ["$", "`", '"', "\\", "\n"].includes(next)) {
+          escaping = true;
+        } else {
+          current += ch;
+        }
+      } else {
+        escaping = true;
+      }
       continue;
     }
     if (!quote && (ch === ";" || ch === "&" || ch === "|" || ch === "<" || ch === ">" || ch === "`")) {

@@ -7,7 +7,7 @@ import test from "node:test";
 import { gzipSync } from "node:zlib";
 import { defaultConfig, resolveRole, withRole, normalizeRoleModels } from "../dist/config.js";
 import { ProjectMemory } from "../dist/agent/memory.js";
-import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest } from "../dist/agent/tools.js";
+import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest, splitCommandLineForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
 import { runAudit } from "../dist/agent/audit.js";
@@ -19,7 +19,7 @@ import { differentialNetworkForExploitRun, runDifferentialConfirmation } from ".
 import { runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
-import { buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas } from "../dist/agent/pi-session.js";
+import { buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas, withDetailedCodexReasoningSummary } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 import { renderDisclosure } from "../dist/reports/disclosure.js";
@@ -630,19 +630,29 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   assert.ok(confirmKickoff.includes("Do not write report_*.md"), "confirm kickoff should reserve formal reports for Report");
 });
 
-test("pi session resource loader isolates audits from host agent context", () => {
-  const loader = createIsolatedResourceLoader("Mode-specific rules.");
+test("pi session resource loader isolates audits from host agent context", async () => {
+  const loader = await createIsolatedResourceLoader("Mode-specific rules.");
   assert.deepEqual(loader.getSkills(), { skills: [], diagnostics: [] });
   assert.deepEqual(loader.getPrompts(), { prompts: [], diagnostics: [] });
   assert.deepEqual(loader.getAgentsFiles(), { agentsFiles: [] });
   assert.deepEqual(loader.getAppendSystemPrompt(), []);
-  assert.equal(loader.getExtensions().extensions.length, 0);
+  assert.deepEqual(loader.getExtensions().extensions.map((extension) => extension.path), ["<inline:flounder-reasoning-summary>"]);
   const prompt = loader.getSystemPrompt();
   assert.ok(prompt.includes("Flounder's isolated audit worker"));
   assert.ok(prompt.includes("Mode-specific rules."));
   assert.ok(prompt.includes("Do not load, apply, or ask for host agent instructions"));
   assert.ok(prompt.includes("SKILL.md"));
   assert.ok(prompt.includes("~/.codex"));
+});
+
+test("openai-codex sessions request detailed reasoning summaries without changing other providers", () => {
+  const payload = { model: "gpt-5.6-sol", reasoning: { effort: "xhigh", summary: "auto" } };
+  assert.deepEqual(withDetailedCodexReasoningSummary(payload, "openai-codex"), {
+    model: "gpt-5.6-sol",
+    reasoning: { effort: "xhigh", summary: "detailed" },
+  });
+  assert.equal(withDetailedCodexReasoningSummary(payload, "openai"), payload);
+  assert.equal(withDetailedCodexReasoningSummary({ model: "gpt-4.1" }, "openai-codex").reasoning, undefined);
 });
 
 test("empty findings.json is a completed artifact, not a forced-finalize miss", () => {
@@ -921,6 +931,12 @@ test("bash refuses non-local or non-inspection commands without touching the wor
   }
 });
 
+test("bash command parsing preserves POSIX regex escapes inside double quotes", () => {
+  assert.deepEqual(splitCommandLineForTest('rg -n "hello new value \\(" scratch.txt'), {
+    argv: ["rg", "-n", "hello new value \\(", "scratch.txt"],
+  });
+});
+
 test("read, write, edit, and bash operate on loaded material and the copied workspace", async () => {
   const dir = await tempDir();
   try {
@@ -928,13 +944,13 @@ test("read, write, edit, and bash operate on loaded material and the copied work
     cfg.sourcePaths = [fixtures];
     const logger = await tempLogger(dir);
     const source = [{ path: "circuit.rs", kind: "source", content: "fn assign() {\n  region.assign_advice(x);\n}\n" }];
-    const ctx = { cfg, source, corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session: newSession() };
+    const ctx = { cfg, source, corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session: newSession(), activityStreamId: "scope-a" };
 
     const read = await tool("read").run({ path: "circuit.rs", start: 1, end: 2 }, ctx);
     assert.match(read.observation, /assign_advice/);
     assert.match(read.observation, /circuit\.rs lines 1-2 of 4/);
 
-    await tool("write").run({ path: "scratch.txt", content: "hello old value\n" }, ctx);
+    await tool("write").run({ path: "scratch.txt", content: "hello old value (\n" }, ctx);
     const edited = await tool("edit").run({ path: "scratch.txt", old: "old", new: "new" }, ctx);
     assert.match(edited.observation, /edited scratch\.txt/);
     const scratch = await tool("read").run({ path: "scratch.txt" }, ctx);
@@ -948,8 +964,11 @@ test("read, write, edit, and bash operate on loaded material and the copied work
     assert.match(run.observation, /not confirmation-eligible/);
     assert.match(run.observation, /standalone file/);
     assert.equal(ctx.session.commandRuns.length, 1);
-    assert.equal(ctx.session.commandRuns[0].passed, false);
-    assert.equal(ctx.session.commandRuns[0].targetLinked, false);
+    assert.equal(ctx.session.commandRuns.at(-1).passed, false);
+    assert.equal(ctx.session.commandRuns.at(-1).targetLinked, false);
+    const events = (await readFile(path.join(logger.runDir, "events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
+    assert.equal(events.filter((event) => event.kind === "audit_command_start").every((event) => event.streamId === "scope-a"), true);
+    assert.equal(events.filter((event) => event.kind === "audit_command_run").every((event) => event.streamId === "scope-a"), true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -1339,7 +1358,7 @@ test("sandbox workspace copy and read skip symlinks that point outside the sourc
     const safe = await tool("read").run({ path: "safe.txt" }, ctx);
     assert.match(safe.observation, /safe/);
     const leaked = await tool("read").run({ path: "leak.txt" }, ctx);
-    assert.match(leaked.observation, /no loaded or sandbox file matches/i);
+    assert.match(leaked.observation, /no authorized source/i);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
@@ -2076,7 +2095,7 @@ test("verify mode isolates generated PoC files between candidates", async () => 
     const transcript = JSON.parse(await readFile(path.join(runDir, "audit_transcript.json"), "utf8"));
     const markerReads = transcript.steps.filter((step) => step.tool === "read" && step.args?.path === "tests/verify-marker.poc.test.js");
     assert.equal(markerReads.length, 1);
-    assert.match(markerReads[0].observation, /no loaded or sandbox file matches "tests\/verify-marker\.poc\.test\.js"/);
+    assert.match(markerReads[0].observation, /no authorized source.*"tests\/verify-marker\.poc\.test\.js"/);
     assert.ok((await stat(path.join(runDir, "audit", "verify-1", "tests", "verify-marker.poc.test.js"))).isFile());
     await assert.rejects(stat(path.join(runDir, "audit", "verify-2", "tests", "verify-marker.poc.test.js")), /ENOENT/);
   } finally {
@@ -2232,8 +2251,10 @@ test("buildRoot: the sandbox copies the buildable root, while the model reads on
     // A buildable project: manifest at the root, audited source in a subdir.
     const buildRoot = path.join(dir, "project");
     await mkdir(path.join(buildRoot, "crate", "src"), { recursive: true });
+    await mkdir(path.join(buildRoot, "crate", "docs"), { recursive: true });
     await writeFile(path.join(buildRoot, "Cargo.toml"), "[workspace]\nmembers=[\"crate\"]\n");
     await writeFile(path.join(buildRoot, "crate", "src", "lib.rs"), "// audited unit\npub fn f() {}\n");
+    await writeFile(path.join(buildRoot, "crate", "docs", "AuditFindings.md"), "KNOWN ANSWER MUST STAY HIDDEN\n");
 
     const cfg = defaultConfig();
     cfg.targetName = "buildroot-e2e";
@@ -2248,6 +2269,31 @@ test("buildRoot: the sandbox copies the buildable root, while the model reads on
     // which is NOT under the narrow sourcePaths subdir — proving buildRoot drove the copy.
     const manifest = path.join(runDir, "audit", "workspace", "Cargo.toml");
     assert.ok((await stat(manifest)).isFile(), "the buildable root's manifest must be copied into the sandbox");
+
+    const logger = await tempLogger(path.join(dir, "tool-run"));
+    const session = newSession();
+    session.workspace = { absolute: path.join(runDir, "audit", "workspace"), relative: "audit/workspace" };
+    session.baselineFiles = new Set(["Cargo.toml", "crate/src/lib.rs", "crate/docs/AuditFindings.md"]);
+    const toolCtx = {
+      cfg,
+      source: [{ path: "crate/src/lib.rs", kind: "source", content: "// audited unit\npub fn f() {}\n" }],
+      corpus: [],
+      memory: new ProjectMemory(path.join(dir, "tool-memory.jsonl")),
+      logger,
+      session,
+    };
+    const hiddenRead = await tool("read").run({ path: "crate/docs/AuditFindings.md" }, toolCtx);
+    assert.match(hiddenRead.observation, /no authorized source/i);
+    const emptyIngestionRead = await tool("read").run(
+      { path: "crate/docs/AuditFindings.md" },
+      { ...toolCtx, source: [] },
+    );
+    assert.match(emptyIngestionRead.observation, /no authorized source/i, "an empty ingestion must fail closed instead of exposing buildRoot");
+    const sourceRead = await tool("read").run({ path: "crate/src/lib.rs" }, toolCtx);
+    assert.match(sourceRead.observation, /audited unit/);
+    const inspect = await tool("bash").run({ cmd: "find crate -type f -print", purpose: "inspect" }, toolCtx);
+    assert.match(inspect.observation, /crate\/src\/lib\.rs/);
+    assert.doesNotMatch(inspect.observation, /AuditFindings|KNOWN ANSWER/);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

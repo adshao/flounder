@@ -132,6 +132,23 @@ export function isAgentBuildCommand(command: StructuredReproductionCommand): boo
   return isAllowedBuildCommand(normalized.program.trim(), normalized.args.map((arg) => String(arg)));
 }
 
+/** True for a read-only local inspection command. Callers use this distinction
+ * to run discovery against an authorized source view instead of a wider build root. */
+export function isAgentInspectionCommand(command: StructuredReproductionCommand): boolean {
+  const normalized = unwrapSafeEnvCommand(command);
+  if (!normalized) return false;
+  return isAllowedLocalInspectionCommand(normalized.program.trim(), normalized.args.map((arg) => String(arg)));
+}
+
+/** Workspace setup is safe from shell injection, but it is not read-only. Sealed
+ * discovery routes these mutations through write/edit so hidden build-root files
+ * cannot be copied into the model-visible source view. */
+export function isAgentWorkspaceSetupCommand(command: StructuredReproductionCommand): boolean {
+  const normalized = unwrapSafeEnvCommand(command);
+  if (!normalized) return false;
+  return isAllowedWorkspaceSetupCommand(normalized.program.trim(), normalized.args.map((arg) => String(arg)));
+}
+
 /**
  * Verbs that PUSH a transaction/block to a network (as opposed to reading/forking
  * it). The confirm-mode white-hat line is "fork and READ live networks freely, but

@@ -18,9 +18,10 @@ async function loadTsModule(relativePath) {
   return import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`);
 }
 
-const { bugBountyEngagementLabel, contestReviewState, isVerifyRun, phaseState, projectSourceState, runProgress, sortConfirmDecisionsForSubmission } = await loadTsModule("../src/server/ui/src/domain.ts");
+const { bugBountyEngagementLabel, contestReviewState, isVerifyRun, normalizeActivityBody, splitActivitySummaries, phaseState, projectSourceState, runProgress, sortConfirmDecisionsForSubmission } = await loadTsModule("../src/server/ui/src/domain.ts");
 const { nextDialogFocusIndex } = await loadTsModule("../src/server/ui/src/dialog-focus.ts");
 const appSource = readFileSync(new URL("../src/server/ui/src/App.tsx", import.meta.url), "utf8");
+const stylesSource = readFileSync(new URL("../src/server/ui/src/styles.css", import.meta.url), "utf8");
 
 test("ui: modal focus traversal wraps in both directions", () => {
   assert.equal(nextDialogFocusIndex(0, 3, false), 1);
@@ -422,6 +423,36 @@ test("ui: running confirm surfaces command progress before decision rows exist",
   assert.equal(phases.confirm.status, "running");
   assert.equal(phases.confirm.stat, "3 real-target checks · 1 passed · 2 failed");
   assert.equal(runProgress(run, []), "3 real-target checks · 1 passed · 2 failed");
+});
+
+test("ui: live activity hides transport markers and describes active mapping", () => {
+  assert.equal(normalizeActivityBody("**Planning deep code audit**\n\n<!-- -->"), "Planning deep code audit\n");
+  assert.deepEqual(
+    splitActivitySummaries("**Planning deep code audit**\n\n<!-- -->\n\n**Checking the invariant**\n\n<!-- -->"),
+    ["Planning deep code audit", "Checking the invariant"],
+  );
+  assert.equal(runProgress({ id: 246, kind: "run", status: "running" }, []), "Mapping project scope");
+  assert.equal(runProgress({ id: 247, kind: "report", status: "running" }, []), "Generating reports");
+  assert.doesNotMatch(appSource, /Streaming reasoning summaries/);
+  assert.doesNotMatch(appSource, /Detailed reasoning summaries and tool events/);
+  assert.doesNotMatch(appSource, /activity-provider-state/);
+  assert.doesNotMatch(appSource, /void api\.runLog\(run\.id, 120\)/);
+  assert.match(appSource, /line\.streamId \? <span>\{line\.streamId\}<\/span>/);
+  assert.match(appSource, /Live\$\{displayedActiveStreams\.length \? ` · \$\{displayedActiveStreams\.length\} active`/);
+  assert.match(appSource, /aria-label="Concurrent audit streams"/);
+  assert.match(appSource, /lines\.filter\(\(line\) => line\.streamId === effectiveLane\)/);
+  assert.match(appSource, /detail\.activeScopeIds\s*\?\?/);
+  assert.match(stylesSource, /\.activity-lanes\s*\{[^}]*overflow-x:\s*auto;/s);
+  assert.match(stylesSource, /\.activity-entry\.thinking \.activity-kicker\s*\{[^}]*display:\s*none;/s);
+  assert.match(appSource, /if \(!normalizedDelta\.trim\(\)\) return;/);
+  assert.match(appSource, /normalizeActivityBody\(`\$\{last\.body\}\$\{delta\}`\)/);
+  assert.match(appSource, /nonEmptyVisibleLines\.length \? \(/);
+});
+
+test("ui: the dense control-plane base scale stays compact while touch targets remain large", () => {
+  assert.match(stylesSource, /body\s*\{[^}]*font:\s*13\.5px\/1\.5 var\(--sans\);/s);
+  assert.match(stylesSource, /\.tabs button\s*\{[^}]*font-size:\s*inherit;/s);
+  assert.match(stylesSource, /@media \(pointer:\s*coarse\)[\s\S]*min-height:\s*44px;/);
 });
 
 test("ui: verify card treats external-evidence leads as reviewed, not waiting", () => {

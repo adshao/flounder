@@ -13,7 +13,7 @@ import type { SandboxBackend, SandboxNetworkMode } from "../security/sandbox.js"
 const DEFAULT_OUT = defaultOutputDir();
 const THINKING = new Set<string>(THINKING_LEVELS);
 
-export type Activity = { kind: string; delta?: string; tool?: string; step?: number; ts?: string };
+export type Activity = { kind: string; delta?: string; tool?: string; step?: number; streamId?: string; ts?: string };
 
 // In-memory per-run feed of the model's streaming activity (token-level thinking/output +
 // tool calls), for live UI streaming without per-token disk writes. Keeps a recent ring
@@ -33,8 +33,8 @@ export class ActivityBus {
       }
     }
   }
-  subscribe(fn: (ev: Activity) => void): () => void {
-    for (const ev of this.buffer) fn(ev); // replay backlog
+  subscribe(fn: (ev: Activity) => void, replayBacklog = true): () => void {
+    if (replayBacklog) for (const ev of this.buffer) fn(ev);
     this.listeners.add(fn);
     return () => this.listeners.delete(fn);
   }

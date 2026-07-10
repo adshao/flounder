@@ -288,6 +288,7 @@ export interface ProjectDetail {
   runsTotal: number;
   currentRunsTotal?: number;
   activeScopeCount?: number;
+  activeScopeIds?: string[];
   confirmDecisions: ConfirmDecision[];
   scopes?: ScopeRow[];
   latestRunHealth?: RunHealth | null;
@@ -685,6 +686,9 @@ export interface ActivityRecord {
   delta?: string;
   text?: string;
   tool?: string;
+  streamId?: string;
+  scope?: string;
+  activeStreams?: string[];
   detail?: string;
   result?: string;
   ok?: boolean;

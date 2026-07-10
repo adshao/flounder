@@ -49,6 +49,8 @@ import {
   verifyRunRechecksConfirmed,
   needsSubmissionReadinessWork,
   needsRealTargetConfirmation,
+  normalizeActivityBody,
+  splitActivitySummaries,
   localVerifiedFindings,
   pendingConfirmFindings,
   pendingDecisionReports,
@@ -971,10 +973,15 @@ interface ActivityLine {
   body: string;
   step?: number;
   meta?: string;
+  streamId?: string;
+  streaming?: boolean;
   time: number;
 }
 
 const STREAM_MERGE_WINDOW_MS = 15_000;
+const REASONING_DEDUPE_WINDOW_MS = 10 * 60_000;
+const MAX_ACTIVITY_LINES = 300;
+const PIPELINE_ACTIVITY_STREAM = "__pipeline";
 const STICKY_SCROLL_THRESHOLD_PX = 32;
 const PAGE_SIZE_OPTIONS = [10, 25, 50, 100] as const;
 const DEFAULT_PAGE_SIZE = 25;
@@ -1016,10 +1023,6 @@ function projectListFilterUrl(query: string, status: ProjectStatusFilter): strin
   else params.delete("status");
   const qs = params.toString();
   return `${window.location.pathname}${qs ? `?${qs}` : ""}${window.location.hash}`;
-}
-
-function normalizeActivityBody(value: string): string {
-  return value.replace(/\n{3,}/g, "\n\n").trimStart();
 }
 
 function activityPreviewLimit(kind: ActivityLine["kind"]): number {
@@ -1353,40 +1356,62 @@ function activityDelta(event: ActivityRecord): string | undefined {
   return event.detail;
 }
 
-function appendStreamLine(next: ActivityLine[], now: number, kind: ActivityLine["kind"], label: string, delta: string): void {
+function activityEventStreamId(event: ActivityRecord): string | undefined {
+  if (typeof event.streamId === "string" && event.streamId.trim()) return event.streamId.trim();
+  if (typeof event.scope === "string" && event.scope.trim()) return event.scope.trim();
+  return undefined;
+}
+
+function updateActiveActivityStreams(current: string[], event: ActivityRecord): string[] {
+  if (event.kind === "activity_stream_state") {
+    return Array.isArray(event.activeStreams)
+      ? [...new Set(event.activeStreams.filter((id): id is string => typeof id === "string" && Boolean(id.trim())).map((id) => id.trim()))]
+      : [];
+  }
+  const streamId = activityEventStreamId(event);
+  if (!streamId) return current;
+  if (event.kind === "audit_dig_done") return current.filter((id) => id !== streamId);
+  return current.includes(streamId) ? current : [...current, streamId];
+}
+
+function appendStreamLine(next: ActivityLine[], now: number, kind: ActivityLine["kind"], label: string, delta: string, streamId?: string): void {
+  const normalizedDelta = normalizeActivityBody(delta);
+  if (!normalizedDelta.trim()) return;
   const last = next[next.length - 1];
   const recentStreamIndex = [...next]
     .reverse()
-    .findIndex((line) => line.kind === kind && line.label === label && now - line.time <= STREAM_MERGE_WINDOW_MS);
-  if (last?.kind === kind && last.label === label) {
+    .findIndex((line) => line.streaming && line.kind === kind && line.label === label && line.streamId === streamId && now - line.time <= STREAM_MERGE_WINDOW_MS);
+  if (last?.streaming && last.kind === kind && last.label === label && last.streamId === streamId) {
     next[next.length - 1] = { ...last, body: normalizeActivityBody(`${last.body}${delta}`), time: now };
   } else if (recentStreamIndex >= 0) {
     const index = next.length - 1 - recentStreamIndex;
     const line = next[index];
     next[index] = { ...line, body: normalizeActivityBody(`${line.body}${delta}`), time: now };
   } else {
-    next.push({ id: now + next.length, kind, label, body: normalizeActivityBody(delta), time: now });
+    next.push({ id: now + next.length, kind, label, body: normalizedDelta, time: now, streaming: true, ...(streamId ? { streamId } : {}) });
   }
 }
 
-function appendFinalStreamLine(next: ActivityLine[], now: number, kind: ActivityLine["kind"], label: string, body: string): void {
-  const normalized = normalizeActivityBody(body);
-  const recentStreamIndex = [...next]
+function appendFinalStreamLine(next: ActivityLine[], now: number, kind: ActivityLine["kind"], label: string, body: string, streamId?: string): void {
+  const segments = kind === "thinking"
+    ? splitActivitySummaries(body)
+    : [normalizeActivityBody(body).trim()].filter(Boolean);
+  const activeIndex = [...next]
     .reverse()
-    .findIndex((line) => line.kind === kind && line.label === label && now - line.time <= STREAM_MERGE_WINDOW_MS);
-  if (recentStreamIndex < 0) {
-    next.push({ id: now + next.length, kind, label, body: normalized, time: now });
-    return;
+    .findIndex((line) => line.streaming && line.kind === kind && line.label === label && line.streamId === streamId);
+  if (activeIndex >= 0) next.splice(next.length - 1 - activeIndex, 1);
+  if (!segments.length) return;
+  for (const segment of segments) {
+    appendEventLine(next, {
+      id: now + next.length,
+      kind,
+      label,
+      body: segment,
+      time: now,
+      streaming: false,
+      ...(streamId ? { streamId } : {}),
+    });
   }
-  const index = next.length - 1 - recentStreamIndex;
-  const line = next[index];
-  const current = normalizeActivityBody(line.body);
-  const merged = normalized.startsWith(current) || current.startsWith(normalized)
-    ? (normalized.length >= current.length ? normalized : current)
-    : `${current}${normalized}`.includes(`${normalized}${normalized}`)
-      ? current
-      : normalized;
-  next[index] = { ...line, body: normalizeActivityBody(merged), time: now };
 }
 
 function activityLineDedupeBody(value: string): string {
@@ -1395,13 +1420,16 @@ function activityLineDedupeBody(value: string): string {
 
 function appendEventLine(next: ActivityLine[], line: ActivityLine): void {
   const key = activityLineDedupeBody(line.body);
+  if (!key) return;
+  const dedupeWindow = line.kind === "thinking" ? REASONING_DEDUPE_WINDOW_MS : STREAM_MERGE_WINDOW_MS;
   const recentIndex = [...next]
     .reverse()
     .findIndex((existing) =>
       existing.kind === line.kind &&
       existing.label === line.label &&
+      existing.streamId === line.streamId &&
       activityLineDedupeBody(existing.body) === key &&
-      Math.abs(line.time - existing.time) <= STREAM_MERGE_WINDOW_MS,
+      Math.abs(line.time - existing.time) <= dedupeWindow,
     );
   if (recentIndex >= 0) {
     const index = next.length - 1 - recentIndex;
@@ -1433,21 +1461,30 @@ function activityEventLabel(kind: string): string {
 }
 
 function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): ActivityLine[] {
+  if (event.kind === "activity_stream_state") return lines;
   const next = [...lines];
   const last = next[next.length - 1];
+  const streamId = activityEventStreamId(event);
   const eventTs = typeof event.ts === "string" ? new Date(event.ts).getTime() : Date.now();
   const now = Number.isFinite(eventTs) ? eventTs : Date.now();
   if (event.kind === "thinking_delta") {
     const delta = activityDelta(event);
-    if (delta) appendStreamLine(next, now, "thinking", "Thinking", delta);
-    return next.slice(-60);
+    if (delta) appendStreamLine(next, now, "thinking", "Thinking", delta, streamId);
+    return next.slice(-MAX_ACTIVITY_LINES);
   }
   if (event.kind === "text_delta") {
     const delta = activityDelta(event);
-    if (delta) appendStreamLine(next, now, "text", "Output", delta);
+    if (delta) appendStreamLine(next, now, "text", "Output", delta, streamId);
   } else if (event.kind === "step") {
+    for (let index = next.length - 1; index >= 0; index -= 1) {
+      const line = next[index];
+      if (!line.streaming || line.streamId !== streamId) continue;
+      next[index] = { ...line, streaming: false };
+      break;
+    }
     const canAnnotateAction =
       last?.kind === "event" &&
+      last.streamId === streamId &&
       !["Command result", "Start"].includes(last.label) &&
       stepMatchesActivity(event.tool, last.label);
     if (canAnnotateAction && now - last.time <= 4_000) {
@@ -1470,20 +1507,20 @@ function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): Activ
     const action = event.kind === "audit_action" ? actionSummary(body) : undefined;
     const summary = event.kind === "audit_action" ? undefined : eventSummary(event, body);
     const actionFailed = event.kind === "audit_action" && event.ok === false;
-    if (event.kind === "audit_action" && !actionFailed && event.tool === "bash") return next.slice(-60);
-    if (event.kind === "audit_action" && !actionFailed && ["bash", "read", "write", "edit"].includes(body.trim())) return next.slice(-60);
+    if (event.kind === "audit_action" && !actionFailed && event.tool === "bash") return next.slice(-MAX_ACTIVITY_LINES);
+    if (event.kind === "audit_action" && !actionFailed && ["bash", "read", "write", "edit"].includes(body.trim())) return next.slice(-MAX_ACTIVITY_LINES);
     const normalizedBody = event.kind === "audit_command_run"
       ? commandRunSummary(body, eventPayload(event))
       : actionFailed
         ? [action?.body ?? body, typeof event.result === "string" ? event.result : undefined].filter(Boolean).join("\n")
         : action?.body ?? summary?.body ?? body;
     if (event.kind === "audit_thinking") {
-      appendFinalStreamLine(next, now, "thinking", "Thinking", normalizedBody);
-      return next.slice(-60);
+      appendFinalStreamLine(next, now, "thinking", "Thinking", normalizedBody, streamId);
+      return next.slice(-MAX_ACTIVITY_LINES);
     }
     if (event.kind === "audit_text") {
-      appendFinalStreamLine(next, now, "text", "Output", normalizedBody);
-      return next.slice(-60);
+      appendFinalStreamLine(next, now, "text", "Output", normalizedBody, streamId);
+      return next.slice(-MAX_ACTIVITY_LINES);
     }
     appendEventLine(next, {
       id: now + next.length,
@@ -1491,9 +1528,10 @@ function appendActivityLine(lines: ActivityLine[], event: ActivityRecord): Activ
       label: actionFailed ? "Action blocked" : action?.label ?? summary?.label ?? label,
       body: normalizeActivityBody(normalizedBody),
       time: now,
+      ...(streamId ? { streamId } : {}),
     });
   }
-  return next.slice(-60);
+  return next.slice(-MAX_ACTIVITY_LINES);
 }
 
 function ActivityBody({ line, pre = false, defaultExpanded = false }: { line: ActivityLine; pre?: boolean; defaultExpanded?: boolean }) {
@@ -3820,7 +3858,10 @@ function ProjectActivity({ detail }: { detail: ProjectDetail }) {
       </Card>
     );
   }
-  return <LiveActivityPanel run={run} defaultExpanded />;
+  const activeScopeIds = detail.activeScopeIds
+    ?? detail.scopes?.filter((scope) => scope.status === "auditing").map((scope) => scope.scope_id)
+    ?? [];
+  return <LiveActivityPanel run={run} activeScopeIds={activeScopeIds} defaultExpanded />;
 }
 
 function decisionLabel(decision: ConfirmDecision): string {
@@ -4455,23 +4496,48 @@ function overviewRunDetail(run: RunRow, decisions: ConfirmDecision[]): string {
   return pieces.filter(Boolean).join(" · ");
 }
 
-function LiveActivityPanel({ run, defaultExpanded = false }: { run: RunRow; defaultExpanded?: boolean }) {
+function LiveActivityPanel({ run, activeScopeIds, defaultExpanded = false }: { run: RunRow; activeScopeIds?: string[]; defaultExpanded?: boolean }) {
   const [lines, setLines] = useState<ActivityLine[]>([]);
+  const [activeStreams, setActiveStreams] = useState<string[]>([]);
+  const [selectedLane, setSelectedLane] = useState<string | undefined>();
+  const [laneSelectionPinned, setLaneSelectionPinned] = useState(false);
   const [connected, setConnected] = useState(false);
   const [failed, setFailed] = useState(false);
-  const activityScroll = usePinnedScroll(lines, run.id);
+  const displayedActiveStreams = run.status === "running" && activeScopeIds ? activeScopeIds : activeStreams;
+  const hasPipelineActivity = lines.some((line) => !line.streamId);
+  const availableLanes = [...displayedActiveStreams, ...(hasPipelineActivity ? [PIPELINE_ACTIVITY_STREAM] : [])];
+  const effectiveLane = selectedLane && availableLanes.includes(selectedLane)
+    ? selectedLane
+    : displayedActiveStreams[0] ?? (hasPipelineActivity ? PIPELINE_ACTIVITY_STREAM : undefined);
+  const visibleLines = effectiveLane === PIPELINE_ACTIVITY_STREAM
+    ? lines.filter((line) => !line.streamId)
+    : effectiveLane
+      ? lines.filter((line) => line.streamId === effectiveLane)
+      : lines;
+  const nonEmptyVisibleLines = visibleLines.filter((line) => Boolean(line.body.trim()));
+  const activityScroll = usePinnedScroll(nonEmptyVisibleLines, `${run.id}:${effectiveLane ?? "all"}`);
+  useEffect(() => {
+    if (!availableLanes.length) return;
+    const nextLane = selectedLane && availableLanes.includes(selectedLane)
+      ? selectedLane
+      : displayedActiveStreams[0] ?? PIPELINE_ACTIVITY_STREAM;
+    if (!laneSelectionPinned && displayedActiveStreams.length && selectedLane === PIPELINE_ACTIVITY_STREAM) {
+      setSelectedLane(displayedActiveStreams[0]);
+    } else if (nextLane !== selectedLane) {
+      setSelectedLane(nextLane);
+    }
+  }, [availableLanes, displayedActiveStreams, laneSelectionPinned, selectedLane]);
   useEffect(() => {
     let cancelled = false;
     setLines([]);
+    setActiveStreams([]);
+    setSelectedLane(undefined);
+    setLaneSelectionPinned(false);
     setFailed(false);
     setConnected(false);
-    void api.runLog(run.id, 120)
-      .then((res) => {
-        if (!cancelled) setLines((res.events ?? []).reduce((current, event) => appendActivityLine(current, event), [] as ActivityLine[]));
-      })
-      .catch(() => {
-        // The EventSource below still owns the live connection state.
-      });
+    // The SSE endpoint supplies one deduplicated history replay followed by
+    // live-only events. A parallel JSON bootstrap races that replay and used to
+    // duplicate the newest tool and reasoning rows.
     const source = new EventSource(`/api/runs/${run.id}/log`);
     source.onopen = () => {
       if (cancelled) return;
@@ -4481,7 +4547,10 @@ function LiveActivityPanel({ run, defaultExpanded = false }: { run: RunRow; defa
     source.onmessage = (message) => {
       try {
         const event = JSON.parse(message.data) as ActivityRecord;
-        if (!cancelled) setLines((current) => appendActivityLine(current, event));
+        if (!cancelled) {
+          setLines((current) => appendActivityLine(current, event));
+          setActiveStreams((current) => updateActiveActivityStreams(current, event));
+        }
       } catch {
         // Ignore malformed frames; the status polling still owns run state.
       }
@@ -4507,19 +4576,64 @@ function LiveActivityPanel({ run, defaultExpanded = false }: { run: RunRow; defa
           </div>
           <span className={`activity-connection ${connected ? "on" : failed ? "warn" : ""}`}>
             <span className="dot" />
-            {connected ? "Live" : failed ? "Reconnecting" : "Connecting"}
+            {connected ? `Live${displayedActiveStreams.length ? ` · ${displayedActiveStreams.length} active` : ""}` : failed ? "Reconnecting" : "Connecting"}
           </span>
         </div>
-        {lines.length ? (
+        {displayedActiveStreams.length ? (
+          <div className="activity-lanes" role="tablist" aria-label="Concurrent audit streams">
+            {displayedActiveStreams.map((streamId) => {
+              const lastStreamLine = [...lines].reverse().find((line) => line.streamId === streamId);
+              return (
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={effectiveLane === streamId}
+                  className={effectiveLane === streamId ? "active" : ""}
+                  key={streamId}
+                  onClick={() => {
+                    setSelectedLane(streamId);
+                    setLaneSelectionPinned(true);
+                  }}
+                >
+                  <span className="dot" />
+                  <span>
+                    <strong>{streamId}</strong>
+                    <small>{lastStreamLine?.label ?? "Working"}</small>
+                  </span>
+                </button>
+              );
+            })}
+            {hasPipelineActivity ? (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={effectiveLane === PIPELINE_ACTIVITY_STREAM}
+                className={effectiveLane === PIPELINE_ACTIVITY_STREAM ? "active" : ""}
+                onClick={() => {
+                  setSelectedLane(PIPELINE_ACTIVITY_STREAM);
+                  setLaneSelectionPinned(true);
+                }}
+              >
+                <span className="pipeline-dot" />
+                <span>
+                  <strong>Pipeline</strong>
+                  <small>Run events</small>
+                </span>
+              </button>
+            ) : null}
+          </div>
+        ) : null}
+        {nonEmptyVisibleLines.length ? (
           <div className="activity-scroll-wrap">
             <div className="activity-timeline" ref={activityScroll.scrollRef} onScroll={activityScroll.onScroll}>
-              {lines.map((line) => (
+              {nonEmptyVisibleLines.map((line) => (
                 <div key={line.id} className={`activity-entry ${line.kind}`}>
                   <span className="activity-dot" />
                   <div className="activity-content">
                     <span className="activity-kicker">
                       <span>{line.label}</span>
                       <span className="activity-meta">
+                        {line.streamId ? <span>{line.streamId}</span> : null}
                         {line.meta ? <span>{line.meta}</span> : line.step ? <span>{`Step ${line.step}`}</span> : null}
                         <time dateTime={new Date(line.time).toISOString()}>{formatActivityTime(line.time)}</time>
                       </span>
@@ -4533,7 +4647,7 @@ function LiveActivityPanel({ run, defaultExpanded = false }: { run: RunRow; defa
           </div>
         ) : (
           <div className="activity-empty">
-            <strong>{connected ? "Waiting for the first model event" : "Connecting to the run stream"}</strong>
+            <strong>{connected ? effectiveLane && effectiveLane !== PIPELINE_ACTIVITY_STREAM ? `Waiting for ${effectiveLane}` : "Waiting for the first model event" : "Connecting to the run stream"}</strong>
             <span>{connected ? "Thinking, output, and tool calls will appear here as the daemon reports them." : "The panel will attach to the run's live activity feed."}</span>
           </div>
         )}
@@ -6391,7 +6505,7 @@ function RunLogModal({ run, onClose }: { run: RunRow; onClose: () => void }) {
             {lines.map((line) => (
               <div className={`run-log-entry ${line.label.toLowerCase().includes("error") ? "error" : ""}`} key={line.id}>
                 <span className="run-log-time">{formatActivityTime(line.time)}</span>
-                <span className="run-log-kind">{line.meta ? `${line.label} · ${line.meta}` : line.step ? `${line.label} · step ${line.step}` : line.label}</span>
+                <span className="run-log-kind">{[line.label, line.streamId, line.meta ?? (line.step ? `step ${line.step}` : undefined)].filter(Boolean).join(" · ")}</span>
                 <ActivityBody line={line} pre />
               </div>
             ))}
