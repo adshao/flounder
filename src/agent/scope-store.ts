@@ -16,7 +16,7 @@ function scopesPath(historyDir: string): string {
   return path.join(historyDir, SCOPES_FILE);
 }
 
-export async function loadScopeInventory(historyDir: string): Promise<AuditScope[]> {
+export async function loadScopeInventory(historyDir: string, materialFingerprint?: string): Promise<AuditScope[]> {
   const file = scopesPath(historyDir);
   const pending = pendingWrites.get(file);
   if (pending) await pending;
@@ -26,7 +26,11 @@ export async function loadScopeInventory(historyDir: string): Promise<AuditScope
     const normalized = parsed.map((scope, index) => normalizeAuditScope(scope, index));
     const invalid = normalized.findIndex((scope) => !scope);
     if (invalid >= 0) throw new Error(`Invalid scope inventory at ${file}: entry ${invalid} is incomplete.`);
-    return normalized as AuditScope[];
+    const scopes = normalized as AuditScope[];
+    if (!materialFingerprint) return scopes;
+    // Legacy or different-material inventories remain readable to operators, but
+    // the audit fails closed into a fresh MAP instead of silently reusing them.
+    return scopes.filter((scope) => scope.materialFingerprint === materialFingerprint);
   } catch (error) {
     if (isMissingFileError(error)) return [];
     const detail = error instanceof Error ? error.message : String(error);
@@ -102,6 +106,11 @@ function normalizeAuditScope(value: unknown, index: number): AuditScope | undefi
     ...(typeof scope.digSeconds === "number" && Number.isFinite(scope.digSeconds) ? { digSeconds: scope.digSeconds } : {}),
     ...(typeof scope.priority === "number" && Number.isFinite(scope.priority) ? { priority: scope.priority } : {}),
     ...(typeof scope.parentScopeId === "string" && scope.parentScopeId.trim() ? { parentScopeId: scope.parentScopeId.trim() } : {}),
+    ...(typeof scope.materialFingerprint === "string" && scope.materialFingerprint.trim() ? { materialFingerprint: scope.materialFingerprint.trim() } : {}),
+    ...(Array.isArray(scope.mapSamples)
+      ? { mapSamples: [...new Set(scope.mapSamples.filter((sample): sample is number => typeof sample === "number" && Number.isInteger(sample) && sample > 0))].sort((a, b) => a - b) }
+      : {}),
+    ...(typeof scope.mapAgreement === "number" && Number.isFinite(scope.mapAgreement) ? { mapAgreement: Math.max(1, Math.floor(scope.mapAgreement)) } : {}),
   };
 }
 

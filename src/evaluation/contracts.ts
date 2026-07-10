@@ -54,9 +54,13 @@ export interface TargetBundle {
   mockLlm?: boolean;
   maxScopes?: number;
   mapSteps?: number;
+  mapSamples?: number;
   digSteps?: number;
   maxSteps?: number;
   digSamples?: number;
+  digMaxSamples?: number;
+  adaptiveDig?: boolean;
+  eagerPrepare?: boolean;
   digConcurrency?: number;
   sandboxBackend?: "auto" | "oci" | "apple-container";
   sandboxImage?: string;
@@ -86,6 +90,11 @@ export interface EvidenceContract {
   requiresRefutation: boolean;
   networkPolicy: NetworkPolicy;
   expectedOutcome?: ExpectedOutcome;
+  /** Evaluator-only generalization metadata; never shown to the audit model. */
+  caseId?: string;
+  caseFamily?: string;
+  targetStack?: string;
+  holdout?: boolean;
 }
 
 export interface WorkItemInput {
@@ -199,9 +208,13 @@ export function normalizeTargetBundle(input: unknown, label = "target bundle"): 
     ...optionalBooleanField("mockLlm", record.mockLlm ?? record.mock_llm),
     ...optionalNumberField("maxScopes", record.maxScopes ?? record.max_scopes, true),
     ...optionalNumberField("mapSteps", record.mapSteps ?? record.map_steps, true),
+    ...optionalNumberField("mapSamples", record.mapSamples ?? record.map_samples, true),
     ...optionalNumberField("digSteps", record.digSteps ?? record.dig_steps, true),
     ...optionalNumberField("maxSteps", record.maxSteps ?? record.max_steps, true),
     ...optionalNumberField("digSamples", record.digSamples ?? record.dig_samples, true),
+    ...optionalNumberField("digMaxSamples", record.digMaxSamples ?? record.dig_max_samples, true),
+    ...optionalBooleanField("adaptiveDig", record.adaptiveDig ?? record.adaptive_dig),
+    ...optionalBooleanField("eagerPrepare", record.eagerPrepare ?? record.eager_prepare),
     ...optionalNumberField("digConcurrency", record.digConcurrency ?? record.dig_concurrency, true),
     ...(sandboxBackend !== undefined ? { sandboxBackend } : {}),
     ...optionalStringField("sandboxImage", record.sandboxImage ?? record.sandbox_image),
@@ -287,6 +300,10 @@ export function normalizeEvidenceContract(input: unknown, kind: WorkItemKind): E
     requiresRefutation: booleanValue(record.requiresRefutation ?? record.requires_refutation, defaults.requiresRefutation),
     networkPolicy,
     ...(expectedOutcome !== undefined ? { expectedOutcome: enumValue(expectedOutcome, ["detect-positive", "reject-positive"] as const, "evidence expectedOutcome") } : {}),
+    ...optionalStringField("caseId", record.caseId ?? record.case_id),
+    ...optionalStringField("caseFamily", record.caseFamily ?? record.case_family),
+    ...optionalStringField("targetStack", record.targetStack ?? record.target_stack),
+    ...optionalBooleanField("holdout", record.holdout),
   };
 }
 

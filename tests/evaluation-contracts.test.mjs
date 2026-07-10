@@ -63,6 +63,8 @@ test("evaluation contracts normalize and materialize answer-safe manifests", () 
   assert.equal(absolute.items[0].materialPolicy.materials[0].path, path.normalize("/workspace/eval/docs/design.md"));
 
   const row = {
+    uuid: "11111111-1111-4111-8111-111111111111",
+    attempts: 0,
     item_key: absolute.items[0].itemKey,
     kind: absolute.items[0].kind,
     target_bundle_json: JSON.stringify(absolute.items[0].targetBundle),
@@ -74,6 +76,25 @@ test("evaluation contracts normalize and materialize answer-safe manifests", () 
   assert.equal(spec.provider, "openai-codex");
   assert.equal(spec.thinking, "xhigh");
   assert.equal(spec.verb, "run");
+  assert.match(spec.historyDir, /^evaluation-state\/11111111-1111-4111-8111-111111111111-[a-f0-9]{12}\/attempt-1$/);
+  assert.match(spec.buildCacheDir, /^evaluation-cache\/.+-[a-f0-9]{12}$/);
+  const retrySpec = buildWorkItemLaunchSpec({ ...row, attempts: 1 }, { config_json: "{}" });
+  assert.match(retrySpec.historyDir, /^evaluation-state\/11111111-1111-4111-8111-111111111111-[a-f0-9]{12}\/attempt-2$/);
+  assert.equal(retrySpec.buildCacheDir, spec.buildCacheDir, "attempts share only the dependency cache");
+  const otherSpec = buildWorkItemLaunchSpec({ ...row, uuid: "22222222-2222-4222-8222-222222222222" }, { config_json: "{}" });
+  assert.notEqual(otherSpec.historyDir, spec.historyDir, "paired baseline and candidate items cannot share scopes, memory, or transcripts");
+  const collidingSlugSpec = buildWorkItemLaunchSpec({
+    ...row,
+    uuid: "33333333-3333-4333-8333-333333333333",
+    target_bundle_json: JSON.stringify({ ...absolute.items[0].targetBundle, target: "eval/c1-f1-s1" }),
+  }, { config_json: "{}" });
+  assert.notEqual(collidingSlugSpec.buildCacheDir, spec.buildCacheDir, "normalized target names retain a digest to prevent cache namespace collisions");
+  const otherSourceSpec = buildWorkItemLaunchSpec({
+    ...row,
+    uuid: "44444444-4444-4444-8444-444444444444",
+    target_bundle_json: JSON.stringify({ ...absolute.items[0].targetBundle, sourcePaths: absolute.items[0].targetBundle.sourcePaths.map((sourcePath) => `${sourcePath}-other`) }),
+  }, { config_json: "{}" });
+  assert.notEqual(otherSourceSpec.buildCacheDir, spec.buildCacheDir, "same-name targets with different source roots cannot share dependency caches");
 });
 
 test("evaluation contracts reject blind answer leakage and host execution", () => {

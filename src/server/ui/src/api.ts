@@ -438,7 +438,11 @@ export interface TargetBundlePayload {
   thinking?: string;
   daemonId?: number;
   maxScopes?: number;
+  mapSamples?: number;
   digSamples?: number;
+  digMaxSamples?: number;
+  adaptiveDig?: boolean;
+  eagerPrepare?: boolean;
   digConcurrency?: number;
   verifyConcurrency?: number;
   capabilitySurface?: CapabilitySurfacePayload;
@@ -467,6 +471,10 @@ export interface EvidenceContractPayload {
   requiresRefutation: boolean;
   networkPolicy: "sealed" | "local-only" | "open-world-read";
   expectedOutcome?: ExpectedOutcome;
+  caseId?: string;
+  caseFamily?: string;
+  targetStack?: string;
+  holdout?: boolean;
 }
 
 export interface WorkItemPayload {
@@ -565,6 +573,9 @@ export type HarnessDecision = "promote" | "reject" | "needs-more-samples";
 
 export interface HarnessPromotionPolicy {
   minimumSamplesPerClass: number;
+  minimumDistinctCases: number;
+  minimumDistinctFamilies: number;
+  minimumHoldoutCases: number;
   minimumImprovedCases: number;
   requireAllControlsPass: boolean;
   maxBlockedRate: number;
@@ -607,6 +618,12 @@ export interface HarnessScoreMetrics {
   positiveRecall: number | null;
   controlPassRate: number | null;
   blockedRate: number;
+  distinctPositiveCases: number;
+  distinctControlCases: number;
+  distinctFamilies: number;
+  distinctStacks: number;
+  holdouts: number;
+  holdoutsPassed: number;
 }
 
 export interface HarnessScorecard {
@@ -707,8 +724,12 @@ export interface ProjectConfig {
   scopeCoverageMode?: "focused" | "standard" | "half" | "full" | "custom";
   maxScopes?: number;
   mapSteps?: number;
+  mapSamples?: number;
   digSteps?: number;
   digSamples?: number;
+  digMaxSamples?: number;
+  adaptiveDig?: boolean;
+  eagerPrepare?: boolean;
   digConcurrency?: number;
   verifyConcurrency?: number;
   phases?: PhaseConfig;

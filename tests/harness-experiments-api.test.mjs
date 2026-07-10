@@ -27,6 +27,10 @@ function item(itemKey, expectedOutcome) {
     evidenceContract: {
       kind: "benchmark-oracle",
       expectedOutcome,
+      caseId: itemKey,
+      caseFamily: itemKey.endsWith("2") ? "family-b" : "family-a",
+      targetStack: "javascript",
+      holdout: itemKey.endsWith("2"),
       requiresDifferential: expectedOutcome === "detect-positive",
       requiresRefutation: true,
       networkPolicy: "sealed",

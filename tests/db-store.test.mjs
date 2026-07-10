@@ -307,6 +307,27 @@ test("store: discovery health and backlog are persisted and operator-actionable"
   db.close();
 });
 
+test("store: a newer backlog snapshot supersedes only the identical open action", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "backlog-reconciliation" });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/reconcile-1" });
+  db.replaceDiscoveryBacklog(projectId, runId, [
+    { kind: "coverage-gap", status: "open", scopeId: "S1", title: "Complete S1", location: "dig", reason: "Incomplete" },
+    { kind: "coverage-gap", status: "open", scopeId: "S1", title: "Review authority edge", location: "dig", reason: "Unresolved" },
+  ]);
+
+  const nextRunId = db.startRun({ projectId, kind: "run", runDir: "/runs/reconcile-2" });
+  db.replaceDiscoveryBacklog(projectId, nextRunId, [
+    { kind: "coverage-gap", status: "resolved", scopeId: "S1", title: "Complete S1", location: "dig", reason: "Complete" },
+  ]);
+
+  const all = db.listDiscoveryBacklog(projectId, { status: "all" });
+  assert.equal(all.filter((row) => row.title === "Complete S1" && row.status === "open").length, 0);
+  assert.equal(all.filter((row) => row.title === "Complete S1" && row.status === "resolved").length, 2);
+  assert.equal(all.filter((row) => row.title === "Review authority edge" && row.status === "open").length, 1);
+  db.close();
+});
+
 test("store: finding status transitions land on a timeline", async () => {
   const db = await tempDb();
   const projectId = db.upsertProject({ name: "p" });
@@ -666,6 +687,75 @@ test("store: confirm decisions are replaced per run, not duplicated", async () =
   // a re-run of confirm rewrites the sheet wholesale
   db.upsertConfirmDecisions(projectId, runId, [{ bug: "A", reproduced: "yes", recommendation: "submit-candidate" }]);
   assert.equal(db.listConfirmDecisions(projectId).length, 1);
+  db.close();
+});
+
+test("store: execution-equivalent confirm rows collapse linked findings without overriding operator tracking", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "execution-equivalent" });
+  const auditRun = db.startRun({ projectId, kind: "run", runDir: "/runs/equivalent-audit" });
+  db.upsertFindings(projectId, auditRun, [
+    { findingKey: "kpatha", title: "Variant A", status: "confirmed-differential" },
+    { findingKey: "kpathb", title: "Variant B", status: "confirmed-differential" },
+    { findingKey: "kpathc", title: "Variant C", status: "confirmed-differential" },
+  ]);
+  const before = db.listFindings(projectId);
+  const submitted = before.find((finding) => finding.finding_key === "kpathb");
+  const ignored = before.find((finding) => finding.finding_key === "kpathc");
+  db.setFindingTracking(submitted.id, "submitted");
+  db.setFindingTracking(ignored.id, "ignored");
+
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/equivalent-confirm" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [{
+    bug: "One execution-equivalent bug",
+    reproduced: "yes",
+    recommendation: "needs-human",
+    members: ["kpatha", "kpathb", "kpathc"],
+    mergedFrom: ["Variant A", "Variant B", "Variant C"],
+    evidenceLevel: "real-target-reproduced",
+    reproEvidence: "one fix neutralized every linked PoC against the real target",
+  }]);
+
+  const after = db.listFindings(projectId);
+  const openVariant = after.find((finding) => finding.finding_key === "kpatha");
+  const submittedAfter = after.find((finding) => finding.finding_key === "kpathb");
+  const ignoredAfter = after.find((finding) => finding.finding_key === "kpathc");
+  assert.equal(submittedAfter.tracking_status, "submitted");
+  assert.equal(submittedAfter.duplicate_of_finding_id, null);
+  assert.equal(openVariant.tracking_status, "duplicate");
+  assert.equal(openVariant.duplicate_of_finding_id, submittedAfter.id);
+  assert.equal(ignoredAfter.tracking_status, "ignored", "explicit operator decisions remain authoritative");
+  assert.equal(ignoredAfter.duplicate_of_finding_id, null);
+  db.close();
+});
+
+test("store: consolidation prefers an actionable canonical finding over an ignored variant", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "execution-equivalent-ignored" });
+  const auditRun = db.startRun({ projectId, kind: "run", runDir: "/runs/equivalent-ignored-audit" });
+  db.upsertFindings(projectId, auditRun, [
+    { findingKey: "kignored", title: "Ignored variant", status: "confirmed-differential" },
+    { findingKey: "kactionable", title: "Actionable variant", status: "confirmed-differential" },
+  ]);
+  const before = db.listFindings(projectId);
+  db.setFindingTracking(before.find((finding) => finding.finding_key === "kignored").id, "ignored");
+  const actionable = before.find((finding) => finding.finding_key === "kactionable");
+
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/equivalent-ignored-confirm" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [{
+    bug: "One bug",
+    reproduced: "yes",
+    recommendation: "needs-human",
+    members: ["kignored", "kactionable"],
+    mergedFrom: ["Ignored variant", "Actionable variant"],
+    evidenceLevel: "real-target-reproduced",
+    reproEvidence: "one fix neutralized both PoCs",
+  }]);
+
+  const after = db.listFindings(projectId);
+  assert.equal(after.find((finding) => finding.finding_key === "kignored").tracking_status, "ignored");
+  assert.equal(after.find((finding) => finding.finding_key === "kactionable").duplicate_of_finding_id, null);
+  assert.equal(after.find((finding) => finding.finding_key === "kactionable").id, actionable.id);
   db.close();
 });
 

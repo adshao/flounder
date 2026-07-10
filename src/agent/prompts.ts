@@ -28,6 +28,13 @@ export const DISCOVERY_BACKLOG_RULES = `Discovery backlog artifacts (optional, b
 - If you encounter a promising adjacent audit unit outside the current pinned scope, write followup_scopes.json. Schema: [{"id"?,"parent_scope_id"?,"obligation","region","lenses"?,"exposure","difficulty","score","why"}], where score is an integer 0-100 on the same ordering scale as scopes.json. Keep the current phase focused; the framework will persist these as pending follow-up scopes instead of spawning unbounded side quests.
 - These backlog files improve future discovery coverage. They never confirm a vulnerability, never replace findings.json or scopes.json, and should not contain safe/no-issue notes.`;
 
+export const SCOPE_OUTCOME_RULES = `Per-scope coverage handoff (mandatory in a pinned/deep DIG):
+- Before emitting done, write scope_outcome.json at the workspace root. This is coverage evidence for orchestration and later composition, NEVER a vulnerability finding and NEVER confirmation.
+- Schema: {"scope_id":"...","coverage_complete":boolean,"obligations":[{"id","statement","status":"discharged|unmet|uncertain|blocked","location"?,"evidence"?,"confidence"?}],"composition_edges":[{"id","kind":"input|authority|binding|transformation|sink|boundary","description","status":"observed|unresolved","location"?,"from"?,"to"?}],"blockers":[],"summary"?}.
+- Enumerate every obligation actually checked. A discharged obligation must cite the exact enforcing edge; unmet/uncertain obligations still belong in findings.json when they are actionable. A blocker names unavailable setup or evidence and makes coverage_complete=false.
+- Record model-observed composition edges even when no local bug exists: attacker-controlled inputs, legitimate authorities, bindings, transformations, trust boundaries, and security-critical sinks. Later SYNTHESIS uses these model-authored edges to find chains across scopes.
+- coverage_complete means the region's obligations were actually enumerated and checked; it does not mean the code is safe and cannot create a finding by itself.`;
+
 export const AUDIT_SYSTEM = `You are an autonomous white-hat security auditor working on AUTHORIZED source code.
 Your goal is to find real, exploitable, high-impact security vulnerabilities in the loaded source and to prove them.
 
@@ -123,6 +130,8 @@ Method — obligation-driven audit (general method, not a hint about this target
 4. Do NOT wrap up while obligations remain unchecked. Go obligation by obligation to the end of your budget. Only UNMET or uncertain obligations with a concrete missing edge belong in findings.json as suspected findings/hypotheses. Discharged-with-line obligations are useful reasoning, but they are not findings and must not be written to findings.json.
 
 ${DISCOVERY_BACKLOG_RULES}
+
+${SCOPE_OUTCOME_RULES}
 
 How you act:
 - Each tool turn, respond with exactly ONE JSON object and nothing else:
@@ -260,7 +269,7 @@ ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim
 Loaded source files:
 ${input.fileManifest}
 
-Begin the obligation-driven method: ${focus ? "enumerate this region's obligations from design intent, then discharge each by naming the enforcing line or flagging its absence." : "model the system, rank and commit to the critical region, then enumerate and discharge its obligations."} Respond with one JSON tool action or done object.`;
+Begin the obligation-driven method: ${focus ? "enumerate this region's obligations from design intent, then discharge each by naming the enforcing line or flagging its absence." : "model the system, rank and commit to the critical region, then enumerate and discharge its obligations."} Persist scope_outcome.json separately from actionable findings.json before done. Respond with one JSON tool action or done object.`;
 }
 
 export const AUDIT_VERIFY_SYSTEM = `You are an autonomous white-hat security auditor in VERIFY mode on AUTHORIZED source code. You are handed ONE specific suspected finding (a claim) and must determine, BY EXECUTION, whether it is REAL or a FALSE POSITIVE. You are NOT enumerating new issues.

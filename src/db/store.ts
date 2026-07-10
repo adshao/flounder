@@ -1711,17 +1711,30 @@ export class MetadataStore {
     this.transaction(() => {
       this.db.prepare("DELETE FROM discovery_backlog WHERE run_id = ?").run(runId);
       if (rows.length === 0) return;
+      const reconcile = this.db.prepare(
+        `UPDATE discovery_backlog
+            SET status = ?, updated_at = ?
+          WHERE project_id = ? AND run_id <> ? AND kind = ? AND status = 'open'
+            AND COALESCE(scope_id, '') = COALESCE(?, '')
+            AND COALESCE(title, '') = COALESCE(?, '')
+            AND COALESCE(location, '') = COALESCE(?, '')`,
+      );
       const stmt = this.db.prepare(
         `INSERT INTO discovery_backlog(project_id, run_id, kind, status, scope_id, title, location, reason, next_action, priority, payload_json, created_at, updated_at)
          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
       );
       const ts = now();
       for (const row of rows) {
+        const status = normalizeDiscoveryBacklogStatus(row.status);
+        // Keep historical rows without leaving an older copy of the same action open.
+        // A fresh open row supersedes its predecessor; an explicit resolved/stale row
+        // closes it. The narrow identity avoids closing unrelated gaps in one scope.
+        reconcile.run(status === "open" ? "stale" : status, ts, projectId, runId, row.kind, row.scopeId ?? null, row.title ?? null, row.location ?? null);
         stmt.run(
           projectId,
           runId,
           row.kind,
-          normalizeDiscoveryBacklogStatus(row.status),
+          status,
           row.scopeId ?? null,
           row.title ?? null,
           row.location ?? null,
@@ -2154,11 +2167,17 @@ export class MetadataStore {
       // confirm_status (reproduced -> reproduced, settled-but-not -> not-reproduced). This is what
       // makes confirm finding-grained + resumable (a later confirm skips non-NULL confirm_status).
       const setConfirm = this.db.prepare("UPDATE finding SET confirm_status = ? WHERE project_id = ? AND id = ?");
-      type ConfirmFindingMetadata = { id: number; severity?: string; updatedAt?: string; canonicalKey?: string; status?: string; confirmStatus?: string | null; runId?: number };
+      const markDuplicate = this.db.prepare(
+        `UPDATE finding
+            SET tracking_status = 'duplicate', duplicate_of_finding_id = ?
+          WHERE project_id = ? AND id = ?
+            AND COALESCE(tracking_status, 'open') IN ('open', 'triaging', 'duplicate')`,
+      );
+      type ConfirmFindingMetadata = { id: number; severity?: string; updatedAt?: string; canonicalKey?: string; status?: string; confirmStatus?: string | null; trackingStatus?: string | null; runId?: number };
       const findingsByKey = new Map<string, ConfirmFindingMetadata>();
-      for (const row of this.db.prepare("SELECT id, run_id, finding_key, canonical_key, severity, status, confirm_status, updated_at FROM finding WHERE project_id = ?").all(projectId) as Array<{ id: number; run_id: number | null; finding_key: string | null; canonical_key: string | null; severity: string | null; status: string | null; confirm_status: string | null; updated_at: string | null }>) {
+      for (const row of this.db.prepare("SELECT id, run_id, finding_key, canonical_key, severity, status, confirm_status, tracking_status, updated_at FROM finding WHERE project_id = ?").all(projectId) as Array<{ id: number; run_id: number | null; finding_key: string | null; canonical_key: string | null; severity: string | null; status: string | null; confirm_status: string | null; tracking_status: string | null; updated_at: string | null }>) {
         if (!row.finding_key) continue;
-        const metadata: ConfirmFindingMetadata = { id: row.id, confirmStatus: row.confirm_status };
+        const metadata: ConfirmFindingMetadata = { id: row.id, confirmStatus: row.confirm_status, trackingStatus: row.tracking_status };
         if (row.severity) metadata.severity = row.severity;
         if (row.updated_at) metadata.updatedAt = row.updated_at;
         if (row.canonical_key) metadata.canonicalKey = row.canonical_key;
@@ -2207,6 +2226,29 @@ export class MetadataStore {
             if (!finding) continue;
             linkedIds.add(finding.id);
             if (outcome) setConfirm.run(outcome, projectId, finding.id);
+          }
+        }
+        // `mergedFrom` is emitted only by the execution-based fix-equivalence
+        // consolidation step. Reflect that proven bug identity into the product
+        // lifecycle so operators see one canonical bug instead of spending review
+        // time on every discovery-path variant. Never overwrite explicit terminal
+        // tracking choices such as submitted or ignored.
+        if ((r.mergedFrom?.length ?? 0) > 1 && linkedIds.size > 1) {
+          const linkedRows = [...linkedIds].map((id) => byId.get(id)).filter((row): row is ConfirmFindingMetadata => Boolean(row));
+          const trackingRank = (status: string | null | undefined): number => status === "submitted" ? 4
+            : status === "triaging" ? 3
+              : status === "open" || status == null ? 2
+                : status === "duplicate" ? 1
+                  : 0;
+          const canonical = linkedRows
+            .filter((row) => row.trackingStatus !== "duplicate")
+            .sort((a, b) => trackingRank(b.trackingStatus) - trackingRank(a.trackingStatus) || a.id - b.id)[0]
+            ?? linkedRows.sort((a, b) => a.id - b.id)[0];
+          if (canonical) {
+            for (const finding of linkedRows) {
+              if (finding.id === canonical.id) continue;
+              if (markDuplicate.run(canonical.id, projectId, finding.id).changes > 0) finding.trackingStatus = "duplicate";
+            }
           }
         }
         const blocked = r.reproduced === "could-not-set-up" || r.reproduced === "unknown" || needsSubmissionReadinessWork(r);

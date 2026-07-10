@@ -246,7 +246,10 @@ keeps Evaluation runs and findings out of the normal Projects and Findings views
 even when a benchmark target has the same display name as a real project. Use
 the Findings source filter to inspect Evaluation evidence explicitly. On a
 shared daemon, queued Project jobs are claimed before queued Evaluation jobs;
-running jobs are allowed to finish.
+running jobs are allowed to finish. Every attempt also receives a fresh internal
+history namespace, so retries and paired candidates cannot inherit scopes,
+findings, transcripts, or model memory. Only the target dependency cache is
+shared.
 
 - lifecycle: `queued -> claimed -> running -> finished|failed|cancelled`;
 - outcome: `confirmed`, `refuted`, `findings_reported`, `no_findings`, `blocked`,
@@ -379,8 +382,13 @@ They do not let a model change its own judge or deploy itself:
 4. Run the same stable work-item keys and contracts as a candidate Evaluation,
    normally from a daemon/workspace running the candidate branch.
 5. Apply the product-owned gate: sufficient repeated positive/control samples,
-   zero paired regressions, every safe control passing, no unresolved blocked or
-   invalid work, and configured duration/attempt budgets.
+   distinct positive cases and bug families, enough hidden holdouts with every
+   holdout passing, zero paired regressions, every safe control passing, no
+   unresolved blocked or invalid work, and configured duration/attempt budgets.
+
+`caseId`, `caseFamily`, `targetStack`, and `holdout` live only in the evaluator
+contract. Holdouts are excluded from failure mining, so a candidate cannot learn
+their mechanism from the experiment that later judges it.
 
 The gate returns `promote`, `reject`, or `needs-more-samples`. It never changes
 code, creates an unreviewed merge, or deploys a release. The evaluator, expected
@@ -410,7 +418,8 @@ flounder experiment brief prompt-candidate-1
 
 In the dashboard, open **Evaluations → Harness** for the same flow. The detail
 view shows a compact baseline/candidate comparison, mined weaknesses, bounded
-proposal, protected boundary, and the promotion decision. Findings remain the
+proposal, family/stack diversity, holdout pass rate, protected boundary, and the
+promotion decision. Findings remain the
 product's security output; Harness experiments measure whether the auditor got
 better.
 
@@ -588,6 +597,7 @@ Each audit writes:
 - `audit_command_runs.json`: local sandbox command records.
 - `run_health.json`: health verdict for the run (`healthy`, `needs-coverage`, `needs-resource`, `shallow`, or `infra-failed`).
 - `coverage_gaps.json`, `resource_requests.json`, `followup_scopes.json`: discovery backlog artifacts for coverage gaps, missing resources, and adjacent scopes to audit later.
+- `scope_outcomes.json`: current-material per-scope obligation, blocker, and composition coverage evidence. This is not a finding artifact.
 - `summary.json`: ranked finding summary and coverage.
 - `report_<id>.md`: private disclosure drafts.
 - `events.jsonl` and `calls/*.json`: audit trace and model-call records.
@@ -602,6 +612,11 @@ Each `flounder confirm` writes:
 - `confirm_report.md`: the human-readable decision sheet.
 - `confirm_equivalence.json`: the fix-equivalence matrix (which fixes block which PoCs) and the resulting clusters.
 - `confirm_transcript.json`, `events.jsonl`, `calls/*.json`: the open-world session trace.
+
+When the execution-based equivalence matrix proves that one fix neutralizes
+several PoCs, the project lifecycle keeps one canonical finding and marks
+reviewable variants duplicate. Explicit submitted or ignored tracking choices
+remain authoritative.
 
 Run artifacts are private by default. Redact before sharing outside the trusted project context.
 
@@ -640,7 +655,7 @@ A project's detail is the **prepare -> map -> dig -> synthesize -> verify -> con
 
 The cross-project **Findings** view defaults to real Project findings and their submission state. A row shows only the current workflow phase and blocker/next action, keeping the list compact; opening it reveals occurrences, independent-review state, every local/real-target/report attempt, and phase-specific retry. Its source filter can explicitly show Evaluation evidence or all sources; Evaluation rows link to their group and stay read-only for disclosure tracking. Project findings retain project, audit-status, and tracking filters. The default **Active findings** filter hides `ignored` rows, while the **Ignored** view can restore them to `open`. Settings holds provider profiles, daemon CRUD, and archived projects.
 
-The top-level **Evaluations** view has two modes. **Runs** drives durable run groups for audit campaigns, benchmark cases, regression replays, and claim verification. Create a draft, add work items with an explicit target bundle, material policy, and evidence contract, then start, pause, resume, or cancel the group. Each row keeps lifecycle state separate from its evidence verdict: a finished item is not shown as passing unless its persisted result satisfies the contract, while blocked and invalid work never enter the score. Expand an item to inspect source/corpus policy, confirmation requirements, result evidence, and every attempt; blocked failed or cancelled items can be retried without losing earlier attempts. Positive recall and safe-control pass rates appear for evaluation-oriented groups, and the Report action regenerates Markdown from stored evidence without rerunning model work. **Harness** mines finished baselines, refines bounded proposals, attaches candidate groups, compares paired metrics, and shows the product-owned promotion decision without granting merge or deploy authority.
+The top-level **Evaluations** view has two modes. **Runs** drives durable run groups for audit campaigns, benchmark cases, regression replays, and claim verification. Create a draft, add work items with an explicit target bundle, material policy, evidence contract, case/family/stack identity, and optional hidden-holdout flag, then start, pause, resume, or cancel the group. Each row keeps lifecycle state separate from its evidence verdict: a finished item is not shown as passing unless its persisted result satisfies the contract, while blocked and invalid work never enter the score. Expand an item to inspect source/corpus policy, confirmation requirements, result evidence, and every attempt; blocked failed or cancelled items can be retried without losing earlier attempts. Positive recall and safe-control pass rates appear for evaluation-oriented groups, and the Report action regenerates Markdown from stored evidence without rerunning model work. **Harness** mines finished baselines, refines bounded proposals, attaches isolated candidate groups, compares paired metrics and hidden holdouts, and shows the product-owned promotion decision without granting merge or deploy authority.
 
 Execution is **decoupled** from the dashboard: the `flounder ui` server is a **control plane** (REST API + SQLite + a job queue) and the audit runs on a **daemon**, so the target code and provider keys stay on the daemon's machine. `flounder ui` spawns a co-located daemon by default (rooted at `--workspace`, default `~/.flounder/workspace`) and reuses its local daemon identity across restarts, so projects pinned to the local executor keep claiming queued work. Pass `--no-daemon` and run `flounder daemon start` elsewhere (with a token from `flounder server daemon-token mint`) to execute on a different host. A project's materials are paths **relative to** its directory under the daemon's workspace; resolution checks the effective real path, so symlinks cannot escape that root. The server binds to `127.0.0.1` by default. Every daemon endpoint is bearer-token-authenticated and verifies that the referenced job/run belongs to that daemon before accepting progress, activity, worklist, or terminal-status updates.
 

@@ -57,9 +57,13 @@ export interface LaunchSpec {
   coverageTarget?: number | undefined;
   maxScopes?: number | undefined;
   mapSteps?: number | undefined;
+  mapSamples?: number | undefined;
   digSteps?: number | undefined;
   maxSteps?: number | undefined;
   digSamples?: number | undefined;
+  digMaxSamples?: number | undefined;
+  adaptiveDig?: boolean | undefined;
+  eagerPrepare?: boolean | undefined;
   digConcurrency?: number | undefined;
   verifyConcurrency?: number | undefined;
   remap?: boolean | undefined; // run/map/audit: re-enumerate the scope inventory (restart)
@@ -91,6 +95,10 @@ export interface LaunchSpec {
   nextActions?: AuditNextAction[] | undefined; // project discovery backlog rows the agent should resolve before opening fresh coverage
   materialFingerprint?: string | undefined;
   synthesisContext?: Array<Record<string, unknown>> | undefined;
+  /** Internal durable-state namespace. Must resolve under the daemon output root. */
+  historyDir?: string | undefined;
+  /** Internal dependency-cache namespace. Must resolve under the daemon output root. */
+  buildCacheDir?: string | undefined;
   sandboxBackend?: SandboxBackend | undefined;
   sandboxImage?: string | undefined;
   sandboxAllowHostFallback?: boolean | undefined;
@@ -168,11 +176,17 @@ export function specToConfig(spec: LaunchSpec, out: string, workspace?: string):
   if (spec.sandboxMemoryMb !== undefined) cfg.sandboxMemoryMb = spec.sandboxMemoryMb;
   if (spec.sandboxCpus !== undefined) cfg.sandboxCpus = spec.sandboxCpus;
   cfg.outputDir = out;
+  if (spec.historyDir) cfg.historyDir = resolveUnder(path.resolve(out), spec.historyDir, "history dir", path.resolve(out));
+  if (spec.buildCacheDir) cfg.buildCacheDir = resolveUnder(path.resolve(out), spec.buildCacheDir, "build cache dir", path.resolve(out));
   cfg.auditMaxSteps = spec.maxSteps ?? Number.POSITIVE_INFINITY;
   cfg.auditMapSteps = spec.mapSteps ?? Number.POSITIVE_INFINITY;
+  if (spec.mapSamples !== undefined) cfg.auditMapSamples = Math.max(1, Math.floor(spec.mapSamples));
   cfg.auditDigSteps = spec.digSteps ?? Number.POSITIVE_INFINITY;
   if (spec.maxScopes !== undefined) cfg.auditMaxScopes = spec.maxScopes;
   if (spec.digSamples !== undefined) cfg.auditDigSamples = spec.digSamples;
+  if (spec.digMaxSamples !== undefined) cfg.auditDigMaxSamples = Math.max(cfg.auditDigSamples, Math.floor(spec.digMaxSamples));
+  if (spec.adaptiveDig !== undefined) cfg.auditAdaptiveDig = spec.adaptiveDig;
+  if (spec.eagerPrepare !== undefined) cfg.auditEagerPrepare = spec.eagerPrepare;
   if (spec.digConcurrency !== undefined) cfg.auditDigConcurrency = spec.digConcurrency;
   if (spec.verifyConcurrency !== undefined) cfg.auditVerifyConcurrency = spec.verifyConcurrency;
   if (spec.materialFingerprint) cfg.materialFingerprint = spec.materialFingerprint;
@@ -295,9 +309,13 @@ export function buildArgs(spec: LaunchSpec): string[] {
   if (spec.verb === "run" && spec.verifyFromStart) args.push("--verify-from-start");
   if (spec.maxScopes !== undefined) args.push("--max-scopes", String(spec.maxScopes));
   if (spec.mapSteps !== undefined) args.push("--map-steps", String(spec.mapSteps));
+  if (spec.mapSamples !== undefined) args.push("--map-samples", String(spec.mapSamples));
   if (spec.digSteps !== undefined) args.push("--dig-steps", String(spec.digSteps));
   if (spec.maxSteps !== undefined) args.push("--max-steps", String(spec.maxSteps));
   if (spec.digSamples !== undefined) args.push("--dig-samples", String(spec.digSamples));
+  if (spec.digMaxSamples !== undefined) args.push("--dig-max-samples", String(spec.digMaxSamples));
+  if (spec.adaptiveDig === false) args.push("--no-adaptive-dig");
+  if (spec.eagerPrepare) args.push("--eager-prepare");
   if (spec.digConcurrency !== undefined) args.push("--dig-concurrency", String(spec.digConcurrency));
   if (spec.verifyConcurrency !== undefined) args.push("--verify-concurrency", String(spec.verifyConcurrency));
   if (spec.remap && spec.verb !== "confirm") args.push("--remap");

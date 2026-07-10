@@ -1,4 +1,6 @@
 import type { LaunchSpec } from "../server/run-manager.js";
+import path from "node:path";
+import { createHash } from "node:crypto";
 import {
   capabilitySurfaceScopeNote,
   normalizeEvidenceContract,
@@ -46,6 +48,15 @@ export function buildWorkItemLaunchSpec(item: Record<string, unknown>, group: Re
   const provider = targetBundle.provider ?? stringValue(groupConfig.provider);
   const model = targetBundle.model ?? stringValue(groupConfig.model);
   const thinking = targetBundle.thinking ?? stringValue(groupConfig.thinking);
+  const workItemUuid = stringValue(item.uuid);
+  if (!workItemUuid) throw new Error("evaluation work item is missing its durable uuid");
+  const attempt = Math.max(1, Math.floor(numberValue(item.attempts) + 1));
+  const stateKey = safeStateKey(workItemUuid);
+  const cacheKey = safeStateKey(JSON.stringify({
+    target: targetBundle.target,
+    sourcePaths: targetBundle.sourcePaths,
+    buildRoot: targetBundle.buildRoot ?? null,
+  }));
 
   const spec: LaunchSpec = {
     verb: kind === "verify-claim" ? "audit" : "run",
@@ -60,15 +71,29 @@ export function buildWorkItemLaunchSpec(item: Record<string, unknown>, group: Re
     ...(targetBundle.mockLlm ? { mockLlm: true } : {}),
     ...(targetBundle.maxScopes !== undefined ? { maxScopes: targetBundle.maxScopes } : {}),
     ...(targetBundle.mapSteps !== undefined ? { mapSteps: targetBundle.mapSteps } : {}),
+    ...(targetBundle.mapSamples !== undefined ? { mapSamples: targetBundle.mapSamples } : {}),
     ...(targetBundle.digSteps !== undefined ? { digSteps: targetBundle.digSteps } : {}),
     ...(targetBundle.maxSteps !== undefined ? { maxSteps: targetBundle.maxSteps } : {}),
     ...(targetBundle.digSamples !== undefined ? { digSamples: targetBundle.digSamples } : {}),
+    ...(targetBundle.digMaxSamples !== undefined ? { digMaxSamples: targetBundle.digMaxSamples } : {}),
+    ...(targetBundle.adaptiveDig !== undefined ? { adaptiveDig: targetBundle.adaptiveDig } : {}),
+    ...(targetBundle.eagerPrepare !== undefined ? { eagerPrepare: targetBundle.eagerPrepare } : {}),
     ...(targetBundle.digConcurrency !== undefined ? { digConcurrency: targetBundle.digConcurrency } : {}),
     ...(targetBundle.sandboxBackend ? { sandboxBackend: targetBundle.sandboxBackend } : {}),
     ...(targetBundle.sandboxImage ? { sandboxImage: targetBundle.sandboxImage } : {}),
     ...(kind === "verify-claim" ? { verifyFindings: targetBundle.claim } : {}),
+    // Samples and retries must never inherit another attempt's scopes, findings,
+    // transcripts, or model memory. Only the dependency cache is shared.
+    historyDir: path.posix.join("evaluation-state", stateKey, `attempt-${attempt}`),
+    buildCacheDir: path.posix.join("evaluation-cache", cacheKey),
   };
   return spec;
+}
+
+function safeStateKey(value: string): string {
+  const normalized = value.replace(/[^A-Za-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 100);
+  const digest = createHash("sha256").update(value).digest("hex").slice(0, 12);
+  return `${normalized || "item"}-${digest}`;
 }
 
 export function settleWorkItem(input: {
@@ -101,6 +126,7 @@ export function settleWorkItem(input: {
 
   const kind = String(input.item.kind) as WorkItemKind;
   const evidence = normalizeEvidenceContract(parseJsonObject(input.item.evidence_contract_json), kind);
+  const phaseFunnel = buildPhaseFunnel(input.run, input.findings, kind);
   if (evidence.expectedOutcome !== undefined && health !== "healthy") {
     const error = `scored work item has no healthy run verdict (${health ?? "missing"})`;
     return { state: "failed", outcome: "blocked", result: { accepted: false, reason: "run-health-unscored", runId: input.run.id, runHealth: health ?? null }, error };
@@ -127,6 +153,7 @@ export function settleWorkItem(input: {
         refutationCandidates,
         refutationVerdicts,
         refutationErrors: numberValue(refutationStage.errors),
+        phaseFunnel,
       },
       error,
     };
@@ -150,6 +177,7 @@ export function settleWorkItem(input: {
     refutedFindings: refuted.length,
     runId: input.run.id,
     runHealth: health ?? null,
+    phaseFunnel,
   };
 
   if (!scorePassed) {
@@ -161,6 +189,36 @@ export function settleWorkItem(input: {
     return { state: "failed", outcome: "blocked", result: { ...result, gateSatisfied: false, reason: "claim-unsettled" }, error: "claim was neither confirmed nor refuted" };
   }
   return { state: "finished", outcome: confirmed.length > 0 ? "findings_reported" : "no_findings", result };
+}
+
+function buildPhaseFunnel(run: Record<string, unknown>, findings: Array<Record<string, unknown>>, workItemKind: WorkItemKind): Record<string, unknown> {
+  const stages = parseJsonObject(run.stages_json);
+  const healthSignals = parseJsonObject(run.health_signals_json);
+  const synthesis = nestedRecord(stages, "synthesis");
+  const refutation = nestedRecord(stages, "refutation");
+  const differential = nestedRecord(stages, "differential");
+  const scopesMapped = numberValue(run.scopes_total ?? healthSignals.scopesTotal);
+  const scopesAudited = numberValue(run.run_scopes_done ?? run.scopes_audited ?? healthSignals.scopesAudited);
+  const confirmed = findings.filter((finding) => isConfirmedStatus(finding.status)).length;
+  const hypotheses = findings.filter((finding) => finding.status === "suspected" || finding.status === "needs-evidence").length;
+  const resourceBlocked = stringValue(run.health_status) === "needs-resource" || numberValue(healthSignals.resourceRequests) > 0;
+  let failurePhase: string | null = null;
+  if (resourceBlocked) failurePhase = "prepare";
+  else if (workItemKind === "verify-claim" && confirmed === 0) failurePhase = "verify";
+  else if (scopesMapped === 0) failurePhase = "map";
+  else if (scopesAudited === 0) failurePhase = "dig";
+  else if (confirmed === 0 && hypotheses > 0) failurePhase = "verify";
+  else if (confirmed === 0 && stringValue(synthesis.status) !== "done") failurePhase = "synthesis";
+  else if (confirmed === 0) failurePhase = "discovery";
+  return {
+    map: { scopes: scopesMapped, completed: scopesMapped > 0 },
+    dig: { scopes: scopesAudited, completed: scopesAudited > 0, scopeOutcomes: numberValue(healthSignals.scopeOutcomes), incompleteOutcomes: numberValue(healthSignals.scopeOutcomesIncomplete) },
+    synthesis: { status: stringValue(synthesis.status) ?? null, produced: numberValue(synthesis.produced), outcomes: numberValue(synthesis.outcomes) },
+    verify: { hypotheses, confirmed },
+    differential: { tested: numberValue(differential.tested), confirmed: numberValue(differential.confirmed) },
+    refutation: { candidates: numberValue(refutation.candidates), verdicts: numberValue(refutation.verdicts), errors: numberValue(refutation.errors) },
+    failurePhase,
+  };
 }
 
 export function renderRunGroupReport(group: Record<string, unknown>, items: Array<Record<string, unknown>>): { summary: Record<string, unknown>; markdown: string } {

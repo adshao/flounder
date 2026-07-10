@@ -279,8 +279,13 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig }> {
   // knobs (materials, models, budgets, deep-phase parameters).
   cfg.auditMaxScopes = readIntFlag(args, "--max-scopes") ?? cfg.auditMaxScopes;
   cfg.auditMapSteps = readIntFlag(args, "--map-steps") ?? cfg.auditMapSteps;
+  cfg.auditMapSamples = readIntFlag(args, "--map-samples") ?? cfg.auditMapSamples;
   cfg.auditDigSteps = readIntFlag(args, "--dig-steps") ?? cfg.auditDigSteps;
   cfg.auditDigSamples = readIntFlag(args, "--dig-samples") ?? cfg.auditDigSamples;
+  cfg.auditDigMaxSamples = readIntFlag(args, "--dig-max-samples") ?? cfg.auditDigMaxSamples;
+  if (cfg.auditDigMaxSamples < cfg.auditDigSamples) cfg.auditDigMaxSamples = cfg.auditDigSamples;
+  if (args.includes("--no-adaptive-dig")) cfg.auditAdaptiveDig = false;
+  if (args.includes("--eager-prepare")) cfg.auditEagerPrepare = true;
   cfg.auditDigConcurrency = readIntFlag(args, "--dig-concurrency") ?? cfg.auditDigConcurrency;
   cfg.auditVerifyConcurrency = readIntFlag(args, "--verify-concurrency") ?? cfg.auditVerifyConcurrency;
   if (args.includes("--remap")) cfg.auditRemap = true;
@@ -349,10 +354,18 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   if (typeof rawMaxScopes === "number" && Number.isFinite(rawMaxScopes)) cfg.auditMaxScopes = Math.max(1, Math.floor(rawMaxScopes));
   const rawMapSteps = raw.auditMapSteps ?? raw.audit_map_steps;
   if (typeof rawMapSteps === "number" && Number.isFinite(rawMapSteps)) cfg.auditMapSteps = Math.max(1, Math.floor(rawMapSteps));
+  const rawMapSamples = raw.auditMapSamples ?? raw.audit_map_samples;
+  if (typeof rawMapSamples === "number" && Number.isFinite(rawMapSamples)) cfg.auditMapSamples = Math.max(1, Math.floor(rawMapSamples));
   const rawDigSteps = raw.auditDigSteps ?? raw.audit_dig_steps;
   if (typeof rawDigSteps === "number" && Number.isFinite(rawDigSteps)) cfg.auditDigSteps = Math.max(1, Math.floor(rawDigSteps));
   const rawDigSamples = raw.auditDigSamples ?? raw.audit_dig_samples;
   if (typeof rawDigSamples === "number" && Number.isFinite(rawDigSamples)) cfg.auditDigSamples = Math.max(1, Math.floor(rawDigSamples));
+  const rawDigMaxSamples = raw.auditDigMaxSamples ?? raw.audit_dig_max_samples;
+  if (typeof rawDigMaxSamples === "number" && Number.isFinite(rawDigMaxSamples)) cfg.auditDigMaxSamples = Math.max(cfg.auditDigSamples, Math.floor(rawDigMaxSamples));
+  const rawAdaptiveDig = raw.auditAdaptiveDig ?? raw.audit_adaptive_dig;
+  if (typeof rawAdaptiveDig === "boolean") cfg.auditAdaptiveDig = rawAdaptiveDig;
+  const rawEagerPrepare = raw.auditEagerPrepare ?? raw.audit_eager_prepare;
+  if (typeof rawEagerPrepare === "boolean") cfg.auditEagerPrepare = rawEagerPrepare;
   const rawDigConcurrency = raw.auditDigConcurrency ?? raw.audit_dig_concurrency;
   if (typeof rawDigConcurrency === "number" && Number.isFinite(rawDigConcurrency)) cfg.auditDigConcurrency = Math.max(1, Math.floor(rawDigConcurrency));
   const rawVerifyConcurrency = raw.auditVerifyConcurrency ?? raw.audit_verify_concurrency;
@@ -574,6 +587,11 @@ function buildAuditSpec(cmd: "run" | "map" | "audit", rest: string[], cfg: Audit
     provider: cfg.provider,
     model: cfg.auditModel,
     thinking: cfg.thinkingLevel,
+    mapSamples: cfg.auditMapSamples,
+    digSamples: cfg.auditDigSamples,
+    digMaxSamples: cfg.auditDigMaxSamples,
+    adaptiveDig: cfg.auditAdaptiveDig,
+    eagerPrepare: cfg.auditEagerPrepare,
     out: cfg.outputDir,
     ...sandboxSpec(cfg),
   };
@@ -600,7 +618,6 @@ function buildAuditSpec(cmd: "run" | "map" | "audit", rest: string[], cfg: Audit
   cap("--map-steps", (n) => (spec.mapSteps = n));
   cap("--dig-steps", (n) => (spec.digSteps = n));
   cap("--max-scopes", (n) => (spec.maxScopes = n));
-  cap("--dig-samples", (n) => (spec.digSamples = n));
   cap("--dig-concurrency", (n) => (spec.digConcurrency = n));
   cap("--verify-concurrency", (n) => (spec.verifyConcurrency = n));
   return spec;
@@ -752,7 +769,7 @@ function firstPositional(args: string[]): string | undefined {
     "--verify", "--findings", "--source", "--corpus", "--build-root", "--target",
     "--config", "--provider", "--audit-model", "--model", "--thinking", "--out",
     "--history-dir", "--server", "--clue", "--posture", "--endpoint", "--rpc",
-    "--max-steps", "--map-steps", "--dig-steps", "--max-scopes", "--dig-samples",
+    "--max-steps", "--map-steps", "--map-samples", "--dig-steps", "--max-scopes", "--dig-samples", "--dig-max-samples",
     "--dig-concurrency", "--verify-concurrency", "--scope", "--scope-note", "--max-tokens", "--repro-timeout-ms",
     "--sandbox-backend", "--sandbox-image", "--prepare-network", "--confirm-network",
     "--sandbox-memory-mb", "--sandbox-cpus", "--prepare-timeout-ms", "--scope-coverage-mode",
@@ -1331,8 +1348,12 @@ run / map / audit deep-phase options:
   --quick                 run only: a single breadth pass instead of map -> audit
   --verify-from-start     run pipeline only: re-run Verify from the beginning instead of only pending candidates
   --map-steps <n>         cap the map phase (default: UNBOUNDED)
+  --map-samples <n>       independent MAP inventories unioned without dropping singleton scopes, default 1
   --dig-steps <n>         cap each scope's dig (default: UNBOUNDED; the dig stops when its obligations are discharged)
   --dig-samples <n>       independent dig passes per scope, findings unioned (raises recall), default 1
+  --dig-max-samples <n>   adaptive per-scope ceiling; extra passes run only for incomplete/uncertain/disagreeing outcomes
+  --no-adaptive-dig       disable outcome-driven sampling above --dig-samples
+  --eager-prepare         warm the isolated toolchain after MAP and surface blockers before DIG
   --dig-concurrency <n>   scopes deep-audited in parallel (isolated workspaces), default 1
   --verify-concurrency <n> findings verified in parallel (isolated workspaces), default 2
   --max-scopes <n>        one-run cap for un-audited scopes; UI Standard defaults to auditing until 30 project scopes are done

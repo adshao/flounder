@@ -250,7 +250,7 @@ const ROUTES: Route[] = [
       sourcePaths: "string[] — code paths relative to dir",
       buildRoot: "string? — buildable root relative to dir",
       corpusPaths: "string[]? — specs/docs relative to dir",
-      config: "object? — { prepareClue, projectIntent, phaseProviders, scopeCoverageMode, maxScopes, mapSteps, digSteps, digSamples, digConcurrency, engagement, sandbox... }. Default coverage is Standard. engagement.kind='bug-bounty' records normal bounty submission context and keeps real-target confirmation by default; engagement.kind='bug-bounty-contest' enables short settled rounds, source-only reportability by default, and optional append-map expansion.",
+      config: "object? — { prepareClue, projectIntent, phaseProviders, scopeCoverageMode, maxScopes, mapSteps, mapSamples, digSteps, digSamples, digMaxSamples, adaptiveDig, eagerPrepare, digConcurrency, engagement, sandbox... }. Default coverage is Standard. engagement.kind='bug-bounty' records normal bounty submission context and keeps real-target confirmation by default; engagement.kind='bug-bounty-contest' enables short settled rounds, source-only reportability by default, and optional append-map expansion.",
     },
     handler: projectCreate,
   }),
@@ -294,8 +294,8 @@ const ROUTES: Route[] = [
       regenerateReports: "boolean? — report: include findings that already have formal reports; selected findingIds are always regenerated",
       continueCoverage: "boolean? — explicit opt-in to open the next mapped scope batch after the current pipeline round is fully settled",
       scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run; standard means audit until the project has 30 audited scopes; pass continueCoverage:true to explicitly start another scope batch after verify/confirm/report are settled. Bug-bounty contest projects default to short custom batches unless overridden.",
-      maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", digSteps: "number? — one-off per-scope dig turn cap",
-      maxSteps: "number? — one-off global turn cap", digSamples: "number? — one-off samples per scope", digConcurrency: "number? — one-off parallel scopes", verifyConcurrency: "number? — one-off parallel Verify findings (isolated workspaces)",
+      maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", mapSamples: "number? — independent Map inventories to union without dropping singleton scopes", digSteps: "number? — one-off per-scope dig turn cap",
+      maxSteps: "number? — one-off global turn cap", digSamples: "number? — minimum independent samples per scope", digMaxSamples: "number? — adaptive per-scope sample ceiling", adaptiveDig: "boolean? — add bounded samples only for incomplete/uncertain outcomes", eagerPrepare: "boolean? — warm the build before Dig and surface repairable resource blockers", digConcurrency: "number? — one-off parallel scopes", verifyConcurrency: "number? — one-off parallel Verify findings (isolated workspaces)",
       findingId: "number? — confirm/report: reproduce or report one selected finding",
       findingIds: "number[]? — confirm/report: reproduce selected pending audit-confirmed findings, or generate/regenerate formal reports for selected reproduced findings. Report without selection only generates missing reports.",
       inputRunDir: "string? — confirm: the finished run dir to reproduce",
@@ -3205,9 +3205,13 @@ function normalizeLaunchSpec(body: Record<string, unknown>, target: string, verb
     thinking: str(body.thinking),
     maxScopes: num(body.maxScopes),
     mapSteps: num(body.mapSteps),
+    mapSamples: num(body.mapSamples),
     digSteps: num(body.digSteps),
     maxSteps: num(body.maxSteps),
     digSamples: num(body.digSamples),
+    digMaxSamples: num(body.digMaxSamples),
+    adaptiveDig: bool(body.adaptiveDig),
+    eagerPrepare: bool(body.eagerPrepare),
     digConcurrency: num(body.digConcurrency),
     sandboxBackend: backend(body.sandboxBackend),
     sandboxImage: str(body.sandboxImage),
@@ -3241,7 +3245,7 @@ function normalizeLaunchSpec(body: Record<string, unknown>, target: string, verb
 // The project-row config_json for a launched ad-hoc run (display only; the daemon runs the spec).
 function launchDisplayConfig(spec: LaunchSpec): Record<string, unknown> {
   const cfg: Record<string, unknown> = {};
-  for (const [k, v] of Object.entries({ provider: spec.provider, model: spec.model, thinking: spec.thinking, maxScopes: spec.maxScopes, mapSteps: spec.mapSteps, digSteps: spec.digSteps, digSamples: spec.digSamples, digConcurrency: spec.digConcurrency, verifyConcurrency: spec.verifyConcurrency, sandboxBackend: spec.sandboxBackend, sandboxImage: spec.sandboxImage, sandboxAllowHostFallback: spec.sandboxAllowHostFallback, sandboxPrepareNetwork: spec.sandboxPrepareNetwork, sandboxConfirmNetwork: spec.sandboxConfirmNetwork, sandboxMemoryMb: spec.sandboxMemoryMb, sandboxCpus: spec.sandboxCpus })) {
+  for (const [k, v] of Object.entries({ provider: spec.provider, model: spec.model, thinking: spec.thinking, maxScopes: spec.maxScopes, mapSteps: spec.mapSteps, mapSamples: spec.mapSamples, digSteps: spec.digSteps, digSamples: spec.digSamples, digMaxSamples: spec.digMaxSamples, adaptiveDig: spec.adaptiveDig, eagerPrepare: spec.eagerPrepare, digConcurrency: spec.digConcurrency, verifyConcurrency: spec.verifyConcurrency, sandboxBackend: spec.sandboxBackend, sandboxImage: spec.sandboxImage, sandboxAllowHostFallback: spec.sandboxAllowHostFallback, sandboxPrepareNetwork: spec.sandboxPrepareNetwork, sandboxConfirmNetwork: spec.sandboxConfirmNetwork, sandboxMemoryMb: spec.sandboxMemoryMb, sandboxCpus: spec.sandboxCpus })) {
     if (v !== undefined) cfg[k] = v;
   }
   return cfg;
@@ -5312,9 +5316,13 @@ function launchSpec(store: MetadataStore, project: Record<string, unknown>, body
     coverageTarget: coverage.target,
     maxScopes: coverage.maxScopes,
     mapSteps: num(merged.mapSteps),
+    mapSamples: num(merged.mapSamples),
     digSteps: num(merged.digSteps),
     maxSteps: num(merged.maxSteps),
     digSamples: num(merged.digSamples),
+    digMaxSamples: num(merged.digMaxSamples),
+    adaptiveDig: typeof merged.adaptiveDig === "boolean" ? merged.adaptiveDig : undefined,
+    eagerPrepare: typeof merged.eagerPrepare === "boolean" ? merged.eagerPrepare : undefined,
     digConcurrency: num(merged.digConcurrency),
     verifyConcurrency: num(merged.verifyConcurrency),
     sandboxBackend: backend(merged.sandboxBackend),
@@ -5364,9 +5372,13 @@ function runBodyConfigOverrides(body: Record<string, unknown>): Record<string, u
     "scopeCoverageMode",
     "maxScopes",
     "mapSteps",
+    "mapSamples",
     "digSteps",
     "maxSteps",
     "digSamples",
+    "digMaxSamples",
+    "adaptiveDig",
+    "eagerPrepare",
     "digConcurrency",
     "verifyConcurrency",
     "sandboxBackend",

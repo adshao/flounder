@@ -805,6 +805,7 @@ function diagnosticExcerpt(text: string, cap: number): string {
 export function isReportFile(normalizedPath: string): boolean {
   return normalizedPath === "findings.json"
     || normalizedPath === "scopes.json"
+    || normalizedPath === "scope_outcome.json"
     || normalizedPath === "coverage_gaps.json"
     || normalizedPath === "resource_requests.json"
     || normalizedPath === "followup_scopes.json"
@@ -978,6 +979,12 @@ export interface AuditScope {
   priority?: number; // manual dig-queue ordering (operator "↑ Top"); ordered above score, doesn't change score
   parentScopeId?: string; // model-proposed follow-up provenance; not part of ranking semantics
   source?: "map" | "followup" | "coverage-gap";
+  /** Exact source/build/corpus snapshot this scope was mapped against. */
+  materialFingerprint?: string;
+  /** Independent MAP samples that emitted this exact region + obligation. */
+  mapSamples?: number[];
+  /** Number of independent MAP samples that emitted this scope. */
+  mapAgreement?: number;
 }
 
 /** Non-mutating check: did the session write a non-empty findings.json to scratch?

@@ -36,8 +36,25 @@ import {
   type ResourceRequest,
   type RunHealth,
 } from "./discovery-artifacts.js";
+import { prepareResourceRequests, prepareWorkspaceToolchain } from "./prepare.js";
+import {
+  SCOPE_OUTCOMES_FILE,
+  appendScopeOutcomes,
+  clearScratchScopeOutcome,
+  incompleteScopeOutcome,
+  latestScopeOutcomes,
+  loadScopeOutcomes,
+  mergeScopeOutcomes,
+  nextScopeOutcomeSample,
+  readScratchScopeOutcome,
+  saveScopeOutcomes,
+  scopeOutcomeNeedsAnotherSample,
+  scopeOutcomeNeedsCoverage,
+  type ScopeOutcome,
+} from "./scope-outcomes.js";
 
 const APPEND_MAP_EXISTING_SCOPES_PATH = "map_existing_scopes.json";
+const SYNTHESIS_SCOPE_OUTCOMES_PATH = "synthesis_scope_outcomes.json";
 
 // Orchestrates one autonomous audit: load authorized material, give the model the
 // capability surface, run the ReAct loop, then turn whatever it proved into the
@@ -99,17 +116,17 @@ export async function runAudit(
   // not pay for it.
   let workspaceCwd = process.cwd();
   const corpusManifest: string[] = [];
+  const workspaceRoots = cfg.buildRoot ? [cfg.buildRoot] : cfg.sourcePaths;
   if (cfg.sourcePaths.length > 0) {
     // The sandbox copies the build root (a buildable project, e.g. a workspace
     // root) when one is set, so a narrow audit scope can still compile; otherwise
     // it copies the audited source. The model still reads only `sourcePaths`.
-    const workspaceRoots = cfg.buildRoot ? [cfg.buildRoot] : cfg.sourcePaths;
     const workspace = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, "audit/workspace");
     session.workspace = workspace;
     workspaceCwd = workspace.absolute;
     // Persistent, host-isolated package cache so dependency builds are downloaded
     // once and reused across runs (HOME stays the per-run workspace).
-    session.buildCacheDir = path.join(projectHistoryDir(historyLocation(cfg)), "build-cache");
+    session.buildCacheDir = cfg.buildCacheDir ?? path.join(projectHistoryDir(historyLocation(cfg)), "build-cache");
     // Capture the pristine target source before anything else touches the
     // workspace, so the model cannot modify the code it is auditing — a
     // confirmation must run against untampered source.
@@ -132,16 +149,17 @@ export async function runAudit(
       await logger.event("audit_scope_focus", { source: "prepare_manifest", components: derived.split("\n").filter((l) => l.startsWith("- ")).length });
     }
   }
-  // Surface prior-run lessons at kickoff: the most relevant notes for this scope,
-  // falling back to the most recent ones so memory is always visible.
-  let memoryNotes = await memory.recall([cfg.targetName, scopeNote].filter(Boolean).join(" "), 8);
-  if (memoryNotes.length === 0) memoryNotes = (await memory.all()).slice(-8).reverse();
-  const memoryHint = [renderNextActionsHint(cfg.auditNextActions), renderMemoryHint(memoryNotes)].filter(Boolean).join("\n\n");
-
   // Driver choice: real pi providers (e.g. openai-codex) run a continuous
   // AgentSession that owns the loop; the deterministic mock and CLI fallbacks use
   // the legacy per-step complete() loop.
   const fileManifest = renderFileManifest(source, corpusManifest);
+  const memoryHintFor = async (opts: { mode: string; deepFocus?: string }): Promise<string> => {
+    const filter = { ...(cfg.materialFingerprint ? { materialFingerprint: cfg.materialFingerprint } : {}), includePortable: true };
+    const query = [cfg.targetName, scopeNote, opts.mode, opts.deepFocus].filter(Boolean).join(" ");
+    let notes = await memory.recall(query, 8, filter);
+    if (notes.length === 0) notes = (await memory.all(filter)).slice(-8).reverse();
+    return [renderNextActionsHint(cfg.auditNextActions), renderMemoryHint(notes)].filter(Boolean).join("\n\n");
+  };
 
   // One phase = one driver run (continuous pi session for pi providers, else the
   // per-step loop), specialized to a role's model and a mode (breadth/map/dig).
@@ -159,6 +177,7 @@ export async function runAudit(
   ): Promise<{ steps: TranscriptStep[]; stoppedReason: string }> => {
     const phaseCtx = over?.ctx ?? ctx;
     const phaseCwd = over?.cwd ?? workspaceCwd;
+    const memoryHint = await memoryHintFor(opts);
     const flags = {
       ...(opts.mode === "dig" ? { deep: true } : {}),
       ...(opts.mode === "map" ? { map: true } : {}),
@@ -203,11 +222,41 @@ export async function runAudit(
     }));
   };
 
+  const runMapEnsemble = async (coveredScopes: AuditScope[], coveredCount: number): Promise<{ scopes: AuditScope[]; steps: TranscriptStep[] }> => {
+    const sampleCount = Math.max(1, Math.floor(cfg.auditMapSamples));
+    const sampleMaps: AuditScope[][] = [];
+    const mapSteps: TranscriptStep[] = [];
+    for (let sample = 1; sample <= sampleCount; sample += 1) {
+      if (options.signal?.aborted) throw new Error("audit aborted");
+      const ws = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, `audit/map-sample-${sample}`);
+      const mapSession = newSession();
+      mapSession.workspace = ws;
+      if (session.buildCacheDir) mapSession.buildCacheDir = session.buildCacheDir;
+      await copyCorpusIntoWorkspace(ws, corpus);
+      const mapCtx: ToolContext = { cfg: withRole(cfg, "map"), source, corpus, memory, logger, session: mapSession };
+      const seedPath = await writeAppendMapExistingScopesSeed(coveredScopes, ws.absolute);
+      const phase = await runPhase(withRole(cfg, "map"), {
+        mode: "map",
+        maxSteps: cfg.auditMapSteps,
+        ...(seedPath ? { mapExistingScopesPath: seedPath, mapExistingScopesCount: coveredCount } : {}),
+      }, { ctx: mapCtx, cwd: ws.absolute });
+      const scopes = readScratchScopes(mapSession).map((scope) => ({ ...scope, mapSamples: [sample], mapAgreement: 1 }));
+      sampleMaps.push(scopes);
+      mapSteps.push(...phase.steps);
+      session.commandRuns.push(...mapSession.commandRuns.map((run) => ({ ...run, id: `map-s${sample}:${run.id}` })));
+      await logger.event("audit_map_sample", { sample, of: sampleCount, scopes: scopes.length });
+    }
+    return { scopes: unionMapSamples(sampleMaps), steps: mapSteps };
+  };
+
   let steps: TranscriptStep[];
   let stoppedReason: string;
   let auditMode: "breadth" | "map" | "map-dig" | "verify" | "dig" = "breadth";
   let manualFindings = false;
   let scopeInventory: AuditScope[] = [];
+  let scopeOutcomes: ScopeOutcome[] = [];
+  let newScopeOutcomes: ScopeOutcome[] = [];
+  const scopeOutcomeErrors: Array<{ scopeId: string; sample: number; errors: string[] }> = [];
   // SQLite tracking: record the project + a running run, then update scope coverage,
   // findings, and final status as the run progresses. Failure-isolated (never throws).
   const recorder = (options.makeTracker ?? RunRecorder.start)(cfg, logger.runDir, options.kind ?? "run", logger);
@@ -348,16 +397,16 @@ export async function runAudit(
     // MAP only (`flounder map`): enumerate and persist the scope inventory, then stop — no
     // dig. The resumable `flounder audit` digs from this inventory afterwards.
     const inventoryDir = projectHistoryDir(historyLocation(cfg));
-    const existing = cfg.auditAppendMap ? await loadScopeInventory(inventoryDir) : [];
+    scopeOutcomes = await loadScopeOutcomes(inventoryDir, cfg.materialFingerprint);
+    if (!cfg.auditAppendMap) {
+      await clearCurrentMaterialScopeOutcomes(inventoryDir, cfg.materialFingerprint);
+      scopeOutcomes = [];
+    }
+    const existing = cfg.auditAppendMap ? await loadScopeInventory(inventoryDir, cfg.materialFingerprint) : [];
     const seedScopes = await loadAppendMapSeedScopes(cfg);
-    const mapSeed = await writeAppendMapExistingScopesSeed([...existing, ...seedScopes], workspaceCwd);
-    if (existing.length > 0 || seedScopes.length > 0) await logger.event("audit_map_append_start", { existing: existing.length, seedScopes: seedScopes.length, seed: mapSeed });
-    const mapPhase = await runPhase(withRole(cfg, "map"), {
-      mode: "map",
-      maxSteps: cfg.auditMapSteps,
-      ...(mapSeed ? { mapExistingScopesPath: mapSeed, mapExistingScopesCount: existing.length } : {}),
-    });
-    const mapped = readScratchScopes(session);
+    if (existing.length > 0 || seedScopes.length > 0) await logger.event("audit_map_append_start", { existing: existing.length, seedScopes: seedScopes.length, samples: cfg.auditMapSamples });
+    const mapResult = await runMapEnsemble([...existing, ...seedScopes], existing.length);
+    const mapped = mapResult.scopes;
     if (existing.length > 0) {
       const merged = mergeScopeInventory(existing, mapped);
       scopeInventory = merged.scopes;
@@ -366,6 +415,7 @@ export async function runAudit(
       scopeInventory = mapped;
       await logger.event("audit_map_done", { scopes: scopeInventory.length });
     }
+    stampScopeInventory(scopeInventory, cfg.materialFingerprint);
     for (const scope of scopeInventory) if (!scope.status) scope.status = "pending";
     await saveScopeInventory(inventoryDir, scopeInventory);
     await logger.artifact("audit_scopes.json", scopeInventory);
@@ -375,7 +425,7 @@ export async function runAudit(
     session.findings = [];
     session.counters.finding = 0;
     manualFindings = true; // map produces a scope inventory, not findings
-    steps = mapPhase.steps;
+    steps = mapResult.steps;
     stoppedReason = phaseFailureReason ?? "finished";
   } else if (cfg.auditDeep && !cfg.auditDeepFocus) {
     auditMode = "map-dig";
@@ -387,22 +437,22 @@ export async function runAudit(
     const inventoryDir = projectHistoryDir(historyLocation(cfg));
     const aggregatedSteps: TranscriptStep[] = [];
     const picked = cfg.auditScopeIds ?? [];
-    scopeInventory = cfg.auditRemap ? [] : await loadScopeInventory(inventoryDir);
+    scopeOutcomes = await loadScopeOutcomes(inventoryDir, cfg.materialFingerprint);
+    scopeInventory = cfg.auditRemap ? [] : await loadScopeInventory(inventoryDir, cfg.materialFingerprint);
     const appendExisting = cfg.auditAppendMap ? scopeInventory : [];
     const appendSeedScopes = cfg.auditAppendMap ? await loadAppendMapSeedScopes(cfg) : [];
     const resuming = scopeInventory.length > 0 && !cfg.auditAppendMap;
+    if (!resuming && !cfg.auditAppendMap) {
+      await clearCurrentMaterialScopeOutcomes(inventoryDir, cfg.materialFingerprint);
+      scopeOutcomes = [];
+    }
     if (!resuming && (picked.length > 0 || cfg.auditRequireInventory)) {
       throw new Error("`flounder audit` needs an existing scope inventory; run `flounder map` first to enumerate scopes (then pick with `--scope` from audit_scopes.json), or `flounder run` to map and audit in one pass.");
     }
     if (!resuming) {
-      const mapSeed = await writeAppendMapExistingScopesSeed([...appendExisting, ...appendSeedScopes], workspaceCwd);
-      if (appendExisting.length > 0 || appendSeedScopes.length > 0) await logger.event("audit_map_append_start", { existing: appendExisting.length, seedScopes: appendSeedScopes.length, seed: mapSeed });
-      const mapPhase = await runPhase(withRole(cfg, "map"), {
-        mode: "map",
-        maxSteps: cfg.auditMapSteps,
-        ...(mapSeed ? { mapExistingScopesPath: mapSeed, mapExistingScopesCount: appendExisting.length } : {}),
-      });
-      const mapped = readScratchScopes(session);
+      if (appendExisting.length > 0 || appendSeedScopes.length > 0) await logger.event("audit_map_append_start", { existing: appendExisting.length, seedScopes: appendSeedScopes.length, samples: cfg.auditMapSamples });
+      const mapResult = await runMapEnsemble([...appendExisting, ...appendSeedScopes], appendExisting.length);
+      const mapped = mapResult.scopes;
       if (appendExisting.length > 0) {
         const merged = mergeScopeInventory(appendExisting, mapped);
         scopeInventory = merged.scopes;
@@ -411,11 +461,12 @@ export async function runAudit(
         scopeInventory = mapped;
         await logger.event("audit_map_done", { scopes: scopeInventory.length });
       }
-      aggregatedSteps.push(...mapPhase.steps);
+      aggregatedSteps.push(...mapResult.steps);
       clearScratchFindings(session);
     } else {
       await logger.event("audit_map_resumed", { ...scopeProgress(scopeInventory) });
     }
+    stampScopeInventory(scopeInventory, cfg.materialFingerprint);
     for (const scope of scopeInventory) if (!scope.status) scope.status = "pending";
     // Persist the inventory BEFORE digging so a kill mid-run does not lose the map —
     // resume then skips MAP. Each dig below also checkpoints scope status + partial
@@ -468,12 +519,24 @@ export async function runAudit(
       recorder.findings(aggregated, logger.runDir, "dig checkpoint"); // persist live so the UI shows findings as each scope lands (content-keyed, so statuses update in place later)
     };
     const samples = Math.max(1, Math.floor(cfg.auditDigSamples));
+    const maxSamples = Math.max(samples, Math.floor(cfg.auditDigMaxSamples));
     const concurrency = Math.max(1, Math.floor(cfg.auditDigConcurrency));
+    if (cfg.auditEagerPrepare && session.workspace && toDig.length > 0) {
+      const report = await prepareWorkspaceToolchain({ workspace: session.workspace, cfg, logger, ...(session.buildCacheDir ? { cacheDir: session.buildCacheDir } : {}) });
+      const requests = prepareResourceRequests(report);
+      if (requests.length > 0) session.resourceRequests = mergeResourceRequests(session.resourceRequests ?? [], requests);
+      recorder.stage("build-readiness", {
+        status: requests.length > 0 ? "blocked" : "ready",
+        detected: report.detected,
+        commands: report.results.length,
+        failed: report.results.filter((result) => !result.ok).length + report.toolVersionChecks.filter((check) => !check.ok).length,
+      });
+    }
     // The region is the audit boundary; the map's obligation is only a starting
     // hint, never a limit (the dig system prompt's own rule is to independently
     // enumerate ALL of a region's obligations).
     const buildDeepFocus = (scope: AuditScope): string =>
-      `code region ${scope.region} — audit this WHOLE region: independently enumerate and discharge ALL of its security obligations; ` +
+      `scope ${scope.id}; code region ${scope.region} — audit this WHOLE region: independently enumerate and discharge ALL of its security obligations; ` +
       `do NOT limit yourself to any single one. The map flagged one concern as a starting point (not a boundary): "${scope.obligation}"`;
     // Run a scope's dig `samples` times and union the findings. Per-pass recall on a
     // subtle obligation is < 1 and stochastic; K independent passes raise cumulative
@@ -485,13 +548,16 @@ export async function runAudit(
       recorder.scopes(scopeInventory);
       await logger.event("audit_dig_requeued", { scope: scope.id, reason: options.signal?.aborted ? "aborted" : "interrupted" });
     };
-    const digSamples = async (scope: AuditScope, sess: AgentSession, over?: { ctx: ToolContext; cwd: string }): Promise<{ findings: AgentFinding[]; steps: TranscriptStep[] }> => {
+    const digSamples = async (scope: AuditScope, sess: AgentSession, over?: { ctx: ToolContext; cwd: string }): Promise<{ findings: AgentFinding[]; outcomes: ScopeOutcome[]; steps: TranscriptStep[] }> => {
       const deepFocus = buildDeepFocus(scope);
       const perScope: AgentFinding[] = [];
+      const perScopeOutcomes: ScopeOutcome[] = [];
       const stepsOut: TranscriptStep[] = [];
-      for (let sample = 1; sample <= samples; sample += 1) {
+      const sampleOffset = nextScopeOutcomeSample(scopeOutcomes, scope.id) - 1;
+      for (let sample = 1; sample <= maxSamples; sample += 1) {
         if (options.signal?.aborted) throw new Error("audit aborted");
         clearScratchFindings(sess);
+        clearScratchScopeOutcome(sess);
         const dig = await runPhase(digCfg, { mode: "dig", deepFocus, maxSteps: cfg.auditDigSteps }, over);
         if (options.signal?.aborted) throw new Error("audit aborted");
         stepsOut.push(...dig.steps);
@@ -500,9 +566,25 @@ export async function runAudit(
           finding.scopeId = scope.id;
           perScope.push(finding);
         }
-        if (samples > 1) await logger.event("audit_dig_sample", { scope: scope.id, sample, of: samples, findings: sess.findings.length });
+        const persistedSample = sampleOffset + sample;
+        const parsedOutcome = readScratchScopeOutcome(sess, { scopeId: scope.id, sample: persistedSample, ...(cfg.materialFingerprint ? { materialFingerprint: cfg.materialFingerprint } : {}) });
+        if (parsedOutcome.errors.length > 0) {
+          scopeOutcomeErrors.push({ scopeId: scope.id, sample: persistedSample, errors: parsedOutcome.errors });
+          await logger.event("audit_scope_outcome_invalid", { scope: scope.id, sample: persistedSample, errors: parsedOutcome.errors });
+        }
+        perScopeOutcomes.push(parsedOutcome.outcome ?? incompleteScopeOutcome(scope.id, persistedSample, parsedOutcome.errors.join("; ") || "scope outcome missing", cfg.materialFingerprint));
+        await logger.event("audit_dig_sample", {
+          scope: scope.id,
+          sample: persistedSample,
+          runSample: sample,
+          minimum: samples,
+          maximum: maxSamples,
+          findings: sess.findings.length,
+          coverageComplete: perScopeOutcomes.at(-1)?.coverageComplete ?? false,
+        });
+        if (sample >= samples && (!cfg.auditAdaptiveDig || sample >= maxSamples || !scopeOutcomeNeedsAnotherSample(perScopeOutcomes))) break;
       }
-      return { findings: dedupeFindings(perScope), steps: stepsOut };
+      return { findings: dedupeFindings(perScope), outcomes: perScopeOutcomes, steps: stepsOut };
     };
 
     if (concurrency > 1) {
@@ -513,7 +595,7 @@ export async function runAudit(
       // differential confirmation, so parallel digs cannot corrupt each other's
       // test files, build output, or findings. A bounded pool caps simultaneous digs.
       const workspaceRoots = cfg.buildRoot ? [cfg.buildRoot] : cfg.sourcePaths;
-      const digScope = async (scope: AuditScope): Promise<{ findings: AgentFinding[]; steps: TranscriptStep[]; commandRuns: typeof session.commandRuns; scratchFiles: Array<[string, string]>; resourceRequests: ResourceRequest[] }> => {
+      const digScope = async (scope: AuditScope): Promise<{ findings: AgentFinding[]; outcomes: ScopeOutcome[]; steps: TranscriptStep[]; commandRuns: typeof session.commandRuns; scratchFiles: Array<[string, string]>; resourceRequests: ResourceRequest[] }> => {
         scope.status = "auditing"; // mark in-progress so the live UI shows which scope is being dug
         recorder.scopes(scopeInventory);
         const digT0 = Date.now();
@@ -525,7 +607,7 @@ export async function runAudit(
           if (session.buildCacheDir) digSession.buildCacheDir = session.buildCacheDir; // shared dep cache; per-dig target/
           await copyCorpusIntoWorkspace(ws, corpus);
           const digCtx: ToolContext = { cfg: digCfg, source, corpus, memory, logger, session: digSession };
-          const { findings: unioned, steps: digSteps } = await digSamples(scope, digSession, { ctx: digCtx, cwd: ws.absolute });
+          const { findings: unioned, outcomes, steps: digSteps } = await digSamples(scope, digSession, { ctx: digCtx, cwd: ws.absolute });
           for (const finding of unioned) {
             if (finding.confirmationStatus !== "confirmed-executable" || !finding.fixPatch || !finding.commandRunId) continue;
             const exploitRun = digSession.commandRuns.find((run) => run.id === finding.commandRunId);
@@ -549,10 +631,11 @@ export async function runAudit(
           // Resume checkpoint: persist the audited status so a kill mid-run skips this scope
           // on the next run (concurrent digs' findings live in their isolated workspaces).
           await saveScopeInventory(inventoryDir, scopeInventory);
+          await appendScopeOutcomes(inventoryDir, outcomes);
           recorder.scopes(scopeInventory);
           recorder.findings(unioned, logger.runDir, "dig checkpoint"); // persist this scope's findings live (content-keyed upsert)
           recorder.runScopes(++digDone, toDig.length);
-          return { findings: unioned, steps: digSteps, commandRuns: scopedRuns, scratchFiles: scopedScratchFiles, resourceRequests: digSession.resourceRequests ?? [] };
+          return { findings: unioned, outcomes, steps: digSteps, commandRuns: scopedRuns, scratchFiles: scopedScratchFiles, resourceRequests: digSession.resourceRequests ?? [] };
         } catch (error) {
           await resetInFlightScope(scope);
           throw error;
@@ -565,6 +648,7 @@ export async function runAudit(
       // the map phase. runWithConcurrency preserves scope order.
       for (const result of perScope) {
         aggregated.push(...result.findings);
+        newScopeOutcomes.push(...result.outcomes);
         aggregatedSteps.push(...result.steps);
         session.commandRuns.push(...result.commandRuns);
         for (const [scratchPath, content] of result.scratchFiles) session.scratchFiles.set(scratchPath, content);
@@ -586,15 +670,17 @@ export async function runAudit(
         recorder.scopes(scopeInventory);
         const digT0 = Date.now();
         try {
-          const { findings: unioned, steps: digSteps } = await digSamples(scope, session);
+          const { findings: unioned, outcomes, steps: digSteps } = await digSamples(scope, session);
           aggregatedSteps.push(...digSteps);
           aggregated.push(...unioned);
+          newScopeOutcomes.push(...outcomes);
           scope.status = "audited";
           scope.digSeconds = Math.max(1, Math.round((Date.now() - digT0) / 1000));
           await logger.event("audit_dig_done", { scope: scope.id, samples, findings: unioned.length, digSeconds: scope.digSeconds });
           // Resume checkpoint: persist the audited status + findings-so-far after each dig,
           // so a kill mid-run resumes at the next pending scope and keeps completed work.
           await saveScopeInventory(inventoryDir, scopeInventory);
+          await appendScopeOutcomes(inventoryDir, outcomes);
           await checkpointFindings();
           recorder.scopes(scopeInventory);
           digDone += 1;
@@ -615,25 +701,27 @@ export async function runAudit(
     // a security-critical sink in another) is invisible to them. Run one sink-driven composition
     // pass over the union of scopes + findings, then fold its chains into the finding set so they go
     // through the same differential/refutation/finalize. General method, no per-target special case.
+    scopeOutcomes = mergeScopeOutcomes(scopeOutcomes, newScopeOutcomes);
+    await logger.artifact(SCOPE_OUTCOMES_FILE, scopeOutcomes);
+    if (scopeOutcomeErrors.length > 0) await logger.artifact("scope_outcome_errors.json", scopeOutcomeErrors);
     const priorSynthesis = cfg.auditSynthesisContext ?? [];
-    const priorSynthesisKeys = new Set(priorSynthesis.map(synthesisIdentity));
-    const synthesisDelta = aggregated.filter((finding) => !priorSynthesisKeys.has(synthesisIdentity(finding as unknown as Record<string, unknown>)));
-    if (cfg.auditSynthesize !== false && scopeInventory.length > 1 && aggregated.length > 0 && synthesisDelta.length > 0 && !options.signal?.aborted) {
+    if (cfg.auditSynthesize !== false && scopeInventory.length > 1 && newScopeOutcomes.length > 0 && !options.signal?.aborted) {
       clearScratchFindings(session);
-      const synthesisFingerprint = phaseInputFingerprint({ phase: "synthesis", material: cfg.materialFingerprint, prior: priorSynthesis.map(synthesisIdentity), delta: synthesisDelta.map((finding) => synthesisIdentity(finding as unknown as Record<string, unknown>)) });
-      await logger.event("audit_synthesis_start", { scopes: scopeInventory.length, findings: aggregated.length, prior: priorSynthesis.length, delta: synthesisDelta.length, inputFingerprint: synthesisFingerprint });
-      recorder.stage("synthesis", { scopes: scopeInventory.length, pool: aggregated.length, prior: priorSynthesis.length, delta: synthesisDelta.length, inputFingerprint: synthesisFingerprint, status: "running" });
-      const synthPhase = await runPhase(withRole(cfg, "dig"), { mode: "synthesize", synthSeed: buildSynthesisSeed(aggregated, scopeInventory, priorSynthesis), maxSteps: cfg.auditDigSteps });
+      await writeSandboxFiles(workspaceCwd, [{ path: SYNTHESIS_SCOPE_OUTCOMES_PATH, content: `${JSON.stringify(scopeOutcomes, null, 2)}\n` }]);
+      const synthesisFingerprint = phaseInputFingerprint({ phase: "synthesis", material: cfg.materialFingerprint, prior: priorSynthesis.map(synthesisIdentity), outcomes: newScopeOutcomes });
+      await logger.event("audit_synthesis_start", { scopes: scopeInventory.length, findings: aggregated.length, outcomes: scopeOutcomes.length, deltaOutcomes: newScopeOutcomes.length, prior: priorSynthesis.length, inputFingerprint: synthesisFingerprint });
+      recorder.stage("synthesis", { scopes: scopeInventory.length, pool: aggregated.length, outcomes: scopeOutcomes.length, deltaOutcomes: newScopeOutcomes.length, prior: priorSynthesis.length, inputFingerprint: synthesisFingerprint, status: "running" });
+      const synthPhase = await runPhase(withRole(cfg, "dig"), { mode: "synthesize", synthSeed: buildSynthesisSeed(aggregated, scopeInventory, priorSynthesis, SYNTHESIS_SCOPE_OUTCOMES_PATH), maxSteps: cfg.auditDigSteps });
       aggregatedSteps.push(...synthPhase.steps);
       ingestFindingsFromScratch(session);
       for (const composed of session.findings) aggregated.push(composed);
       const produced = session.findings.length;
       await logger.event("audit_synthesis_done", { produced });
       recorder.findings(aggregated, logger.runDir, "synthesis");
-      recorder.stage("synthesis", { scopes: scopeInventory.length, produced, pool: aggregated.length, prior: priorSynthesis.length, delta: synthesisDelta.length, inputFingerprint: synthesisFingerprint, status: "done" }); // funnel: cross-scope chains ADDED
-    } else if (cfg.auditSynthesize !== false && priorSynthesis.length > 0 && aggregated.length > 0 && synthesisDelta.length === 0) {
-      recorder.stage("synthesis", { scopes: scopeInventory.length, pool: aggregated.length, prior: priorSynthesis.length, delta: 0, status: "skipped", reason: "no novel or changed finding inputs" });
-      await logger.event("audit_synthesis_skipped", { reason: "no-delta", prior: priorSynthesis.length, findings: aggregated.length });
+      recorder.stage("synthesis", { scopes: scopeInventory.length, produced, pool: aggregated.length, outcomes: scopeOutcomes.length, deltaOutcomes: newScopeOutcomes.length, prior: priorSynthesis.length, inputFingerprint: synthesisFingerprint, status: "done" }); // funnel: cross-scope chains ADDED
+    } else if (cfg.auditSynthesize !== false && scopeInventory.length > 1 && newScopeOutcomes.length === 0) {
+      recorder.stage("synthesis", { scopes: scopeInventory.length, pool: aggregated.length, outcomes: scopeOutcomes.length, deltaOutcomes: 0, status: "skipped", reason: "no new scope outcomes" });
+      await logger.event("audit_synthesis_skipped", { reason: "no-outcome-delta", outcomes: scopeOutcomes.length, findings: aggregated.length });
     }
     // Each scope/dig session numbered its findings independently (f1, f2, …), so
     // aggregating across scopes collides. Re-id uniquely so every finding gets its
@@ -652,14 +740,27 @@ export async function runAudit(
   } else {
     // Single run: breadth (default role) or a pinned deep-focus dig (dig role).
     const pinned = Boolean(cfg.auditDeep && cfg.auditDeepFocus);
+    const directScopeId = pinned ? `region-${createHash("sha256").update(cfg.auditDeepFocus ?? "pinned").digest("hex").slice(0, 12)}` : undefined;
     auditMode = pinned ? "dig" : "breadth";
     const result = await runPhase(withRole(cfg, pinned ? "dig" : "default"), {
       mode: pinned ? "dig" : "breadth",
-      ...(cfg.auditDeepFocus ? { deepFocus: cfg.auditDeepFocus } : {}),
+      ...(cfg.auditDeepFocus ? { deepFocus: `scope ${directScopeId}; code region ${cfg.auditDeepFocus}` } : {}),
       maxSteps: cfg.auditMaxSteps,
     });
     steps = result.steps;
     stoppedReason = result.stoppedReason;
+    if (pinned && directScopeId) {
+      const outcomeHistoryDir = projectHistoryDir(historyLocation(cfg));
+      const previousOutcomes = await loadScopeOutcomes(outcomeHistoryDir, cfg.materialFingerprint);
+      const sample = nextScopeOutcomeSample(previousOutcomes, directScopeId);
+      const parsedOutcome = readScratchScopeOutcome(session, { scopeId: directScopeId, sample, ...(cfg.materialFingerprint ? { materialFingerprint: cfg.materialFingerprint } : {}) });
+      if (parsedOutcome.errors.length > 0) scopeOutcomeErrors.push({ scopeId: directScopeId, sample, errors: parsedOutcome.errors });
+      newScopeOutcomes = [parsedOutcome.outcome ?? incompleteScopeOutcome(directScopeId, sample, parsedOutcome.errors.join("; ") || "scope outcome missing", cfg.materialFingerprint)];
+      scopeOutcomes = mergeScopeOutcomes(previousOutcomes, newScopeOutcomes);
+      await appendScopeOutcomes(outcomeHistoryDir, newScopeOutcomes);
+      await logger.artifact(SCOPE_OUTCOMES_FILE, scopeOutcomes);
+      if (scopeOutcomeErrors.length > 0) await logger.artifact("scope_outcome_errors.json", scopeOutcomeErrors);
+    }
   }
 
   const findingParse = manualFindings ? { parsed: session.findings.length, errors: [] } : ingestFindingsFromScratch(session);
@@ -669,12 +770,29 @@ export async function runAudit(
   }
 
   const discoveryArtifacts = readDiscoveryArtifacts(session);
-  let coverageGaps: CoverageGap[] = discoveryArtifacts.coverageGaps;
+  let coverageGaps: CoverageGap[] = mergeCoverageGaps([
+    ...discoveryArtifacts.coverageGaps,
+    ...latestScopeOutcomes(newScopeOutcomes).map((outcome) => {
+      const needsCoverage = scopeOutcomeNeedsCoverage(outcome);
+      return {
+        id: `scope-outcome-${outcome.scopeId}`,
+        status: needsCoverage ? "open" as const : "resolved" as const,
+        phase: "dig",
+        scopeId: outcome.scopeId,
+        obligation: `Complete the coverage handoff for ${outcome.scopeId}`,
+        reason: needsCoverage
+          ? outcome.blockers.join("; ") || "The model did not persist a complete scope outcome."
+          : "The latest scope outcome discharged the current coverage handoff.",
+        ...(needsCoverage ? { nextAction: "Re-audit this scope after resolving any named blocker." } : {}),
+      };
+    }),
+  ]);
   let resourceRequests: ResourceRequest[] = mergeResourceRequests(discoveryArtifacts.resourceRequests, session.resourceRequests ?? []);
   let followupScopes: AuditScope[] = discoveryArtifacts.followupScopes;
   if (followupScopes.length > 0) {
     const merged = mergeFollowupScopes(scopeInventory, followupScopes);
     scopeInventory = merged.scopes;
+    stampScopeInventory(scopeInventory, cfg.materialFingerprint);
     if (merged.added > 0) {
       const inventoryDir = projectHistoryDir(historyLocation(cfg));
       await saveScopeInventory(inventoryDir, scopeInventory);
@@ -857,7 +975,28 @@ export async function runAudit(
   // reasoning, never a specific bug shape.
   if (cfg.auditChallengeDischarges !== false && !options.signal?.aborted) {
     const sevRank = (s: string | undefined): number => ({ critical: 0, high: 1, medium: 2, low: 3, info: 4 } as Record<string, number>)[s ?? "info"] ?? 4;
-    const discharged = session.findings.filter((f) => f.confirmationStatus === "discharged").sort((a, b) => sevRank(a.severity) - sevRank(b.severity));
+    const legacyDischarged = session.findings.filter((f) => f.confirmationStatus === "discharged");
+    const outcomeDischarged = latestScopeOutcomes(scopeOutcomes).flatMap((outcome) => {
+      const scope = scopeInventory.find((candidate) => candidate.id === outcome.scopeId);
+      const severity = severityFromExposure(scope?.exposure);
+      return outcome.obligations
+        .filter((obligation) => obligation.status === "discharged")
+        .map((obligation): AgentFinding => ({
+          id: `discharge:${outcome.scopeId}:${obligation.id}`,
+          title: `DISCHARGED: ${obligation.statement}`,
+          severity,
+          location: obligation.location ?? scope?.region ?? "unknown",
+          description: obligation.evidence ?? "The scope outcome declared this obligation discharged without additional evidence text.",
+          evidence: obligation.evidence ?? obligation.location ?? scope?.region ?? "",
+          exploitSketch: "",
+          fix: "",
+          confidence: obligation.confidence ?? 0.5,
+          confirmationStatus: "discharged",
+          scopeId: outcome.scopeId,
+        }));
+    });
+    const outcomeById = new Map(outcomeDischarged.map((finding) => [finding.id, finding]));
+    const discharged = [...legacyDischarged, ...outcomeDischarged].sort((a, b) => sevRank(a.severity) - sevRank(b.severity));
     if (discharged.length > 0) {
       const challengeCfg = withRole(cfg, "refute");
       const challengeLlm = options.llm ?? (isPiSessionProvider(challengeCfg.provider) ? new SessionLlmClient(challengeCfg, logger) : createLlmClient(challengeCfg, logger));
@@ -866,8 +1005,13 @@ export async function runAudit(
       let overturned = 0;
       for (const v of verdicts) {
         if (!v.unsound) continue;
-        const finding = session.findings.find((x) => x.id === v.findingId);
-        if (!finding) continue;
+        let finding = session.findings.find((x) => x.id === v.findingId);
+        if (!finding) {
+          const dischargedOutcome = outcomeById.get(v.findingId);
+          if (!dischargedOutcome) continue;
+          finding = { ...dischargedOutcome, id: `f${session.findings.length + 1}` };
+          session.findings.push(finding);
+        }
         finding.confirmationStatus = "suspected"; // no longer "safe" — re-open as a real lead (flows to verify)
         finding.title = "DISCHARGE OVERTURNED: " + (finding.title || "").replace(/^(obligation\s+)?discharged:?\s*/i, "");
         finding.description = `An independent discharge-skeptic overturned this discharge — the cited enforcement does not clear the obligation end-to-end. Missed case: ${v.gap || v.reason}\n\n[original discharge reasoning] ${finding.description || ""}`.slice(0, 4000);
@@ -897,6 +1041,7 @@ export async function runAudit(
     coverageGaps,
     resourceRequests,
     followupScopes,
+    scopeOutcomes,
     findingParseErrors: findingParse.errors.length,
     infraErrors: refutationErrors.length,
     mode: auditMode,
@@ -940,7 +1085,7 @@ export async function runAudit(
     }),
   );
 
-  await nonFatalAuditMaintenance(logger, "finding_memory", () => persistFindingMemory(memory, confirmed, hypotheses));
+  await nonFatalAuditMaintenance(logger, "finding_memory", () => persistFindingMemory(memory, confirmed, hypotheses, cfg.materialFingerprint, resourceRequests));
 
   await logger.event("audit_done", {
     stoppedReason,
@@ -1099,23 +1244,41 @@ function buildSummary(confirmed: AgentFinding[], hypotheses: AgentFinding[], ste
   };
 }
 
-async function persistFindingMemory(memory: ProjectMemory, confirmed: AgentFinding[], hypotheses: AgentFinding[]): Promise<void> {
+async function persistFindingMemory(
+  memory: ProjectMemory,
+  confirmed: AgentFinding[],
+  hypotheses: AgentFinding[],
+  materialFingerprint: string | undefined,
+  resourceRequests: ResourceRequest[],
+): Promise<void> {
   for (const finding of confirmed) {
     await memory.remember({
       note: `${finding.title} (${finding.confirmationStatus}) at ${finding.location}: ${finding.description}`.slice(0, 600),
       kind: "finding",
       tags: ["audit", finding.severity, finding.confirmationStatus],
       sourceRef: finding.location,
+      ...(materialFingerprint ? { materialFingerprint } : {}),
     });
   }
   // Remember hypotheses too, but as notes — a future run starts knowing which
   // leads were explored without treating them as established findings.
   for (const finding of hypotheses) {
+    const refuted = /^REFUTED:/i.test(finding.title);
     await memory.remember({
-      note: `Unconfirmed hypothesis: ${finding.title} at ${finding.location}: ${finding.description}`.slice(0, 600),
-      kind: "note",
-      tags: ["audit", "hypothesis", finding.severity],
+      note: `${refuted ? "Refuted lead" : "Unconfirmed hypothesis"}: ${finding.title} at ${finding.location}: ${finding.description}`.slice(0, 600),
+      kind: refuted ? "dead-end" : "note",
+      tags: ["audit", refuted ? "refuted" : "hypothesis", finding.severity],
       sourceRef: finding.location,
+      ...(materialFingerprint ? { materialFingerprint } : {}),
+    });
+  }
+  for (const request of resourceRequests) {
+    await memory.remember({
+      note: `Resource blocker (${request.kind}): ${request.needed}. ${request.reason}${request.unblock ? ` Unblock: ${request.unblock}` : ""}`.slice(0, 600),
+      kind: "resource",
+      tags: ["audit", "resource", request.kind, request.status],
+      ...((request.scopeId ?? request.findingId) ? { sourceRef: request.scopeId ?? request.findingId } : {}),
+      ...(materialFingerprint ? { materialFingerprint } : {}),
     });
   }
 }
@@ -1188,7 +1351,7 @@ function buildVerifySeed(finding: Record<string, unknown>): string {
 // across components: the scope inventory (candidate sinks / gates / inputs) and the findings
 // (especially the suspected unbound-input / missing-constraint ones — exactly the links that may
 // complete a cross-scope chain). Compact; leads to CHAIN, not ground truth.
-function buildSynthesisSeed(findings: AgentFinding[], scopes: AuditScope[], prior: Array<Record<string, unknown>> = []): string {
+function buildSynthesisSeed(findings: AgentFinding[], scopes: AuditScope[], prior: Array<Record<string, unknown>> = [], scopeOutcomesPath?: string): string {
   const scopeLines = [...scopes]
     .sort((a, b) => (b.score ?? 0) - (a.score ?? 0))
     .slice(0, 50)
@@ -1207,7 +1370,10 @@ function buildSynthesisSeed(findings: AgentFinding[], scopes: AuditScope[], prio
     const lead = String(finding.exploit_sketch ?? finding.exploitSketch ?? finding.description ?? "").replace(/\s+/g, " ").slice(0, 180);
     return `- (${String(finding.status ?? finding.confirmationStatus ?? "unknown")}) ${String(finding.title ?? "Untitled")} @ ${String(finding.location ?? "unknown")}${lead ? ` — ${lead}` : ""}`;
   }).join("\n");
-  return `SCOPES (each a region + the obligation the per-scope dig checked there — candidate sinks, gates, and inputs):
+  return `FULL MODEL-AUTHORED SCOPE OUTCOMES:
+${scopeOutcomesPath ? `Read ${scopeOutcomesPath}. It contains every persisted obligation outcome and composition edge for the current material snapshot. Do not infer a vulnerability from the artifact; use it only to identify cross-scope chains that must still be tested.` : "(not available)"}
+
+SCOPES (compact index only; use the full outcome artifact above for complete coverage):
 ${scopeLines || "(none)"}
 
 PRIOR CANONICAL FINDINGS (settled in earlier batches; use only for cross-batch composition and duplicate avoidance):
@@ -1215,6 +1381,15 @@ ${priorLines || "(none)"}
 
 NEW BATCH FINDINGS (each found in ONE scope in isolation; compose these with each other and with prior findings):
 ${findLines || "(none)"}`;
+}
+
+function mergeCoverageGaps(gaps: CoverageGap[]): CoverageGap[] {
+  const out = new Map<string, CoverageGap>();
+  for (const gap of gaps) {
+    const key = `${gap.scopeId ?? ""}::${gap.region ?? ""}::${gap.obligation}::${gap.reason}`.toLowerCase();
+    if (!out.has(key)) out.set(key, gap);
+  }
+  return [...out.values()];
 }
 
 function synthesisIdentity(finding: Record<string, unknown>): string {
@@ -1456,4 +1631,56 @@ function historyLocation(cfg: AuditorConfig): { outputDir: string; targetName: s
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function stampScopeInventory(scopes: AuditScope[], materialFingerprint: string | undefined): void {
+  if (!materialFingerprint) return;
+  for (const scope of scopes) scope.materialFingerprint = materialFingerprint;
+}
+
+async function clearCurrentMaterialScopeOutcomes(historyDir: string, materialFingerprint: string | undefined): Promise<void> {
+  const stored = await loadScopeOutcomes(historyDir);
+  const retained = stored.filter((outcome) => materialFingerprint
+    ? outcome.materialFingerprint !== materialFingerprint
+    : outcome.materialFingerprint !== undefined);
+  if (retained.length !== stored.length) await saveScopeOutcomes(historyDir, retained);
+}
+
+export function unionMapSamples(sampleMaps: AuditScope[][]): AuditScope[] {
+  const out: AuditScope[] = [];
+  const byShape = new Map<string, AuditScope>();
+  const ids = new Set<string>();
+  for (const [sampleIndex, scopes] of sampleMaps.entries()) {
+    const sample = sampleIndex + 1;
+    for (const scope of scopes) {
+      const shape = `${scope.region.toLowerCase().replace(/\s+/g, " ").trim()}::${scope.obligation.toLowerCase().replace(/\s+/g, " ").trim()}`;
+      const current = byShape.get(shape);
+      if (current) {
+        current.mapSamples = [...new Set([...(current.mapSamples ?? []), sample])].sort((a, b) => a - b);
+        current.mapAgreement = current.mapSamples.length;
+        current.score = Math.max(current.score, scope.score);
+        continue;
+      }
+      let id = scope.id.trim() || `S${out.length + 1}`;
+      if (ids.has(id.toLowerCase())) {
+        const prefix = id.replace(/\d+$/, "") || "S";
+        let suffix = 1;
+        while (ids.has(`${prefix}${suffix}`.toLowerCase())) suffix += 1;
+        id = `${prefix}${suffix}`;
+      }
+      ids.add(id.toLowerCase());
+      const mapped = { ...scope, id, mapSamples: [sample], mapAgreement: 1 };
+      byShape.set(shape, mapped);
+      out.push(mapped);
+    }
+  }
+  return out.sort((a, b) => b.score - a.score);
+}
+
+function severityFromExposure(exposure: string | undefined): Severity {
+  const value = (exposure ?? "").toLowerCase();
+  if (value === "critical") return "critical";
+  if (value === "high") return "high";
+  if (value === "low") return "low";
+  return "medium";
 }

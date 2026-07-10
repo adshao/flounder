@@ -1,4 +1,5 @@
 import type { AgentFinding, AgentSession, AuditScope, CommandRunRecord } from "./tools.js";
+import { latestScopeOutcomes, scopeOutcomeNeedsCoverage, type ScopeOutcome } from "./scope-outcomes.js";
 
 export const COVERAGE_GAPS_FILE = "coverage_gaps.json";
 export const RESOURCE_REQUESTS_FILE = "resource_requests.json";
@@ -60,6 +61,10 @@ export interface RunHealth {
     followupScopes: number;
     findingParseErrors: number;
     infraErrors: number;
+    scopeOutcomes: number;
+    scopeOutcomesIncomplete: number;
+    mapSamples: number;
+    mapScopesWithAgreement: number;
   };
 }
 
@@ -114,6 +119,7 @@ export function buildRunHealth(input: {
   coverageGaps: CoverageGap[];
   resourceRequests: ResourceRequest[];
   followupScopes: AuditScope[];
+  scopeOutcomes?: ScopeOutcome[];
   findingParseErrors?: number;
   infraErrors?: number;
   mode?: "breadth" | "map" | "map-dig" | "verify" | "dig" | "confirm";
@@ -130,6 +136,10 @@ export function buildRunHealth(input: {
   const followupScopes = input.followupScopes.length;
   const findingParseErrors = input.findingParseErrors ?? 0;
   const infraErrors = input.infraErrors ?? 0;
+  const scopeOutcomes = latestScopeOutcomes(input.scopeOutcomes ?? []);
+  const scopeOutcomesIncomplete = scopeOutcomes.filter(scopeOutcomeNeedsCoverage).length;
+  const mapSamples = input.scopes.reduce((maximum, scope) => Math.max(maximum, ...(scope.mapSamples ?? [0])), 0);
+  const mapScopesWithAgreement = input.scopes.filter((scope) => (scope.mapAgreement ?? 0) > 1).length;
 
   const reasons: string[] = [];
   let status: RunHealthStatus = "healthy";
@@ -161,6 +171,9 @@ export function buildRunHealth(input: {
   if (status === "healthy" && (openGaps > 0 || followupScopes > 0)) {
     setStatus("needs-coverage", `${openGaps} coverage gap(s) and ${followupScopes} follow-up scope(s) remain`);
   }
+  if (status === "healthy" && scopeOutcomesIncomplete > 0) {
+    setStatus("needs-coverage", `${scopeOutcomesIncomplete} scope outcome(s) remain incomplete`);
+  }
 
   if (reasons.length === 0) reasons.push("no framework health blocker detected");
 
@@ -184,6 +197,10 @@ export function buildRunHealth(input: {
       followupScopes,
       findingParseErrors,
       infraErrors,
+      scopeOutcomes: scopeOutcomes.length,
+      scopeOutcomesIncomplete,
+      mapSamples,
+      mapScopesWithAgreement,
     },
   };
 }

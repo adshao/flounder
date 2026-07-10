@@ -104,6 +104,8 @@ export function HarnessExperimentDetail({ experiment, busy, onBack, onAttach, on
         </div>
         <ComparisonRow label="Positive recall" baseline={formatMetricRate(baselineMetrics?.positiveRecall)} candidate={formatMetricRate(candidateMetrics?.positiveRecall)} />
         <ComparisonRow label="Control pass" baseline={formatMetricRate(baselineMetrics?.controlPassRate)} candidate={formatMetricRate(candidateMetrics?.controlPassRate)} />
+        <ComparisonRow label="Holdout pass" baseline={formatHoldouts(baselineMetrics)} candidate={formatHoldouts(candidateMetrics)} />
+        <ComparisonRow label="Families / stacks" baseline={formatDiversity(baselineMetrics)} candidate={formatDiversity(candidateMetrics)} />
         <ComparisonRow label="Blocked" baseline={baselineMetrics ? String(baselineMetrics.blocked) : "—"} candidate={candidateMetrics ? String(candidateMetrics.blocked) : "—"} />
         <ComparisonRow label="Attempts" baseline={baselineMetrics ? String(baselineMetrics.attempts) : "—"} candidate={candidateMetrics ? String(candidateMetrics.attempts) : "—"} />
         <ComparisonRow label="Duration" baseline={formatDuration(baselineMetrics?.durationSeconds)} candidate={formatDuration(candidateMetrics?.durationSeconds)} />
@@ -144,6 +146,9 @@ export function HarnessExperimentDetail({ experiment, busy, onBack, onAttach, on
         <div className="evaluation-section-head"><div><h2>Promotion gate</h2><p>Deterministic policy applied to paired persisted evidence, never to candidate claims.</p></div></div>
         <div className="harness-gate-rules">
           <span><strong>{experiment.promotionPolicy.minimumSamplesPerClass}</strong> positive and control samples per variant</span>
+          <span><strong>{experiment.promotionPolicy.minimumDistinctCases}</strong> distinct positive cases</span>
+          <span><strong>{experiment.promotionPolicy.minimumDistinctFamilies}</strong> distinct bug families</span>
+          <span><strong>{experiment.promotionPolicy.minimumHoldoutCases}</strong> hidden holdout cases, all passing</span>
           <span><strong>{experiment.promotionPolicy.minimumImprovedCases}</strong> minimum improved paired case</span>
           <span><strong>0</strong> paired regressions</span>
           <span><strong>{formatRate(experiment.promotionPolicy.maxBlockedRate)}</strong> maximum blocked rate</span>
@@ -169,6 +174,9 @@ export function NewHarnessExperimentModal({ groups, onClose, onCreated }: { grou
   const [candidate, setCandidate] = useState("");
   const [editableFiles, setEditableFiles] = useState("src/agent/prompts.ts");
   const [minimumSamples, setMinimumSamples] = useState("2");
+  const [minimumDistinctCases, setMinimumDistinctCases] = useState("2");
+  const [minimumDistinctFamilies, setMinimumDistinctFamilies] = useState("2");
+  const [minimumHoldouts, setMinimumHoldouts] = useState("1");
   const [minimumImproved, setMinimumImproved] = useState("1");
   const [maxDurationRatio, setMaxDurationRatio] = useState("1.25");
   const [maxAttemptRatio, setMaxAttemptRatio] = useState("1.25");
@@ -187,6 +195,9 @@ export function NewHarnessExperimentModal({ groups, onClose, onCreated }: { grou
         editableFiles: splitLines(editableFiles),
         promotionPolicy: {
           minimumSamplesPerClass: Number(minimumSamples),
+          minimumDistinctCases: Number(minimumDistinctCases),
+          minimumDistinctFamilies: Number(minimumDistinctFamilies),
+          minimumHoldoutCases: Number(minimumHoldouts),
           minimumImprovedCases: Number(minimumImproved),
           requireAllControlsPass: true,
           maxBlockedRate: 0,
@@ -214,6 +225,9 @@ export function NewHarnessExperimentModal({ groups, onClose, onCreated }: { grou
         </div>
         <div className="harness-policy-fields">
           <label className="field">Samples per class<input type="number" min="1" max="100" value={minimumSamples} onChange={(event) => setMinimumSamples(event.target.value)} /></label>
+          <label className="field">Distinct cases<input type="number" min="1" max="100" value={minimumDistinctCases} onChange={(event) => setMinimumDistinctCases(event.target.value)} /></label>
+          <label className="field">Distinct families<input type="number" min="1" max="100" value={minimumDistinctFamilies} onChange={(event) => setMinimumDistinctFamilies(event.target.value)} /></label>
+          <label className="field">Hidden holdouts<input type="number" min="0" max="100" value={minimumHoldouts} onChange={(event) => setMinimumHoldouts(event.target.value)} /></label>
           <label className="field">Minimum improvements<input type="number" min="1" max="100" value={minimumImproved} onChange={(event) => setMinimumImproved(event.target.value)} /></label>
           <label className="field">Duration budget<input type="number" min="1" max="10" step="0.05" value={maxDurationRatio} onChange={(event) => setMaxDurationRatio(event.target.value)} /></label>
           <label className="field">Attempt budget<input type="number" min="1" max="10" step="0.05" value={maxAttemptRatio} onChange={(event) => setMaxAttemptRatio(event.target.value)} /></label>
@@ -305,6 +319,16 @@ function metricsFromGroup(group?: RunGroupRow | null): HarnessScoreMetrics | nul
   if (!group) return null;
   const metrics = evaluationMetrics(group);
   const durations = group.items.map((item) => durationSeconds(item.started_at, item.ended_at)).filter((value): value is number => value !== null);
+  const positives = group.items.filter((item) => item.evidenceContract.expectedOutcome === "detect-positive");
+  const controls = group.items.filter((item) => item.evidenceContract.expectedOutcome === "reject-positive");
+  const distinct = (items: typeof group.items, field: "caseId" | "caseFamily" | "targetStack") => new Set(items.map((item) => item.evidenceContract[field]).filter(Boolean)).size;
+  const distinctCases = (items: typeof group.items) => new Set(items.map((item) => item.evidenceContract.caseId ?? item.item_key)).size;
+  const holdoutItems = group.items.filter((item) => item.evidenceContract.holdout === true);
+  const holdouts = new Map<string, typeof group.items>();
+  for (const item of holdoutItems) {
+    const key = item.evidenceContract.caseId ?? item.item_key;
+    holdouts.set(key, [...(holdouts.get(key) ?? []), item]);
+  }
   return {
     total: metrics.total,
     scored: metrics.scored,
@@ -321,6 +345,12 @@ function metricsFromGroup(group?: RunGroupRow | null): HarnessScoreMetrics | nul
     positiveRecall: metrics.positiveRecall,
     controlPassRate: metrics.controlPassRate,
     blockedRate: metrics.total ? metrics.blocked / metrics.total : 0,
+    distinctPositiveCases: distinctCases(positives),
+    distinctControlCases: distinctCases(controls),
+    distinctFamilies: distinct(positives, "caseFamily"),
+    distinctStacks: distinct(group.items, "targetStack"),
+    holdouts: holdouts.size,
+    holdoutsPassed: [...holdouts.values()].filter((samples) => samples.every((item) => item.result?.accepted === true)).length,
   };
 }
 
@@ -333,6 +363,14 @@ function durationSeconds(start?: string | null, end?: string | null): number | n
 
 function formatMetricRate(value?: number | null): string {
   return value === null || value === undefined ? "—" : formatRate(value);
+}
+
+function formatHoldouts(metrics?: HarnessScoreMetrics | null): string {
+  return metrics ? `${metrics.holdoutsPassed}/${metrics.holdouts}` : "—";
+}
+
+function formatDiversity(metrics?: HarnessScoreMetrics | null): string {
+  return metrics ? `${metrics.distinctFamilies} / ${metrics.distinctStacks}` : "—";
 }
 
 function formatRate(value: number): string {

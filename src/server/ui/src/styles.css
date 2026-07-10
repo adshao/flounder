@@ -1181,6 +1181,21 @@ small {
   margin-top: 18px;
 }
 
+.coverage-quality-strip {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px 18px;
+  padding: 10px 12px;
+  border-top: 1px solid var(--line);
+  color: var(--muted);
+  font-size: 12px;
+}
+
+.coverage-quality-strip span { white-space: nowrap; }
+.coverage-quality-strip strong { color: var(--fg); font-size: 13px; }
+.coverage-quality-strip .good strong { color: var(--good); }
+.coverage-quality-strip .warn strong { color: var(--warn); }
+
 .stat {
   display: grid;
   gap: 2px;

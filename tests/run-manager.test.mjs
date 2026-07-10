@@ -45,8 +45,12 @@ test("buildArgs: a full run spec maps to the expected verb + flags", () => {
     thinking: "xhigh",
     maxScopes: 12,
     mapSteps: 60,
+    mapSamples: 2,
     digSteps: 60,
     digSamples: 2,
+    digMaxSamples: 4,
+    adaptiveDig: false,
+    eagerPrepare: true,
     out: "runs",
   });
   assert.deepEqual(args, [
@@ -60,8 +64,12 @@ test("buildArgs: a full run spec maps to the expected verb + flags", () => {
     "--thinking", "xhigh",
     "--max-scopes", "12",
     "--map-steps", "60",
+    "--map-samples", "2",
     "--dig-steps", "60",
     "--dig-samples", "2",
+    "--dig-max-samples", "4",
+    "--no-adaptive-dig",
+    "--eager-prepare",
     "--out", "runs",
   ]);
 });
@@ -91,6 +99,30 @@ test("verify concurrency is preserved across launch config and CLI args", () => 
   assert.equal(specToConfig(spec, "runs").auditVerifyConcurrency, 3);
   const args = buildArgs(spec);
   assert.deepEqual(args.slice(args.indexOf("--verify-concurrency"), args.indexOf("--verify-concurrency") + 2), ["--verify-concurrency", "3"]);
+});
+
+test("versioned coverage controls survive launch translation", () => {
+  const spec = {
+    verb: "run",
+    target: "p",
+    sourcePaths: ["./s"],
+    mapSamples: 3,
+    digSamples: 1,
+    digMaxSamples: 4,
+    adaptiveDig: true,
+    eagerPrepare: true,
+  };
+  const cfg = specToConfig(spec, "runs");
+  assert.equal(cfg.auditMapSamples, 3);
+  assert.equal(cfg.auditDigSamples, 1);
+  assert.equal(cfg.auditDigMaxSamples, 4);
+  assert.equal(cfg.auditAdaptiveDig, true);
+  assert.equal(cfg.auditEagerPrepare, true);
+  const args = buildArgs(spec);
+  assert.ok(args.includes("--map-samples"));
+  assert.ok(args.includes("--dig-max-samples"));
+  assert.ok(args.includes("--eager-prepare"));
+  assert.equal(args.includes("--no-adaptive-dig"), false);
 });
 
 test("specToConfig: launch next actions are preserved for the audit prompt", () => {

@@ -14,6 +14,9 @@ export interface AuditorConfig {
   buildRoot?: string;
   outputDir: string;
   historyDir?: string;
+  // Optional cache root separated from durable reasoning/coverage state. Evaluation
+  // attempts use isolated historyDir values but may safely share dependency caches.
+  buildCacheDir?: string;
   provider: string;
   auditModel: string;
   maxTokens: number;
@@ -48,12 +51,22 @@ export interface AuditorConfig {
   // Map → dig flow (used when --deep runs without a pinned focus): map enumerates
   // an obligation/scope inventory, dig deep-audits the top scopes one at a time.
   auditMapSteps: number;
+  // Independent MAP sessions whose inventories are unioned. Agreement is an
+  // ordering/uncertainty signal only; singleton scopes are never discarded.
+  auditMapSamples: number;
   auditDigSteps: number;
   auditMaxScopes: number;
   // How many independent dig passes to run per scope; findings are unioned. Raises
   // recall on scopes where a single pass finds a subtle obligation only sometimes
   // (cumulative recall 1 - (1-p)^K) — a variance lever, not a bug-specific tweak.
   auditDigSamples: number;
+  // Optional bounded adaptive ceiling. Extra samples run only when the
+  // model-authored scope outcome is incomplete, uncertain, or disagrees.
+  auditDigMaxSamples: number;
+  auditAdaptiveDig: boolean;
+  // Warm the isolated build/toolchain after MAP and before DIG. Failure creates
+  // resource requests but never turns into a safe/no-bug verdict.
+  auditEagerPrepare: boolean;
   // How many scopes the dig phase audits in parallel. Each concurrent dig runs in
   // its own isolated workspace + session (and its own differential confirmation),
   // so they cannot corrupt each other's test files, build output, or findings.
@@ -221,9 +234,13 @@ export function defaultConfig(): AuditorConfig {
     auditAppeal: true,
     auditDeep: false,
     auditMapSteps: Number.POSITIVE_INFINITY,
+    auditMapSamples: 1,
     auditDigSteps: Number.POSITIVE_INFINITY,
     auditMaxScopes: Number.POSITIVE_INFINITY,
     auditDigSamples: 1,
+    auditDigMaxSamples: 1,
+    auditAdaptiveDig: true,
+    auditEagerPrepare: false,
     auditDigConcurrency: 1,
     auditVerifyConcurrency: 2,
     auditRemap: false,

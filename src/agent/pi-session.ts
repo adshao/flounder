@@ -6,8 +6,9 @@ import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { LlmClient } from "../types.js";
-import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SCORING_RULES, POC_TRUST_RULE, type TranscriptStep } from "./prompts.js";
+import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SCORING_RULES, POC_TRUST_RULE, SCOPE_OUTCOME_RULES, type TranscriptStep } from "./prompts.js";
 import { describeAction, readScratchScopes, scratchHasFindings, scratchHasFindingsArtifact, type AgentTool, type ToolContext } from "./tools.js";
+import { SCOPE_OUTCOME_FILE, scratchHasScopeOutcome } from "./scope-outcomes.js";
 import { flounderAgentDir } from "../provider-auth.js";
 
 // Continuous-session driver (point 5). Instead of re-driving a stateless
@@ -366,6 +367,16 @@ export async function runAuditSession(input: {
       }
       return;
     }
+    if (input.deep && !input.synthesize && !scratchHasScopeOutcome(input.ctx.session)) {
+      finalizing = true;
+      await input.logger.event("audit_scope_outcome_finalize", { reason: "no scope outcome written before stop" });
+      try {
+        await runFinalizePrompt(SCOPE_OUTCOME_FINALIZE_PROMPT, "audit_scope_outcome_finalize_timeout");
+      } catch {
+        // best-effort; missing coverage remains fail-visible in run health
+      }
+      await input.logger.event("audit_scope_outcome_finalize_done", { hasOutcome: scratchHasScopeOutcome(input.ctx.session) });
+    }
     if (scratchHasFindingsArtifact(input.ctx.session)) return;
     finalizing = true;
     await input.logger.event("audit_findings_finalize", { reason: "no findings written before stop" });
@@ -653,6 +664,7 @@ Trust boundaries (do not lose a real bug just because its proof lives outside th
 - If a security property's correctness depends on a component NOT in the loaded source — a ZK circuit / verification key, an oracle, a proxy/upgradeable implementation, an external contract's semantics, or an off-chain service — do NOT assume that component enforces what the in-scope code trusts it to, and do NOT drop the concern just because no in-scope confirm test can reach it. The in-scope code "correctly trusting the proof/oracle/impl" is exactly where such bugs hide. Record it as a "suspected" finding that names the trusted assumption, the exact line relying on it, the attacker impact if the assumption fails, and what is needed to settle it (e.g. "needs the circuit/VK to confirm"). A surfaced cross-boundary suspicion beats a silently dropped real bug.
 
 ${DISCOVERY_BACKLOG_RULES}
+${input.deep && !input.synthesize && !input.verify ? `\n${SCOPE_OUTCOME_RULES}` : ""}
 `;
   return `${intro}
 
@@ -692,7 +704,7 @@ ${MAP_GRANULARITY_RULES}`
     : input.synthesize
       ? "Begin the sink-driven synthesis: enumerate the security-critical sinks, trace each backward across components for an input that arrives un-bound to a legitimate authority, compose the cross-component chains, and write findings.json (each composed exploit with its entry → unbound input → sink links and confirmation). Do not just re-list the per-scope findings."
       : input.deep
-        ? "Begin the obligation-driven method: model the system, rank and commit to the most soundness-critical region (unless one is pinned above), then enumerate its obligations from design intent and discharge each by naming the enforcing line or flagging its absence. Write only UNMET or uncertain obligations with a concrete missing edge to findings.json; discharged obligations are not findings. Do not wrap up while obligations remain unchecked."
+        ? `Begin the obligation-driven method: model the system, rank and commit to the most soundness-critical region (unless one is pinned above), then enumerate its obligations from design intent and discharge each by naming the enforcing line or flagging its absence. Write only UNMET or uncertain obligations with a concrete missing edge to findings.json; discharged obligations are not findings. Persist the separate ${SCOPE_OUTCOME_FILE} coverage handoff before done. Do not wrap up while obligations remain unchecked.`
         : "Begin the audit. When you have investigated thoroughly, write findings.json with only actionable suspected/confirmed bugs (or [] if none), then stop."}`;
 }
 
@@ -703,6 +715,8 @@ function buildMapFinalizePrompt(existingScopesPath: string): string {
 }
 
 export const FINDINGS_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis and command results you have already produced, WRITE findings.json now at the workspace root as your very next action — call the write tool once with ONLY actionable findings: UNMET obligations, concrete suspected bugs, and confirmed bugs that cite an already-passing purpose=confirm command_id. Do NOT include discharged/safe/no-issue obligations, ranked shortlist notes, or obligation ledgers. If you found no actionable bug, write [] exactly. Do NOT invent a confirmation and DO NOT mark anything confirmed by assertion. After writing, emit {"done": true}. Output only the write tool call.`;
+
+export const SCOPE_OUTCOME_FINALIZE_PROMPT = `Your DIG exploration has stopped. Do NOT read, grep, or run anything else. Based ONLY on analysis already completed, WRITE scope_outcome.json now with the obligations actually checked, exact discharged enforcement edges, unmet/uncertain/blocked obligations, observed composition edges, blockers, and an honest coverage_complete boolean. This artifact is coverage evidence only and cannot confirm a finding. After writing it, do not invent new analysis. Output only the write tool call.`;
 
 export const VERIFY_FINALIZE_PROMPT = `Your VERIFY budget is spent. Do NOT read, grep, or run anything else. Based ONLY on the analysis and command results you have already produced, write findings.json now with exactly ONE verdict for the seeded claim if the existing evidence supports it:
 - If an already-passing purpose=confirm command proves the bug, write one confirmed finding that cites that command_id and includes any fix_patch you already derived.

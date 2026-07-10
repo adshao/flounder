@@ -128,7 +128,7 @@ export async function runAuditLoop(input: {
             ? "\nBUDGET LOW — write scopes.json NOW with only the NEW non-duplicate scopes you found beyond map_existing_scopes.json (each with id, obligation, region, score as integer 0-100), then emit done. Unrecorded new scopes are lost."
             : "\nBUDGET LOW — write scopes.json NOW with the COMPLETE scope inventory you have so far (each with id, obligation, region, score as integer 0-100), then emit done. Unrecorded scopes are lost."
           : input.deep
-            ? "\nBUDGET LOW — make sure findings.json records EVERY obligation and its status (discharged-with-line / UNMET / uncertain). Keep working through the remaining obligations; an UNMET obligation with its exact missing edge is a finding. Unrecorded obligations are lost."
+            ? "\nBUDGET LOW — keep working through remaining obligations, then write scope_outcome.json with EVERY obligation and its discharged/unmet/uncertain/blocked status plus composition edges. Keep discharged obligations out of findings.json; findings.json contains only actionable unmet/uncertain bugs. Unrecorded coverage is lost."
             : "\nALMOST OUT OF STEPS — do not open new investigations. Write findings.json NOW with any confirmed findings AND your best unconfirmed hypotheses (each with location and why it is suspected), then emit done. Unrecorded hypotheses are lost.";
     const user = `${kickoff}\n\n===== TRANSCRIPT SO FAR =====\n${renderTranscript(steps)}\n\n===== YOUR NEXT ACTION =====\n${budgetLine}${finalizeLine}\nRespond with one JSON tool action or done object.`;
     // Transient throttles (provider rate limits, overload, timeouts) are retried

@@ -3,6 +3,7 @@ import {
   api,
   type ActivityRecord,
   type ConfirmDecision,
+  type Coverage,
   type DaemonRow,
   type DiscoveryBacklogRow,
   type FindingRow,
@@ -20,6 +21,7 @@ import {
   type ProviderProfile,
   type RunUpdatePayload,
   type RunRow,
+  type RunHealth,
   type ScopeRow,
 } from "./api";
 import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge, useDialogFocus } from "./components";
@@ -2692,10 +2694,15 @@ function ProjectDetailView(props: {
   const phases = phaseState(currentDetail, progress);
   const contestReview = contestReviewState(currentDetail, config.cfg);
   const currentRuns = currentMaterialRuns(detail.runs, detail.material);
+  const coverageHealth = currentRuns.find((run) => run.kind === "run" || run.kind === "map" || run.kind === "audit")?.runHealth ?? null;
   const topCandidates = topCandidateFindings(allFindings);
   const verifyCandidates = pendingVerifyFindings(allFindings);
   const overviewCandidates = verifyCandidates.length ? verifyCandidates : topCandidates;
   const confirmed = allFindings.filter((finding) => finding.status === "confirmed-executable" || finding.status === "confirmed-differential").length;
+  const uniqueConfirmed = allFindings.filter((finding) =>
+    (finding.status === "confirmed-executable" || finding.status === "confirmed-differential")
+    && finding.tracking_status !== "duplicate"
+    && finding.tracking_status !== "ignored").length;
   const reproduced = confirmedDecisions(confirmDecisions).length;
   const runningRun = currentRuns.find((run) => run.status === "running");
   const runningVerify = isVerifyRun(runningRun) ? runningRun : undefined;
@@ -3015,6 +3022,14 @@ function ProjectDetailView(props: {
           <Stat n={reproduced} label="reproduced" onClick={() => openProjectSection("decisions", "project-real-target-decisions")} />
           <Stat n={reportStat} label={reportLabel} onClick={() => openProjectSection("decisions", "project-real-target-decisions")} />
         </div>
+        <CoverageQualityStrip
+          progress={progress}
+          findings={allFindings}
+          confirmedBugs={requiresConfirmation ? reproduced : uniqueConfirmed}
+          health={coverageHealth}
+          configuredMapSamples={config.cfg.mapSamples ?? 1}
+          resourceRequests={detail.backlogCounts?.["resource-request"] ?? 0}
+        />
         <RealTargetCallout decisions={confirmDecisions} onOpen={() => openProjectSection("decisions", "project-real-target-decisions")} />
         <ProjectSetupDisclosure items={readyItems} clue={prepareClue} />
       </Card>
@@ -3074,6 +3089,38 @@ function ProjectDetailView(props: {
       {tab === "setup" ? <ProjectSetupTab detail={detail} /> : null}
     </div>
   );
+}
+
+function CoverageQualityStrip({ progress, findings, confirmedBugs, health, configuredMapSamples, resourceRequests }: {
+  progress: Coverage;
+  findings: FindingRow[];
+  confirmedBugs: number;
+  health?: RunHealth | null;
+  configuredMapSamples: number;
+  resourceRequests: number;
+}) {
+  if (progress.total === 0 && findings.length === 0 && !health) return null;
+  const signals = health?.signals ?? {};
+  const outcomes = finiteSignal(signals.scopeOutcomes);
+  const incomplete = finiteSignal(signals.scopeOutcomesIncomplete);
+  const actualMapSamples = finiteSignal(signals.mapSamples);
+  const mapSamples = actualMapSamples || configuredMapSamples;
+  const agreedScopes = finiteSignal(signals.mapScopesWithAgreement);
+  const duplicates = findings.filter((finding) => finding.tracking_status === "duplicate").length;
+  const yieldPerScope = progress.audited > 0 ? (confirmedBugs / progress.audited).toFixed(2) : "0.00";
+  return (
+    <div className="coverage-quality-strip" aria-label="Coverage quality and unique yield">
+      <span><strong>{mapSamples}</strong> {actualMapSamples ? "Map samples" : "configured Map samples"}{agreedScopes ? ` · ${agreedScopes} scopes agreed` : ""}</span>
+      <span className={outcomes > 0 && incomplete === 0 ? "good" : incomplete > 0 ? "warn" : ""}><strong>{outcomes ? `${outcomes - incomplete}/${outcomes}` : "—"}</strong> complete scope outcomes</span>
+      <span className={resourceRequests ? "warn" : "good"}><strong>{resourceRequests}</strong> resource blockers</span>
+      <span><strong>{duplicates}</strong> consolidated variants</span>
+      <span><strong>{yieldPerScope}</strong> unique bugs / audited scope</span>
+    </div>
+  );
+}
+
+function finiteSignal(value: unknown): number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
 function prepareMaterialsAttention(summary?: PrepareSummary | null): { tone: "warn" | "pending"; label: string } | null {
@@ -5532,7 +5579,7 @@ function Field({ label, help, children, span }: { label: string; help?: string; 
   );
 }
 
-type BudgetForm = { digSamples: string; mapSteps: string; digSteps: string; digConcurrency: string; verifyConcurrency: string };
+type BudgetForm = { mapSamples: string; digSamples: string; digMaxSamples: string; adaptiveDig: boolean; eagerPrepare: boolean; mapSteps: string; digSteps: string; digConcurrency: string; verifyConcurrency: string };
 type EngagementKindForm = "" | "bug-bounty" | "bug-bounty-contest";
 type EngagementForm = {
   engagementKind: EngagementKindForm;
@@ -5546,7 +5593,11 @@ type PhaseProviderForm = Record<ProviderPhase, string>;
 
 function applyBudgetFields(config: ProjectConfig, form: BudgetForm): ProjectConfig {
   const next = { ...config };
+  setOptionalNumber(next, "mapSamples", form.mapSamples);
   setOptionalNumber(next, "digSamples", form.digSamples);
+  setOptionalNumber(next, "digMaxSamples", form.digMaxSamples);
+  next.adaptiveDig = form.adaptiveDig;
+  next.eagerPrepare = form.eagerPrepare;
   setOptionalNumber(next, "mapSteps", form.mapSteps);
   setOptionalNumber(next, "digSteps", form.digSteps);
   setOptionalNumber(next, "digConcurrency", form.digConcurrency);
@@ -5554,7 +5605,7 @@ function applyBudgetFields(config: ProjectConfig, form: BudgetForm): ProjectConf
   return next;
 }
 
-function setOptionalNumber(config: ProjectConfig, key: keyof Pick<ProjectConfig, "digSamples" | "mapSteps" | "digSteps" | "digConcurrency" | "verifyConcurrency">, value: string): void {
+function setOptionalNumber(config: ProjectConfig, key: keyof Pick<ProjectConfig, "mapSamples" | "digSamples" | "digMaxSamples" | "mapSteps" | "digSteps" | "digConcurrency" | "verifyConcurrency">, value: string): void {
   const parsed = numberOrUndefined(value);
   if (parsed === undefined) delete config[key];
   else config[key] = parsed;
@@ -5696,7 +5747,7 @@ function NewProjectModal({ providers, daemons, onClose, onCreated, onError }: { 
   const [advanced, setAdvanced] = useState(false);
   const [phaseOpen, setPhaseOpen] = useState(false);
   const firstDaemon = daemons.find((daemon) => daemonHealth(daemon) === "online") ?? daemons[0];
-  const [form, setForm] = useState({ intent: "", name: "", runAfterCreate: true, daemonId: firstDaemon?.id ? String(firstDaemon.id) : "", providerId: defaultProjectProviderId(providers), dir: "", sourcePaths: ".", buildRoot: ".", corpusPaths: "docs/specs", coverageMode: "standard" as CoverageMode, maxScopes: "30", digSamples: "1", mapSteps: "", digSteps: "", digConcurrency: "1", verifyConcurrency: "2", engagementKind: "" as EngagementKindForm, contestBatchScopes: "10", contestDigConcurrency: "5", contestStopAfterHours: "48", contestSkipConfirm: true, contestAppendMap: true });
+  const [form, setForm] = useState({ intent: "", name: "", runAfterCreate: true, daemonId: firstDaemon?.id ? String(firstDaemon.id) : "", providerId: defaultProjectProviderId(providers), dir: "", sourcePaths: ".", buildRoot: ".", corpusPaths: "docs/specs", coverageMode: "standard" as CoverageMode, maxScopes: "30", mapSamples: "2", digSamples: "1", digMaxSamples: "3", adaptiveDig: true, eagerPrepare: true, mapSteps: "", digSteps: "", digConcurrency: "1", verifyConcurrency: "2", engagementKind: "" as EngagementKindForm, contestBatchScopes: "10", contestDigConcurrency: "5", contestStopAfterHours: "48", contestSkipConfirm: true, contestAppendMap: true });
   const [phaseProviders, setPhaseProviders] = useState<PhaseProviderForm>({ prepare: "", map: "", dig: "", confirm: "" });
   const providerMissing = providers.length === 0;
   const daemonMissing = daemons.length === 0;
@@ -5843,10 +5894,14 @@ function NewProjectModal({ providers, daemons, onClose, onCreated, onError }: { 
           <FormSection title="Budget controls">
             <div className="form-grid two">
               <Field label="Map turn cap" help="Maximum model turns for scope enumeration; empty means unbounded."><input value={form.mapSteps} onChange={(event) => setForm({ ...form, mapSteps: event.target.value })} placeholder="unbounded" /></Field>
+              <Field label="Map samples" help="Independent inventories are unioned; singleton scopes are retained."><input type="number" min="1" value={form.mapSamples} onChange={(event) => setForm({ ...form, mapSamples: event.target.value })} /></Field>
               <Field label="Dig turn cap" help="Maximum model turns per scope; empty means unbounded."><input value={form.digSteps} onChange={(event) => setForm({ ...form, digSteps: event.target.value })} placeholder="unbounded" /></Field>
-              <Field label="Dig samples" help="Independent dig passes per selected scope; findings are unioned."><input value={form.digSamples} onChange={(event) => setForm({ ...form, digSamples: event.target.value })} /></Field>
+              <Field label="Minimum dig samples" help="Independent dig passes every selected scope receives."><input type="number" min="1" value={form.digSamples} onChange={(event) => setForm({ ...form, digSamples: event.target.value })} /></Field>
+              <Field label="Adaptive ceiling" help="Maximum samples only when the scope outcome remains incomplete or uncertain."><input type="number" min="1" value={form.digMaxSamples} onChange={(event) => setForm({ ...form, digMaxSamples: event.target.value })} /></Field>
               <Field label="Dig concurrency" help="How many scopes run in parallel. 1 keeps digs sequential."><input value={form.digConcurrency} onChange={(event) => setForm({ ...form, digConcurrency: event.target.value })} /></Field>
               <Field label="Verify concurrency" help="Independent findings verified in parallel; each keeps its own isolated workspace."><input value={form.verifyConcurrency} onChange={(event) => setForm({ ...form, verifyConcurrency: event.target.value })} /></Field>
+              <label className="check-row"><input type="checkbox" checked={form.adaptiveDig} onChange={(event) => setForm({ ...form, adaptiveDig: event.target.checked })} /><span>Adaptive dig sampling</span></label>
+              <label className="check-row"><input type="checkbox" checked={form.eagerPrepare} onChange={(event) => setForm({ ...form, eagerPrepare: event.target.checked })} /><span>Warm build before Dig</span></label>
             </div>
           </FormSection>
         ) : null}
@@ -5870,7 +5925,11 @@ function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onErro
     corpusPaths: cfg.corpusPaths.join(" "),
     coverageMode: initialCoverageMode,
     maxScopes: String(cfg.cfg.maxScopes ?? (initialCoverageMode === "focused" ? 10 : 30)),
+    mapSamples: String(cfg.cfg.mapSamples ?? 1),
     digSamples: String(cfg.cfg.digSamples ?? 1),
+    digMaxSamples: String(cfg.cfg.digMaxSamples ?? cfg.cfg.digSamples ?? 1),
+    adaptiveDig: cfg.cfg.adaptiveDig !== false,
+    eagerPrepare: cfg.cfg.eagerPrepare === true,
     mapSteps: cfg.cfg.mapSteps != null ? String(cfg.cfg.mapSteps) : "",
     digSteps: cfg.cfg.digSteps != null ? String(cfg.cfg.digSteps) : "",
     digConcurrency: String(cfg.cfg.digConcurrency ?? 1),
@@ -5993,10 +6052,14 @@ function EditProjectModal({ detail, providers, daemons, onClose, onSaved, onErro
         <FormSection title="Budget controls">
           <div className="form-grid two">
             <Field label="Map turn cap" help="Maximum model turns for scope enumeration; empty means unbounded."><input value={form.mapSteps} onChange={(event) => setForm({ ...form, mapSteps: event.target.value })} placeholder="unbounded" /></Field>
+            <Field label="Map samples" help="Independent inventories are unioned; singleton scopes are retained."><input type="number" min="1" value={form.mapSamples} onChange={(event) => setForm({ ...form, mapSamples: event.target.value })} /></Field>
             <Field label="Dig turn cap" help="Maximum model turns per scope; empty means unbounded."><input value={form.digSteps} onChange={(event) => setForm({ ...form, digSteps: event.target.value })} placeholder="unbounded" /></Field>
-            <Field label="Dig samples" help="Independent dig passes per selected scope; findings are unioned."><input value={form.digSamples} onChange={(event) => setForm({ ...form, digSamples: event.target.value })} /></Field>
+            <Field label="Minimum dig samples" help="Independent dig passes every selected scope receives."><input type="number" min="1" value={form.digSamples} onChange={(event) => setForm({ ...form, digSamples: event.target.value })} /></Field>
+            <Field label="Adaptive ceiling" help="Maximum samples only when the scope outcome remains incomplete or uncertain."><input type="number" min="1" value={form.digMaxSamples} onChange={(event) => setForm({ ...form, digMaxSamples: event.target.value })} /></Field>
             <Field label="Dig concurrency" help="How many scopes run in parallel. 1 keeps digs sequential."><input value={form.digConcurrency} onChange={(event) => setForm({ ...form, digConcurrency: event.target.value })} /></Field>
             <Field label="Verify concurrency" help="Independent findings verified in parallel; each keeps its own isolated workspace."><input value={form.verifyConcurrency} onChange={(event) => setForm({ ...form, verifyConcurrency: event.target.value })} /></Field>
+            <label className="check-row"><input type="checkbox" checked={form.adaptiveDig} onChange={(event) => setForm({ ...form, adaptiveDig: event.target.checked })} /><span>Adaptive dig sampling</span></label>
+            <label className="check-row"><input type="checkbox" checked={form.eagerPrepare} onChange={(event) => setForm({ ...form, eagerPrepare: event.target.checked })} /><span>Warm build before Dig</span></label>
           </div>
         </FormSection>
       </form>

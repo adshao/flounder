@@ -430,8 +430,12 @@ export interface ProjectConfigShape {
   scopeCoverageMode?: "focused" | "standard" | "half" | "full" | "custom";
   maxScopes?: number;
   mapSteps?: number;
+  mapSamples?: number;
   digSteps?: number;
   digSamples?: number;
+  digMaxSamples?: number;
+  adaptiveDig?: boolean;
+  eagerPrepare?: boolean;
   digConcurrency?: number;
   verifyConcurrency?: number;
   phases?: PhaseConfig;

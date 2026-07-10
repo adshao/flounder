@@ -42,6 +42,14 @@ Implemented foundation:
   decisions;
 - API, CLI, and an Evaluations/Harness UI for proposal refinement, candidate
   attachment, score comparison, and public-safe candidate-brief export.
+- material-versioned scope and memory state, independent Map ensembles,
+  per-scope obligation/composition outcomes, adaptive Dig sampling, and
+  outcome-driven cross-scope synthesis;
+- isolated Evaluation attempt state with shared dependency caches only;
+- phase-attributed Harness evidence with distinct-case/family and hidden-holdout
+  promotion gates;
+- execution-grounded finding consolidation reflected into one canonical product
+  lifecycle item without overriding explicit operator tracking choices.
 
 Still planned:
 

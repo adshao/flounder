@@ -23,6 +23,9 @@
       "evidenceContract": {
         "kind": "benchmark-oracle",
         "expectedOutcome": "detect-positive",
+        "caseId": "ledger-a",
+        "caseFamily": "authorization-transfer",
+        "targetStack": "javascript",
         "requiresDifferential": true,
         "requiresRefutation": true,
         "networkPolicy": "sealed"
@@ -43,6 +46,10 @@
       "evidenceContract": {
         "kind": "benchmark-oracle",
         "expectedOutcome": "detect-positive",
+        "caseId": "ledger-a-holdout",
+        "caseFamily": "authorization-transfer",
+        "targetStack": "javascript",
+        "holdout": true,
         "requiresDifferential": true,
         "requiresRefutation": true,
         "networkPolicy": "sealed"
@@ -63,6 +70,9 @@
       "evidenceContract": {
         "kind": "benchmark-oracle",
         "expectedOutcome": "reject-positive",
+        "caseId": "ledger-b",
+        "caseFamily": "safe-transfer-control",
+        "targetStack": "javascript",
         "requiresDifferential": false,
         "requiresRefutation": true,
         "networkPolicy": "sealed"
@@ -83,6 +93,10 @@
       "evidenceContract": {
         "kind": "benchmark-oracle",
         "expectedOutcome": "reject-positive",
+        "caseId": "ledger-b-holdout",
+        "caseFamily": "safe-transfer-control",
+        "targetStack": "javascript",
+        "holdout": true,
         "requiresDifferential": false,
         "requiresRefutation": true,
         "networkPolicy": "sealed"

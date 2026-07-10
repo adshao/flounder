@@ -200,6 +200,53 @@ class AppendMapLlmClient {
   }
 }
 
+class OutcomeOnlySynthesisLlmClient {
+  constructor() {
+    this.synthesisCalls = 0;
+    this.sawOutcomeArtifact = false;
+  }
+
+  async complete(input) {
+    const action = (thought, toolName, args) => JSON.stringify({ thought, tool: toolName, args });
+    if (input.system.includes("doing the MAP phase")) {
+      if (!input.user.includes("wrote scopes.json")) {
+        return action("Checkpoint one complete scope.", "write", {
+          path: "scopes.json",
+          content: JSON.stringify([
+            { id: "S1", obligation: "principal binding survives the producer boundary", region: "producer-region-marker", score: 90 },
+            { id: "S2", obligation: "consumer preserves the upstream principal", region: "consumer-region-marker", score: 80 },
+          ]),
+        });
+      }
+      return JSON.stringify({ done: true, summary: "map complete" });
+    }
+    if (input.system.includes("SYNTHESIS mode")) {
+      this.synthesisCalls += 1;
+      this.sawOutcomeArtifact ||= input.user.includes("synthesis_scope_outcomes.json");
+      if (!input.user.includes('"path":"findings.json"')) return action("No execution-backed composition claim is available.", "write", { path: "findings.json", content: "[]" });
+      return JSON.stringify({ done: true, summary: "composition checked" });
+    }
+    if (input.system.includes("DEEP, NARROW-SCOPE audit")) {
+      const scopeId = input.user.match(/scope (region-[a-f0-9]{12})/)?.[1] ?? (input.user.includes("consumer-region-marker") ? "S2" : "S1");
+      if (!input.user.includes('"path":"scope_outcome.json"')) {
+        return action("Persist checked obligations separately from findings.", "write", {
+          path: "scope_outcome.json",
+          content: JSON.stringify({
+            scope_id: scopeId,
+            coverage_complete: true,
+            obligations: [{ id: "O1", statement: "principal binding survives the region boundary", status: "discharged", evidence: "the value is checked before export" }],
+            composition_edges: [{ id: "E1", kind: "boundary", description: `${scopeId} participates in the checked producer-to-consumer principal flow`, status: "observed", from: "producer", to: "consumer" }],
+            blockers: [],
+          }),
+        });
+      }
+      if (!input.user.includes('"path":"findings.json"')) return action("Record that this isolated scope produced no finding.", "write", { path: "findings.json", content: "[]" });
+      return JSON.stringify({ done: true, summary: "scope complete" });
+    }
+    return JSON.stringify({ done: true, summary: "no action" });
+  }
+}
+
 function tarGz(files) {
   const blocks = [];
   for (const [name, contentText] of Object.entries(files)) {
@@ -395,6 +442,7 @@ test("discovery backlog artifacts parse and merge without becoming findings", ()
   assert.equal(isReportFile("coverage_gaps.json"), true);
   assert.equal(isReportFile("resource_requests.json"), true);
   assert.equal(isReportFile("followup_scopes.json"), true);
+  assert.equal(isReportFile("scope_outcome.json"), true);
 });
 
 test("run health distinguishes blocked, shallow, and coverage-incomplete runs", () => {
@@ -1755,6 +1803,55 @@ test("map → dig: --deep enumerates scopes then deep-audits each, tagging findi
     assert.equal(summary.findings[0].confirmationStatus, "confirmed-executable");
     const findingsArtifact = JSON.parse(await readFile(path.join(runDir, "audit_findings.json"), "utf8"));
     assert.equal(findingsArtifact[0].scopeId, "S1", "dig findings are tagged with the scope they came from");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("zero-finding dig outcomes still trigger complete cross-scope synthesis", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.targetName = "outcome-synthesis-e2e";
+    cfg.sourcePaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditDeep = true;
+    cfg.auditMaxScopes = 2;
+    cfg.auditChallengeDischarges = false;
+    cfg.auditRefute = false;
+    const llm = new OutcomeOnlySynthesisLlmClient();
+
+    const { runDir, summary } = await runAudit(cfg, { llm });
+    assert.equal(summary.findings.length, 0);
+    assert.ok(llm.synthesisCalls > 0, "new coverage outcomes must trigger synthesis even with zero findings");
+    assert.equal(llm.sawOutcomeArtifact, true, "synthesis receives the complete outcome ledger by file, not a truncated prompt list");
+    const outcomes = JSON.parse(await readFile(path.join(runDir, "scope_outcomes.json"), "utf8"));
+    assert.equal(outcomes.length, 2);
+    assert.equal(outcomes[0].coverageComplete, true, JSON.stringify(outcomes));
+    const runHealth = JSON.parse(await readFile(path.join(runDir, "run_health.json"), "utf8"));
+    assert.equal(runHealth.signals.scopeOutcomesIncomplete, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("pinned region audits persist the same scope outcome contract", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.targetName = "pinned-outcome-e2e";
+    cfg.sourcePaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditDeep = true;
+    cfg.auditDeepFocus = "producer-region-marker";
+    cfg.auditRefute = false;
+    cfg.auditChallengeDischarges = false;
+
+    const { runDir } = await runAudit(cfg, { llm: new OutcomeOnlySynthesisLlmClient() });
+    const outcomes = JSON.parse(await readFile(path.join(runDir, "scope_outcomes.json"), "utf8"));
+    assert.equal(outcomes.length, 1);
+    assert.match(outcomes[0].scopeId, /^region-[a-f0-9]{12}$/);
+    assert.equal(outcomes[0].coverageComplete, true);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
