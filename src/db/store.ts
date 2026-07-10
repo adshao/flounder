@@ -678,10 +678,11 @@ export class MetadataStore {
   constructor(dbPath: string) {
     if (dbPath !== ":memory:") mkdirSync(path.dirname(path.resolve(dbPath)), { recursive: true });
     this.db = new DatabaseSync(dbPath);
-    // WAL + busy timeout: one writer at a time, concurrent readers, retries instead of
-    // SQLITE_BUSY when several flounder processes (multi-project) write the shared DB.
-    this.db.exec("PRAGMA journal_mode = WAL");
+    // Install the busy handler before changing journal mode: journal_mode itself
+    // takes a database lock, so concurrent first opens must wait here too instead
+    // of failing before the later schema-migration transaction can serialize them.
     this.db.exec("PRAGMA busy_timeout = 5000");
+    this.db.exec("PRAGMA journal_mode = WAL");
     this.db.exec("PRAGMA foreign_keys = ON");
     this.db.exec(SCHEMA);
     // CREATE IF NOT EXISTS does not add columns to old tables. Take the SQLite
