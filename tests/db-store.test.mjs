@@ -984,6 +984,42 @@ test("store: exact findings across runs keep one canonical row with occurrence a
   db.close();
 });
 
+test("store: repeated weaker rediscovery cannot take ownership and downgrade stronger evidence", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "canonical-evidence-owner" });
+  const firstRun = db.startRun({ projectId, kind: "run", runDir: "/runs/evidence-1", materialFingerprint: "sha256:same" });
+  db.upsertFindings(projectId, firstRun, [{ findingKey: "kfirst", title: "Quote leg ignores its risk class", location: "src/Provider.sol:41", severity: "high", status: "suspected" }]);
+  const verifyRun = db.startRun({ projectId, kind: "verify", runDir: "/runs/evidence-verify", materialFingerprint: "sha256:same" });
+  db.upsertFindings(projectId, verifyRun, [{
+    findingKey: "kverified",
+    title: "Quote leg ignores its risk class",
+    location: "src/Provider.sol:41",
+    severity: "high",
+    status: "confirmed-differential",
+    refutationStatus: "passed",
+    refutationReason: "The execution-backed claim survived independent review.",
+  }]);
+
+  const laterRun = db.startRun({ projectId, kind: "audit", runDir: "/runs/evidence-later", materialFingerprint: "sha256:same" });
+  const rediscovery = {
+    findingKey: "kverified",
+    title: "DISCHARGE OVERTURNED: Quote leg ignores its risk class",
+    location: "src/Provider.sol:41",
+    severity: "critical",
+    status: "suspected",
+  };
+  db.upsertFindings(projectId, laterRun, [rediscovery], "discharge-challenge");
+  db.upsertFindings(projectId, laterRun, [rediscovery], "run finalize");
+
+  const [finding] = db.listFindings(projectId);
+  assert.equal(finding.status, "confirmed-differential");
+  assert.equal(finding.run_id, verifyRun, "weaker evidence cannot take canonical ownership");
+  assert.equal(finding.title, "Quote leg ignores its risk class");
+  assert.equal(finding.refutation_status, "passed");
+  assert.equal(db.findingOccurrences(Number(finding.id)).length, 3, "weaker rediscovery remains durable provenance without duplicating checkpoints");
+  db.close();
+});
+
 test("store: completed finding identity migrations do not rewrite alias provenance on restart", async () => {
   const { dbPath } = await tempDbPath();
   const db = new MetadataStore(dbPath);

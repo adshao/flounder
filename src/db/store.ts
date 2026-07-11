@@ -2189,6 +2189,12 @@ export class MetadataStore {
           const nextRefutationReason = reproducedConflict && f.status === "refuted"
             ? "Local verification conflicts with an existing real-target reproduction; human adjudication is required."
             : f.refutationReason ?? null;
+          // A weaker cross-run occurrence is provenance, not a new evidence owner. If it
+          // stole run_id here, its next checkpoint in the same run would become
+          // `sameRun`/authoritative and could downgrade the stronger canonical verdict.
+          const nextEvidenceRunId = reproducedProtection || !acceptsIncoming
+            ? (existing.run_id == null ? null : Number(existing.run_id))
+            : runId;
           // COALESCE(NULLIF(?, ''), col): keep the stored content when a later re-persist (a status
           // flip through differential / refutation / appeal) carries an empty value, so detail is
           // never wiped — mirrors the dig_seconds keep-on-omit rule.
@@ -2212,7 +2218,7 @@ export class MetadataStore {
                  updated_at = ? WHERE id = ?`,
             )
             .run(
-              reproducedProtection ? (existing.run_id == null ? null : Number(existing.run_id)) : runId,
+              nextEvidenceRunId,
               authoritative && updateCanonicalContent ? 1 : 0, f.title ?? null,
               authoritative && updateCanonicalContent ? 1 : 0, f.location ?? null,
               acceptsIncoming && updateCanonicalContent ? 1 : 0, f.severity ?? null,
