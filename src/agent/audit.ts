@@ -458,6 +458,20 @@ export async function runAudit(
     const appendExisting = cfg.auditAppendMap ? scopeInventory : [];
     const appendSeedScopes = cfg.auditAppendMap ? await loadAppendMapSeedScopes(cfg) : [];
     const resuming = scopeInventory.length > 0 && !cfg.auditAppendMap;
+    // Backfill inventories written by older releases that marked every finished
+    // DIG attempt audited even when its latest outcome explicitly left coverage
+    // incomplete. Requeue generally from durable evidence, never a local id list.
+    const latestOutcomesByScope = new Map(latestScopeOutcomes(scopeOutcomes).map((outcome) => [outcome.scopeId, outcome]));
+    const requeuedIncompleteScopes: string[] = [];
+    for (const scope of scopeInventory) {
+      const outcome = latestOutcomesByScope.get(scope.id);
+      if (scope.status !== "audited" || !outcome || !scopeOutcomeNeedsCoverage(outcome)) continue;
+      scope.status = "pending";
+      requeuedIncompleteScopes.push(scope.id);
+    }
+    if (requeuedIncompleteScopes.length > 0) {
+      await logger.event("audit_scope_coverage_requeued", { scopes: requeuedIncompleteScopes });
+    }
     if (!resuming && !cfg.auditAppendMap) {
       await clearCurrentMaterialScopeOutcomes(inventoryDir, cfg.materialFingerprint);
       scopeOutcomes = [];
@@ -487,7 +501,10 @@ export async function runAudit(
     // Persist the inventory BEFORE digging so a kill mid-run does not lose the map —
     // resume then skips MAP. Each dig below also checkpoints scope status + partial
     // findings, so a killed run only redoes the one in-flight dig.
-    await saveScopeInventory(inventoryDir, scopeInventory, { replace: !resuming && !cfg.auditAppendMap });
+    await saveScopeInventory(inventoryDir, scopeInventory, {
+      replace: !resuming && !cfg.auditAppendMap,
+      ...(requeuedIncompleteScopes.length > 0 ? { forceStatusIds: requeuedIncompleteScopes } : {}),
+    });
     recorder.scopes(scopeInventory);
 
     const digCfg = withRole(cfg, "dig");

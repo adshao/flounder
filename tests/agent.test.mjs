@@ -2095,6 +2095,40 @@ test("incomplete dig coverage remains pending after serial and concurrent attemp
   }
 });
 
+test("resuming requeues legacy audited scopes whose durable outcome is incomplete", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.targetName = "legacy-incomplete-coverage";
+    cfg.sourcePaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditDeep = true;
+    cfg.auditMaxScopes = 1;
+    cfg.auditDigSamples = 1;
+    cfg.auditDigMaxSamples = 1;
+    cfg.auditSynthesize = false;
+    cfg.auditChallengeDischarges = false;
+    cfg.auditRefute = false;
+
+    await runAudit(cfg, { llm: new IncompleteOutcomeLlmClient() });
+    const historyDir = path.join(cfg.outputDir, "history", cfg.targetName);
+    const scopesPath = path.join(historyDir, "scopes.json");
+    const legacyScopes = JSON.parse(await readFile(scopesPath, "utf8"));
+    legacyScopes.find((scope) => scope.id === "S1").status = "audited";
+    await writeFile(scopesPath, JSON.stringify(legacyScopes), "utf8");
+
+    cfg.auditMaxScopes = 0;
+    const { runDir, scopeCoverage } = await runAudit(cfg, { llm: new IncompleteOutcomeLlmClient() });
+    assert.deepEqual(scopeCoverage, { total: 2, audited: 0, pending: 2, deferred: 0 });
+    const repairedScopes = JSON.parse(await readFile(scopesPath, "utf8"));
+    assert.equal(repairedScopes.find((scope) => scope.id === "S1").status, "pending");
+    const events = (await readFile(path.join(runDir, "events.jsonl"), "utf8")).trim().split("\n").map((line) => JSON.parse(line));
+    assert.deepEqual(events.find((event) => event.kind === "audit_scope_coverage_requeued")?.scopes, ["S1"]);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("pinned region audits persist the same scope outcome contract", async () => {
   const dir = await tempDir();
   try {
@@ -2471,6 +2505,65 @@ test("startup reconciliation repairs dropped remote refutations and their phase 
       repairedAt,
       "reopening an already-reconciled store must not rewrite attempt timestamps",
     );
+    store.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("startup reconciliation preserves skeptic refutation after an unsuccessful appeal", async () => {
+  const dir = await tempDir();
+  const sourceRunDir = path.join(dir, "source-run");
+  const verifyRunDir = path.join(dir, "verify-run");
+  try {
+    let store = MetadataStore.openForOutput(dir);
+    const projectId = store.upsertProject({ name: "appeal-refutation-reconciliation" });
+    const sourceRunId = store.startRun({ projectId, kind: "run", runDir: sourceRunDir });
+    store.upsertFindings(projectId, sourceRunId, [{
+      findingKey: "appeal-refutation",
+      title: "Reviewer-rejected candidate",
+      location: "src/Foo.sol:1",
+      severity: "high",
+      status: "suspected",
+    }]);
+    const finding = store.queryFindings(projectId, { search: "Reviewer-rejected candidate" })[0];
+    const verifyRunId = store.startRun({ projectId, kind: "verify", runDir: verifyRunDir });
+    store.recordFindingPhaseAttempt(projectId, verifyRunId, {
+      subjectType: "finding",
+      subjectId: Number(finding.id),
+      phase: "verify",
+      inputFingerprint: "sha256:appeal-refutation",
+      state: "blocked",
+      blocker: "terminal artifact not yet reconciled",
+    });
+    store.finishRun(sourceRunId, "done");
+    store.finishRun(verifyRunId, "done");
+    store.close();
+
+    await mkdir(verifyRunDir, { recursive: true });
+    await writeFile(path.join(verifyRunDir, "audit_hypotheses.json"), JSON.stringify([{
+      id: "f1",
+      originId: Number(finding.id),
+      title: "Reviewer-rejected candidate",
+      location: "src/Foo.sol:1",
+      severity: "high",
+      confirmationStatus: "suspected",
+      disputed: true,
+      refutationStatus: "refuted",
+      refutationReason: "The PoC relies on an attacker capability excluded by the trust model.",
+      refutation: { refuted: true, unrealistic: true, reason: "The PoC relies on an attacker capability excluded by the trust model." },
+      appeal: { attempted: true, upheld: false, reason: "no faithful PoC produced on appeal" },
+    }]));
+
+    store = MetadataStore.openForOutput(dir);
+    const repaired = store.getFinding(Number(finding.id));
+    assert.equal(repaired.status, "refuted");
+    assert.equal(repaired.refutation_status, "refuted");
+    assert.equal(repaired.refutation_reason, "The PoC relies on an attacker capability excluded by the trust model.");
+    const attempt = store.latestFindingPhaseAttempt("finding", Number(finding.id), "verify");
+    assert.equal(attempt.state, "settled");
+    assert.equal(attempt.outcome, "refuted");
+    assert.equal(attempt.blocker, null);
     store.close();
   } finally {
     await rm(dir, { recursive: true, force: true });

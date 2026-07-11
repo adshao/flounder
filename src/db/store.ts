@@ -1376,9 +1376,14 @@ export class MetadataStore {
     const byOrigin = new Map<number, VerifyArtifactEntry[]>();
     for (const run of runs) {
       for (const artifact of artifactsByRun.get(run.id) ?? []) {
+        const confirmationStatus = artifactStatus(artifact);
+        const reviewerRefuted = confirmationStatus === "suspected"
+          && artifactRefutationStatus(artifact) === "refuted";
         const status = artifactTitleIsRefuted(artifact)
           ? "refuted"
-          : artifactStatus(artifact) === "suspected"
+          : reviewerRefuted
+            ? "refuted"
+            : confirmationStatus === "suspected"
             ? "needs-evidence"
             : undefined;
         const originId = artifactOriginId(artifact);
@@ -1404,7 +1409,7 @@ export class MetadataStore {
       `UPDATE finding SET run_id = ?, title = ?, location = ?, severity = ?, status = ?,
          scope_id = ?, report_path = NULL, report_markdown = NULL,
          description = ?, evidence = ?, exploit_sketch = ?, fix = ?, confidence = ?,
-         refutation_status = NULL, refutation_reason = NULL, updated_at = ?
+         refutation_status = ?, refutation_reason = ?, updated_at = ?
        WHERE id = ? AND project_id = ?`,
     );
     const updateAttempt = this.db.prepare(
@@ -1504,6 +1509,8 @@ export class MetadataStore {
           exploitSketch: stringValue(artifact.exploitSketch ?? artifact.exploit_sketch) ?? nullableText(original.exploit_sketch),
           fix: stringValue(artifact.fix) ?? nullableText(original.fix),
           confidence: numberValue(artifact.confidence) ?? nullableNumber(original.confidence),
+          refutationStatus: artifactRefutationStatus(artifact),
+          refutationReason: artifactRefutationReason(artifact),
         };
         const changed = Number(original.run_id ?? 0) !== desired.runId
           || nullableText(original.title) !== desired.title
@@ -1518,8 +1525,8 @@ export class MetadataStore {
           || nullableText(original.exploit_sketch) !== desired.exploitSketch
           || nullableText(original.fix) !== desired.fix
           || nullableNumber(original.confidence) !== desired.confidence
-          || original.refutation_status != null
-          || original.refutation_reason != null;
+          || nullableText(original.refutation_status) !== desired.refutationStatus
+          || nullableText(original.refutation_reason) !== desired.refutationReason;
         if (!changed) continue;
 
         const previousStatus = String(original.status);
@@ -1536,6 +1543,8 @@ export class MetadataStore {
           desired.exploitSketch,
           desired.fix,
           desired.confidence,
+          desired.refutationStatus,
+          desired.refutationReason,
           ts,
           originId,
           projectId,
@@ -3513,6 +3522,15 @@ function artifactOriginId(artifact: Record<string, unknown>): number | undefined
 
 function artifactStatus(artifact: Record<string, unknown>): string | undefined {
   return stringValue(artifact.confirmationStatus ?? artifact.status);
+}
+
+function artifactRefutationStatus(artifact: Record<string, unknown>): string | null {
+  return stringValue(artifact.refutationStatus ?? artifact.refutation_status) ?? null;
+}
+
+function artifactRefutationReason(artifact: Record<string, unknown>): string | null {
+  const nested = isRecord(artifact.refutation) ? artifact.refutation : undefined;
+  return stringValue(artifact.refutationReason ?? artifact.refutation_reason ?? nested?.reason) ?? null;
 }
 
 function runIsVerify(run: { kind: string; budgets_json: string | null }): boolean {
