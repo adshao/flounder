@@ -1029,7 +1029,7 @@ export async function runAudit(
           session.findings.push(finding);
         }
         finding.confirmationStatus = "suspected"; // no longer "safe" — re-open as a real lead (flows to verify)
-        finding.title = "DISCHARGE OVERTURNED: " + (finding.title || "").replace(/^(obligation\s+)?discharged:?\s*/i, "");
+        finding.title = "DISCHARGE OVERTURNED: " + dischargeChallengeFindingTitle(v, finding.title);
         finding.description = `An independent discharge-skeptic overturned this discharge — the cited enforcement does not clear the obligation end-to-end. Missed case: ${v.gap || v.reason}\n\n[original discharge reasoning] ${finding.description || ""}`.slice(0, 4000);
         if (sevRank(finding.severity) > 1) finding.severity = "high"; // a real missed obligation is not info-level
         overturned += 1;
@@ -1155,6 +1155,12 @@ export async function runAudit(
     summary,
     ...(finalCoverage ? { scopeCoverage: finalCoverage } : {}),
   };
+}
+
+export function dischargeChallengeFindingTitle(verdict: { title?: string }, fallback: string): string {
+  const mechanism = (verdict.title ?? "").replace(/^\s*(?:DISCHARGE\s+OVERTURNED|DISCHARGED)\s*:\s*/i, "").replace(/\s+/g, " ").trim();
+  if (mechanism) return mechanism.slice(0, 240);
+  return (fallback || "Discharged obligation is unsound").replace(/^(obligation\s+)?discharged:?\s*/i, "").replace(/\s+/g, " ").trim().slice(0, 240);
 }
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];

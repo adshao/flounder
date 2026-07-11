@@ -105,14 +105,15 @@ A discharge is UNSOUND when the cited enforcement clears only a NARROWER propert
 
 From the actual code and first principles, try to BREAK the discharge: trace whether the obligation's real security property holds end-to-end — all the way to the value/authority SINK it protects, across every reachable path and CALLER, not just the one the auditor examined. Who can reach the protected effect, and is each input that decides it (recipient, amount, the caller, the proof/signature that authorizes it) bound to a legitimate authority?
 
-Respond with ONLY a JSON object (no prose, no fences): {"unsound": true|false, "gap": "<if unsound: the exact missed path/case, with file:line and the resulting attacker impact; else empty>", "reason": "<concise and specific>"}.
-- unsound=true: the discharge does NOT actually clear the obligation — name the missed path/case and the attacker impact (a candidate bug to re-open).
+Respond with ONLY a JSON object (no prose, no fences): {"unsound": true|false, "title": "<if unsound: concise mechanism-specific root-cause title; else empty>", "gap": "<if unsound: the exact missed path/case, with file:line and the resulting attacker impact; else empty>", "reason": "<concise and specific>"}.
+- unsound=true: the discharge does NOT actually clear the obligation — give the candidate a concise mechanism-specific title, then name the missed path/case and attacker impact. The title must identify this exact root cause rather than repeat the broad obligation.
 - unsound=false: after genuine effort the obligation holds end-to-end — say why.
 Be skeptical but honest: default to challenging hard, but if the property genuinely holds, say unsound=false.`;
 
 export interface DischargeVerdict {
   findingId: string;
   unsound: boolean;
+  title: string;
   gap: string;
   reason: string;
 }
@@ -140,11 +141,12 @@ export async function runDischargeChallenge(input: {
         thinkingLevel: input.cfg.thinkingLevel,
         agentic: true,
       });
-      const parsed = extractJsonObject<{ unsound?: unknown; gap?: unknown; reason?: unknown }>(raw);
+      const parsed = extractJsonObject<{ unsound?: unknown; title?: unknown; gap?: unknown; reason?: unknown }>(raw);
       if (parsed && typeof parsed.unsound === "boolean") {
         const verdict: DischargeVerdict = {
           findingId: finding.id,
           unsound: parsed.unsound,
+          title: typeof parsed.title === "string" ? parsed.title.slice(0, 240) : "",
           gap: typeof parsed.gap === "string" ? parsed.gap.slice(0, 800) : "",
           reason: typeof parsed.reason === "string" ? parsed.reason.slice(0, 800) : "",
         };

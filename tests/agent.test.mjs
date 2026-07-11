@@ -10,13 +10,13 @@ import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest, splitCommandLineForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
-import { dedupeVerifyInputs, normalizeVerifyVerdicts, runAudit } from "../dist/agent/audit.js";
+import { dedupeVerifyInputs, dischargeChallengeFindingTitle, normalizeVerifyVerdicts, runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
 import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
 import { differentialNetworkForExploitRun, runDifferentialConfirmation } from "../dist/agent/differential.js";
-import { runRefutation } from "../dist/agent/refutation.js";
+import { runDischargeChallenge, runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
 import { buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas, withDetailedCodexReasoningSummary } from "../dist/agent/pi-session.js";
@@ -1671,6 +1671,37 @@ test("independent refutation: a skeptic verdict is attached to each confirmed fi
     assert.equal(findings[0].refutation.refuted, false);
     assert.equal(findings[1].refutation.refuted, true);
     assert.match(findings[1].refutation.reason, /enforced/);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("discharge challenge preserves a mechanism-specific identity inside a broad obligation", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    const logger = await tempLogger(dir);
+    const source = [{ path: "x.rs", kind: "source", content: "fn ratio() {}\n" }];
+    const findings = [{ id: "discharge:S1:O1", title: "DISCHARGED: every ratio input is bounded", severity: "high", location: "x.rs:1", description: "broad obligation", evidence: "", exploitSketch: "", fix: "", confidence: 0.8, confirmationStatus: "discharged" }];
+    const llm = {
+      async complete() {
+        return JSON.stringify({
+          unsound: true,
+          title: "Denominator uncertainty is understated by additive spread aggregation",
+          gap: "x.rs:1 divides by an uncertain denominator but only adds input spreads.",
+          reason: "The broad bound does not conservatively contain division error.",
+        });
+      },
+    };
+
+    const [verdict] = await runDischargeChallenge({ findings, source, cfg, llm, logger, max: 1 });
+    assert.equal(verdict.title, "Denominator uncertainty is understated by additive spread aggregation");
+    assert.equal(dischargeChallengeFindingTitle(verdict, findings[0].title), verdict.title);
+    assert.notEqual(
+      dischargeChallengeFindingTitle(verdict, findings[0].title),
+      dischargeChallengeFindingTitle({ title: "Quote-feed staleness class is ignored" }, findings[0].title),
+      "different mechanisms under one broad obligation must not share a canonical title",
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
