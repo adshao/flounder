@@ -683,14 +683,19 @@ test("store: daemon tokens + job queue prioritizes project work and stays FIFO w
   assert.equal(claim1.id, j1); // FIFO
   assert.deepEqual(claim1.spec, { verb: "run" });
   assert.equal(db.getJob(j1).status, "dispatched");
+  assert.equal(db.claimJob(daemonId).id, evaluationJob, "other projects can use spare daemon capacity while proj is active");
+  assert.equal(db.claimJob(daemonId), undefined, "a second job for the active project stays queued");
+  assert.equal(db.claimJob(otherDaemonId), undefined, "same-project serialization applies across daemons");
+  db.setJobStatus(j1, "done");
   assert.equal(db.claimJob(daemonId).id, j2);
-  assert.equal(db.claimJob(daemonId).id, evaluationJob); // background work resumes after project FIFO drains
+  assert.equal(db.claimJob(otherDaemonId), undefined, "the pinned same-project job waits for j2 to settle");
+  db.setJobStatus(j2, "done");
+  assert.equal(db.claimJob(otherDaemonId).id, pinned); // pinned work waits for its selected daemon and prior project work
   assert.equal(db.claimJob(daemonId), undefined); // queue drained
-  assert.equal(db.claimJob(otherDaemonId).id, pinned); // pinned work waits for its selected daemon
 
-  db.requestJobCancel(j1);
-  assert.deepEqual(db.canceledJobIds(), [j1]); // a daemon polls this to abort
-  db.setJobStatus(j1, "killed");
+  db.requestJobCancel(evaluationJob);
+  assert.deepEqual(db.canceledJobIds(), [evaluationJob]); // a daemon polls this to abort
+  db.setJobStatus(evaluationJob, "killed");
   assert.deepEqual(db.canceledJobIds(), []); // no longer running → not reported
   assert.equal(db.cancelJob(pinned), true); // queued/dispatched/running jobs are operator-cancelable
   assert.equal(db.getJob(pinned).status, "canceled");

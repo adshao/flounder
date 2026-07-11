@@ -1006,13 +1006,13 @@ async function reconcileStaleAuditingScopes(c: Ctx, project: Record<string, unkn
     console.warn(`[flounder ui] skipped corrupt scope inventory for ${JSON.stringify(projectName)}: ${detail}`);
     return;
   }
-  let changed = false;
+  const resetScopeIds: string[] = [];
   for (const scope of inventory) {
     if (scope.status !== "auditing") continue;
     scope.status = "pending";
-    changed = true;
+    resetScopeIds.push(scope.id);
   }
-  if (changed) await saveScopeInventory(inventoryDir, inventory);
+  if (resetScopeIds.length > 0) await saveScopeInventory(inventoryDir, inventory, { forceStatusIds: resetScopeIds });
 }
 
 // The editable project fields shared by create + update (materials are relative paths now;
@@ -2386,7 +2386,7 @@ async function scopeSetStatus(c: Ctx): Promise<void> {
   }
   if (scope) {
     scope.status = status;
-    await saveScopeInventory(inventoryDir, inventory);
+    await saveScopeInventory(inventoryDir, inventory, { forceStatusIds: [scopeId] });
   }
   c.store.setScopeStatus(Number(project.id), scopeId, status);
   sendJson(c.res, 200, { ok: true, scopeId, status });
@@ -2857,7 +2857,7 @@ async function resetCurrentScopeProjection(c: Ctx, project: Record<string, unkno
   c.store.clearScopes(projectId);
   const inventoryDir = projectHistoryDir({ outputDir: c.out, targetName: String(project.name) });
   try {
-    await saveScopeInventory(inventoryDir, []);
+    await saveScopeInventory(inventoryDir, [], { replace: true });
   } catch {
     // The DB projection is the API source of truth; a missing history dir should not block prepare.
   }

@@ -39,6 +39,25 @@ test("scope store serializes concurrent snapshots and leaves one atomic checkpoi
   }
 });
 
+test("scope store never lets a stale checkpoint downgrade completed coverage", async () => {
+  const dir = await mkdtemp(path.join(os.tmpdir(), "flounder-scope-stale-"));
+  try {
+    const initial = [scope("S1"), scope("S2")];
+    await saveScopeInventory(dir, initial, { replace: true });
+    await saveScopeInventory(dir, [scope("S1", "audited"), scope("S2")]);
+    await saveScopeInventory(dir, [scope("S1"), scope("S2", "audited")]);
+    assert.deepEqual((await loadScopeInventory(dir)).map((entry) => [entry.id, entry.status]), [
+      ["S1", "audited"],
+      ["S2", "audited"],
+    ]);
+
+    await saveScopeInventory(dir, [], { replace: true });
+    assert.deepEqual(await loadScopeInventory(dir), [], "explicit remap/prepare reset still replaces the inventory");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("scope store distinguishes a missing inventory from a corrupt checkpoint", async () => {
   const dir = await mkdtemp(path.join(os.tmpdir(), "flounder-scope-corrupt-"));
   try {

@@ -433,7 +433,7 @@ export async function runAudit(
     }
     stampScopeInventory(scopeInventory, cfg.materialFingerprint);
     for (const scope of scopeInventory) if (!scope.status) scope.status = "pending";
-    await saveScopeInventory(inventoryDir, scopeInventory);
+    await saveScopeInventory(inventoryDir, scopeInventory, { replace: !cfg.auditAppendMap });
     await logger.artifact("audit_scopes.json", scopeInventory);
     await logger.event("audit_scope_progress", { ...scopeProgress(scopeInventory), resumed: false });
     recorder.scopes(scopeInventory);
@@ -487,7 +487,7 @@ export async function runAudit(
     // Persist the inventory BEFORE digging so a kill mid-run does not lose the map —
     // resume then skips MAP. Each dig below also checkpoints scope status + partial
     // findings, so a killed run only redoes the one in-flight dig.
-    await saveScopeInventory(inventoryDir, scopeInventory);
+    await saveScopeInventory(inventoryDir, scopeInventory, { replace: !resuming && !cfg.auditAppendMap });
     recorder.scopes(scopeInventory);
 
     const digCfg = withRole(cfg, "dig");
@@ -560,7 +560,7 @@ export async function runAudit(
     const resetInFlightScope = async (scope: AuditScope): Promise<void> => {
       if (scope.status !== "auditing") return;
       scope.status = "pending";
-      await saveScopeInventory(inventoryDir, scopeInventory);
+      await saveScopeInventory(inventoryDir, scopeInventory, { forceStatusIds: [scope.id] });
       recorder.scopes(scopeInventory);
       await logger.event("audit_dig_requeued", { scope: scope.id, reason: options.signal?.aborted ? "aborted" : "interrupted" });
     };

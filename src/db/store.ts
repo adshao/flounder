@@ -3272,8 +3272,9 @@ export class MetadataStore {
   }
 
   /** Atomically claim queued work for a daemon. Operator-launched project work takes priority
-   * over background evaluation work; FIFO is preserved inside each class. Running work is never
-   * preempted, so a claimed evaluation keeps its isolated workspace until it settles. */
+   * over background evaluation work; FIFO is preserved inside each class. Only one job per
+   * project may be dispatched/running at a time: individual runs provide their own isolated
+   * dig/verify concurrency, while separate runs share durable scope/history checkpoints. */
   claimJob(daemonId: number): { id: number; project: string; spec: unknown } | undefined {
     let claimed: { id: number; project: string; spec_json: string } | undefined;
     this.transaction(() => {
@@ -3281,6 +3282,12 @@ export class MetadataStore {
         `SELECT j.id, j.project, j.spec_json
            FROM job j
           WHERE j.status = 'queued' AND (j.daemon_id IS NULL OR j.daemon_id = ?)
+            AND NOT EXISTS (
+              SELECT 1
+                FROM job active
+               WHERE active.project = j.project
+                 AND active.status IN ('dispatched', 'running')
+            )
           ORDER BY CASE WHEN EXISTS (SELECT 1 FROM work_item wi WHERE wi.job_id = j.id) THEN 1 ELSE 0 END,
                    j.created_at,
                    j.id

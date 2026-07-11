@@ -20,6 +20,10 @@ export async function loadScopeInventory(historyDir: string, materialFingerprint
   const file = scopesPath(historyDir);
   const pending = pendingWrites.get(file);
   if (pending) await pending;
+  return readScopeInventoryFile(file, materialFingerprint);
+}
+
+async function readScopeInventoryFile(file: string, materialFingerprint?: string): Promise<AuditScope[]> {
   try {
     const parsed: unknown = JSON.parse(await readFile(file, "utf8"));
     if (!Array.isArray(parsed)) throw new Error(`Invalid scope inventory at ${file}: expected a JSON array.`);
@@ -38,15 +42,79 @@ export async function loadScopeInventory(historyDir: string, materialFingerprint
   }
 }
 
-export function saveScopeInventory(historyDir: string, scopes: AuditScope[]): Promise<void> {
+export interface SaveScopeInventoryOptions {
+  replace?: boolean;
+  forceStatusIds?: string[];
+}
+
+export function saveScopeInventory(historyDir: string, scopes: AuditScope[], options: SaveScopeInventoryOptions = {}): Promise<void> {
   const file = scopesPath(historyDir);
-  const snapshot = `${JSON.stringify(scopes, null, 2)}\n`;
   const previous = pendingWrites.get(file) ?? Promise.resolve();
-  const write = previous.catch(() => undefined).then(() => atomicWriteScopeInventory(historyDir, file, snapshot));
+  const write = previous.catch(() => undefined).then(async () => {
+    const durable = options.replace
+      ? scopes
+      : mergeScopeCheckpoints(await readScopeInventoryFile(file), scopes, new Set(options.forceStatusIds ?? []));
+    const snapshot = `${JSON.stringify(durable, null, 2)}\n`;
+    await atomicWriteScopeInventory(historyDir, file, snapshot);
+  });
   pendingWrites.set(file, write);
   return write.finally(() => {
     if (pendingWrites.get(file) === write) pendingWrites.delete(file);
   });
+}
+
+function mergeScopeCheckpoints(existing: AuditScope[], incoming: AuditScope[], forceStatusIds: Set<string>): AuditScope[] {
+  if (existing.length === 0) return incoming.map((scope) => ({ ...scope }));
+  if (incoming.length === 0) return existing.map((scope) => ({ ...scope }));
+  const existingMaterial = new Set(existing.map((scope) => scope.materialFingerprint).filter(Boolean));
+  const incomingMaterial = new Set(incoming.map((scope) => scope.materialFingerprint).filter(Boolean));
+  if (existingMaterial.size === 1 && incomingMaterial.size === 1 && [...existingMaterial][0] !== [...incomingMaterial][0]) {
+    return incoming.map((scope) => ({ ...scope }));
+  }
+
+  const out = existing.map((scope) => ({ ...scope }));
+  const byId = new Map(out.map((scope, index) => [scope.id.trim().toLowerCase(), index]));
+  const byKey = new Map(out.map((scope, index) => [scopeKey(scope), index]));
+  const ids = new Set(byId.keys());
+  for (const next of incoming) {
+    const idKey = next.id.trim().toLowerCase();
+    const index = byId.get(idKey) ?? byKey.get(scopeKey(next));
+    if (index === undefined) {
+      let id = next.id.trim() || `S${out.length + 1}`;
+      if (ids.has(id.toLowerCase())) id = nextScopeId(ids, id);
+      const added = { ...next, id };
+      out.push(added);
+      const addedIndex = out.length - 1;
+      ids.add(id.toLowerCase());
+      byId.set(id.toLowerCase(), addedIndex);
+      byKey.set(scopeKey(added), addedIndex);
+      continue;
+    }
+
+    const current = out[index]!;
+    const forced = forceStatusIds.has(next.id) || forceStatusIds.has(current.id);
+    const status = forced ? (next.status ?? "pending") : durableScopeStatus(current.status, next.status);
+    out[index] = {
+      ...current,
+      ...next,
+      id: current.id,
+      status,
+      ...(current.digSeconds !== undefined || next.digSeconds !== undefined
+        ? { digSeconds: Math.max(current.digSeconds ?? 0, next.digSeconds ?? 0) }
+        : {}),
+      ...(current.priority !== undefined || next.priority !== undefined
+        ? { priority: Math.max(current.priority ?? 0, next.priority ?? 0) }
+        : {}),
+    };
+  }
+  return out;
+}
+
+function durableScopeStatus(current: AuditScope["status"], incoming: AuditScope["status"]): NonNullable<AuditScope["status"]> {
+  if (current === "audited" || incoming === "audited") return "audited";
+  if (current === "deferred" || incoming === "deferred") return "deferred";
+  if (current === "auditing" || incoming === "auditing") return "auditing";
+  return incoming ?? current ?? "pending";
 }
 
 async function atomicWriteScopeInventory(historyDir: string, file: string, snapshot: string): Promise<void> {
