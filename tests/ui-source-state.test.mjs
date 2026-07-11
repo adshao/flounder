@@ -116,6 +116,19 @@ test("ui: independently refuted confirmations do not advance to confirm or repor
   assert.deepEqual(reportableFindings([finding], false), []);
 });
 
+test("ui: duplicate confirmations stay visible but do not become new work", () => {
+  const finding = {
+    id: 9,
+    finding_key: "kduplicate",
+    status: "confirmed-executable",
+    confirm_status: null,
+    tracking_status: "duplicate",
+  };
+
+  assert.deepEqual(pendingConfirmFindings([finding], true, []), []);
+  assert.deepEqual(reportableFindings([finding], false), []);
+});
+
 test("ui: source setup is ready when prepare produced an audit-ready workspace", () => {
   const detail = {
     prepareSummary: {

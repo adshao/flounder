@@ -2149,7 +2149,20 @@ test("api: report launch accepts source-only execution-confirmed findings withou
           refutationStatus: "refuted",
           refutationReason: "The execution passed, but the claimed invariant does not hold.",
         },
+        {
+          findingKey: "kduplicate",
+          title: "Source-only duplicate bug",
+          location: "src/Target.rs:78",
+          severity: "medium",
+          status: "confirmed-executable",
+        },
       ]);
+      const rows = store.queryFindings(created.id);
+      const canonical = rows.find((finding) => finding.finding_key === "ksource");
+      const duplicate = rows.find((finding) => finding.finding_key === "kduplicate");
+      assert.ok(canonical);
+      assert.ok(duplicate);
+      store.setFindingTracking(Number(duplicate.id), "duplicate", Number(canonical.id));
     } finally {
       store.close();
     }
@@ -2159,9 +2172,11 @@ test("api: report launch accepts source-only execution-confirmed findings withou
     const ready = detail.allFindings.find((finding) => finding.finding_key === "ksource");
     const suspected = detail.allFindings.find((finding) => finding.finding_key === "ksuspected");
     const reviewRefuted = detail.allFindings.find((finding) => finding.finding_key === "kreviewrefuted");
+    const duplicate = detail.allFindings.find((finding) => finding.finding_key === "kduplicate");
     assert.ok(ready);
     assert.ok(suspected);
     assert.ok(reviewRefuted);
+    assert.ok(duplicate);
 
     const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "report", findingIds: [ready.id] }));
     const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
@@ -2186,6 +2201,10 @@ test("api: report launch accepts source-only execution-confirmed findings withou
     const reviewRejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "report", findingIds: [reviewRefuted.id] });
     assert.equal(reviewRejected.status, 400);
     assert.match((await reviewRejected.json()).error, /independent review/);
+
+    const duplicateRejected = await post(`/api/projects/${created.uuid}/runs`, { verb: "report", findingIds: [duplicate.id] });
+    assert.equal(duplicateRejected.status, 400);
+    assert.match((await duplicateRejected.json()).error, /canonical finding/);
   });
 });
 

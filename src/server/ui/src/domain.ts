@@ -106,11 +106,16 @@ export function activeFindings(rows: FindingRow[] | undefined): FindingRow[] {
   return (rows ?? []).filter((finding) => (finding.tracking_status ?? "open") !== "ignored");
 }
 
+function isDuplicateFinding(finding: Pick<FindingRow, "tracking_status">): boolean {
+  return finding.tracking_status === "duplicate";
+}
+
 export function pendingConfirmFindings(rows: FindingRow[] | undefined, requiresConfirmation = true, decisions?: ConfirmDecision[]): FindingRow[] {
   if (!requiresConfirmation) return [];
   const decidedFindingKeys = new Set((decisions ?? []).flatMap(confirmDecisionMemberKeys));
   return activeFindings(rows).filter((finding) =>
     isExecutionConfirmedFinding(finding)
+    && !isDuplicateFinding(finding)
     && !hasBlockingIndependentReview(finding)
     && !finding.confirm_status
     && !(finding.finding_key && decidedFindingKeys.has(finding.finding_key.toLowerCase()))
@@ -119,7 +124,9 @@ export function pendingConfirmFindings(rows: FindingRow[] | undefined, requiresC
 
 export function localVerifiedFindings(rows: FindingRow[] | undefined): FindingRow[] {
   return activeFindings(rows).filter((finding) =>
-    isExecutionConfirmedFinding(finding) && !hasBlockingIndependentReview(finding));
+    isExecutionConfirmedFinding(finding)
+    && !isDuplicateFinding(finding)
+    && !hasBlockingIndependentReview(finding));
 }
 
 export function hasUnresolvedEvidenceConflict(
@@ -145,7 +152,8 @@ export function rawPendingVerifyCount(rows: FindingRow[] | undefined): number {
 
 export function reportableFindings(rows: FindingRow[] | undefined, requiresConfirmation = true): FindingRow[] {
   return activeFindings(rows).filter((finding) =>
-    !hasBlockingIndependentReview(finding)
+    !isDuplicateFinding(finding)
+    && !hasBlockingIndependentReview(finding)
     && (requiresConfirmation ? finding.confirm_status === "reproduced" : isExecutionConfirmedFinding(finding))
   );
 }

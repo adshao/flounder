@@ -2514,6 +2514,12 @@ async function runLaunch(c: Ctx): Promise<void> {
     const findingIds = selectedFindingIds(body);
     if (findingIds.length > 0) {
       const selected = findingIds.map((id) => ({ id, row: c.store.getConfirmable(Number(project.id), id) }));
+      const trackingBlocked = selected
+        .filter((entry) => findingTrackingBlocksProgress(c.store.getFinding(entry.id)))
+        .map((entry) => entry.id);
+      if (trackingBlocked.length > 0) {
+        return sendJson(c.res, 400, { error: `finding ${trackingBlocked.join(", ")} is not independent work; use its canonical finding instead` });
+      }
       const reviewBlocked = selected
         .filter((entry) => findingIndependentReviewBlocksProgress(c.store.getFinding(entry.id)))
         .map((entry) => entry.id);
@@ -2541,6 +2547,7 @@ async function runLaunch(c: Ctx): Promise<void> {
       const pending = confirmWorkRows(c.store, Number(project.id), currentResultRunIds, materialBoundary, currentDecisions);
       if (pending.length === 0) return sendJson(c.res, 400, { error: "nothing to confirm — every audit-confirmed finding already has a real-target decision (use --fresh to redo)" });
       const context = c.store.confirmableContext(Number(project.id))
+        .filter((p) => !findingTrackingBlocksProgress(c.store.getFinding(Number(p.id))))
         .filter((p) => !findingIndependentReviewBlocksProgress(p)
           || (p.refutation_status === "conflict" && c.store.hasFindingPhaseRetry(Number(project.id), "finding", Number(p.id), "confirm")))
         .filter((p) => confirmableRunDir(p as unknown as Record<string, unknown>))
@@ -2795,12 +2802,14 @@ function confirmWorkRows(
 ): Array<Record<string, unknown>> {
   const settledKeys = confirmDecisionKeySet(currentDecisions.filter((row) => !needsSubmissionReadinessWork(row)));
   const pending = store.pendingConfirmable(projectId)
+    .filter((row) => !findingTrackingBlocksProgress(store.getFinding(Number(row.id))))
     .filter((row) => !findingIndependentReviewBlocksProgress(store.getFinding(Number(row.id))))
     .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
     .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary))
     .filter((row) => !findingRowCoveredByDecision(row as unknown as Record<string, unknown>, settledKeys));
   const readinessKeys = new Set(currentDecisions.filter((row) => needsSubmissionReadinessWork(row)).flatMap(confirmDecisionMemberKeys));
   const readiness = readinessKeys.size === 0 ? [] : store.confirmableContext(projectId)
+    .filter((row) => !findingTrackingBlocksProgress(store.getFinding(Number(row.id))))
     .filter((row) => !findingIndependentReviewBlocksProgress(row))
     .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
     .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary))
@@ -2810,6 +2819,7 @@ function confirmWorkRows(
     });
   const conflictRetries = store.confirmableContext(projectId)
     .filter((row) => row.refutation_status === "conflict")
+    .filter((row) => !findingTrackingBlocksProgress(store.getFinding(Number(row.id))))
     .filter((row) => store.hasFindingPhaseRetry(projectId, "finding", Number(row.id), "confirm"))
     .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
     .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary));
@@ -2940,7 +2950,7 @@ function reportWorklist(
   const allRows = reportableFindings(store.listFindings(projectId));
   const rows = allRows.filter((row) => {
     if (selected && !selected.has(Number(row.id))) return false;
-    if (isIgnoredFinding(row)) return false;
+    if (findingTrackingBlocksProgress(row)) return false;
     if (findingIndependentReviewBlocksProgress(row)) return false;
     if (!selected && !includeExistingReports && rowHasFormalReport(row)) return false;
     if (!rowBelongsToCurrentMaterial(row, currentRunIds ?? new Set(), materialBoundary)) return false;
@@ -2950,6 +2960,10 @@ function reportWorklist(
   if (selected && rows.length !== selected.size) {
     const found = new Set(rows.map((row) => Number(row.id)));
     const missing = [...selected].filter((id) => !found.has(id));
+    const duplicates = missing.filter((id) => allRows.some((row) => Number(row.id) === id && String(row.tracking_status ?? "") === "duplicate"));
+    if (duplicates.length > 0) {
+      return { error: `finding ${duplicates.join(", ")} is marked duplicate; report its canonical finding instead` };
+    }
     const blocked = missing.filter((id) => allRows.some((row) => Number(row.id) === id && findingIndependentReviewBlocksProgress(row)));
     if (blocked.length > 0) {
       return { error: `finding ${blocked.join(", ")} did not pass independent review` };
@@ -3743,7 +3757,13 @@ function isExecutionConfirmedFindingStatus(status: string): boolean {
 function countAuditConfirmedFindings(rows: Array<Record<string, unknown>>): number {
   return rows.filter((row) =>
     isConfirmedFindingStatus(String(row.status ?? "").toLowerCase())
+    && !findingTrackingBlocksProgress(row)
     && !findingIndependentReviewBlocksProgress(row)).length;
+}
+
+function findingTrackingBlocksProgress(row: Record<string, unknown> | undefined): boolean {
+  const status = stringValue(row?.tracking_status).toLowerCase();
+  return status === "ignored" || status === "duplicate";
 }
 
 function findingIndependentReviewBlocksProgress(row: Record<string, unknown> | undefined): boolean {
@@ -5406,7 +5426,8 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       ? findings.filter((finding) => {
           const status = String(finding.status ?? "");
           const key = stringValue(finding.finding_key).toLowerCase();
-          return !findingIndependentReviewBlocksProgress(finding)
+          return !findingTrackingBlocksProgress(finding)
+            && !findingIndependentReviewBlocksProgress(finding)
             && (status === "confirmed-executable" || status === "confirmed-differential")
             && (!finding.confirm_status || (key && submissionWorkKeys.has(key)));
         }).length
