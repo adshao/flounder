@@ -420,6 +420,41 @@ test("store: duplicate tracking preserves the canonical finding link", async () 
   db.close();
 });
 
+test("store: startup repairs orphan duplicate labels and flattens legacy duplicate chains", async () => {
+  const { dbPath } = await tempDbPath();
+  const db = new MetadataStore(dbPath);
+  const projectId = db.upsertProject({ name: "legacy-duplicate-integrity" });
+  const runId = db.startRun({ projectId, kind: "run", runDir: "/runs/legacy-duplicate-integrity" });
+  db.upsertFindings(projectId, runId, [
+    { findingKey: "canonical", title: "Canonical issue", status: "confirmed-executable" },
+    { findingKey: "linked", title: "Linked duplicate", status: "confirmed-executable" },
+    { findingKey: "chained", title: "Chained duplicate", status: "confirmed-executable" },
+    { findingKey: "orphan", title: "Orphan duplicate", status: "confirmed-executable" },
+  ]);
+  const initial = db.listFindings(projectId);
+  const canonical = initial.find((finding) => finding.finding_key === "canonical");
+  const linked = initial.find((finding) => finding.finding_key === "linked");
+  const chained = initial.find((finding) => finding.finding_key === "chained");
+  const orphan = initial.find((finding) => finding.finding_key === "orphan");
+  assert.ok(canonical && linked && chained && orphan);
+  db.close();
+
+  const legacy = new DatabaseSync(dbPath);
+  legacy.prepare("UPDATE finding SET tracking_status = 'duplicate', duplicate_of_finding_id = ? WHERE id = ?").run(canonical.id, linked.id);
+  legacy.prepare("UPDATE finding SET tracking_status = 'duplicate', duplicate_of_finding_id = ? WHERE id = ?").run(linked.id, chained.id);
+  legacy.prepare("UPDATE finding SET tracking_status = 'duplicate', duplicate_of_finding_id = NULL WHERE id = ?").run(orphan.id);
+  legacy.close();
+
+  const repaired = new MetadataStore(dbPath);
+  assert.equal(repaired.getFinding(linked.id).duplicate_of_finding_id, canonical.id);
+  assert.equal(repaired.getFinding(chained.id).duplicate_of_finding_id, canonical.id);
+  assert.equal(repaired.getFinding(orphan.id).tracking_status, null);
+  assert.equal(repaired.getFinding(orphan.id).duplicate_of_finding_id, null);
+  assert.equal(repaired.setFindingTracking(orphan.id, "duplicate"), false, "new orphan duplicate labels are rejected");
+  assert.equal(repaired.setFindingTracking(orphan.id, "duplicate", linked.id), false, "new duplicate chains are rejected");
+  repaired.close();
+});
+
 test("record: verify REFUTED verdicts become structured refuted rows", () => {
   const base = {
     id: "f1",

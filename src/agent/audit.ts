@@ -992,7 +992,12 @@ export async function runAudit(
   if (cfg.auditChallengeDischarges !== false && !options.signal?.aborted) {
     const sevRank = (s: string | undefined): number => ({ critical: 0, high: 1, medium: 2, low: 3, info: 4 } as Record<string, number>)[s ?? "info"] ?? 4;
     const legacyDischarged = session.findings.filter((f) => f.confirmationStatus === "discharged");
-    const outcomeDischarged = latestScopeOutcomes(scopeOutcomes).flatMap((outcome) => {
+    // Challenge only outcomes produced by THIS run. Persisted outcomes were already
+    // challenged when their scopes were audited; replaying the whole project on every
+    // one-scope continuation multiplies model work and can reopen unrelated historical
+    // obligations with no new evidence.
+    const challengeOutcomes = dischargeChallengeScopeOutcomes(scopeOutcomes, newScopeOutcomes);
+    const outcomeDischarged = challengeOutcomes.flatMap((outcome) => {
       const scope = scopeInventory.find((candidate) => candidate.id === outcome.scopeId);
       const severity = severityFromExposure(scope?.exposure);
       return outcome.obligations
@@ -1016,7 +1021,11 @@ export async function runAudit(
     if (discharged.length > 0) {
       const challengeCfg = withRole(cfg, "refute");
       const challengeLlm = options.llm ?? (isPiSessionProvider(challengeCfg.provider) ? new SessionLlmClient(challengeCfg, logger) : createLlmClient(challengeCfg, logger));
-      await logger.event("audit_discharge_challenge_start", { discharged: discharged.length });
+      await logger.event("audit_discharge_challenge_start", {
+        discharged: discharged.length,
+        runOutcomes: challengeOutcomes.length,
+        persistedOutcomes: latestScopeOutcomes(scopeOutcomes).length,
+      });
       const verdicts = await runDischargeChallenge({ findings: discharged, source, cfg: challengeCfg, llm: challengeLlm, logger, max: cfg.auditChallengeMax ?? 12, onProgress: (id) => options.onActivity?.({ kind: "step", tool: `challenge ${id}` }) });
       let overturned = 0;
       for (const v of verdicts) {
@@ -1161,6 +1170,10 @@ export function dischargeChallengeFindingTitle(verdict: { title?: string }, fall
   const mechanism = (verdict.title ?? "").replace(/^\s*(?:DISCHARGE\s+OVERTURNED|DISCHARGED)\s*:\s*/i, "").replace(/\s+/g, " ").trim();
   if (mechanism) return mechanism.slice(0, 240);
   return (fallback || "Discharged obligation is unsound").replace(/^(obligation\s+)?discharged:?\s*/i, "").replace(/\s+/g, " ").trim().slice(0, 240);
+}
+
+export function dischargeChallengeScopeOutcomes(_persistedOutcomes: ScopeOutcome[], runOutcomes: ScopeOutcome[]): ScopeOutcome[] {
+  return latestScopeOutcomes(runOutcomes);
 }
 
 const SEVERITY_ORDER = ["critical", "high", "medium", "low", "info"];

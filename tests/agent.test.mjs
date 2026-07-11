@@ -10,7 +10,7 @@ import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest, splitCommandLineForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
-import { dedupeVerifyInputs, dischargeChallengeFindingTitle, normalizeVerifyVerdicts, runAudit } from "../dist/agent/audit.js";
+import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, runAudit } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
@@ -1705,6 +1705,15 @@ test("discharge challenge preserves a mechanism-specific identity inside a broad
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
+});
+
+test("discharge challenge reviews only outcomes produced by the current run", () => {
+  const prior = { scopeId: "S1", sample: 1, obligations: [] };
+  const currentOldSample = { scopeId: "S2", sample: 1, obligations: [] };
+  const currentLatestSample = { scopeId: "S2", sample: 2, obligations: [] };
+  const selected = dischargeChallengeScopeOutcomes([prior, currentOldSample], [currentOldSample, currentLatestSample]);
+  assert.deepEqual(selected, [currentLatestSample]);
+  assert.equal(selected.includes(prior), false, "persisted outcomes from prior runs must not be replayed");
 });
 
 test("refutation reports model-call errors without manufacturing a verdict", async () => {

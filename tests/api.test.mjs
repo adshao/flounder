@@ -103,6 +103,7 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     const findingTracking = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/findings/:id/tracking");
     assert.match(findingTracking.body.status, /ignored/);
     assert.match(findingTracking.body.duplicateOfFindingId, /canonical finding id/);
+    assert.match(findingTracking.body.duplicateOfFindingId, /required/);
     const runLog = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/runs/:id/log");
     assert.match(runLog.query.tail, /JSON/);
     const runPatch = cat.endpoints.find((e) => e.method === "PATCH" && e.path === "/api/runs/:id");
@@ -4029,12 +4030,45 @@ test("api: duplicate tracking can link to a canonical finding in the same projec
     assert.ok(canonical);
     assert.ok(variant);
 
+    const missingCanonicalResponse = await patch(`/api/findings/${variant.id}/tracking`, { status: "duplicate" });
+    assert.equal(missingCanonicalResponse.status, 400);
+    assert.match((await missingCanonicalResponse.json()).error, /required/);
+
     const linkedResponse = await patch(`/api/findings/${variant.id}/tracking`, { status: "duplicate", duplicateOfFindingId: canonical.id });
     assert.equal(linkedResponse.status, 200);
     const duplicates = await json(await fetch(base + `/api/projects/${created.uuid}/findings?tracking=duplicate`));
     assert.equal(duplicates.total, 1);
     assert.equal(duplicates.findings[0].finding_key, "variant");
     assert.equal(duplicates.findings[0].duplicate_of_finding_id, canonical.id);
+
+    const verifyDuplicate = await json(await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "audit",
+      verifyFindings: [{ id: variant.id }],
+    }));
+    const verifyDuplicateJob = (await json(await fetch(base + `/api/jobs/${verifyDuplicate.jobId}`))).job;
+    const verifyDuplicateSpec = JSON.parse(verifyDuplicateJob.spec_json);
+    assert.equal(verifyDuplicateSpec.verifyFindings[0].id, variant.id, "the concrete variant remains the model-visible claim");
+    assert.equal(verifyDuplicateSpec.verifyFindings[0].originId, canonical.id, "the verdict settles on the canonical finding");
+
+    const secondRunId = (() => {
+      const db = MetadataStore.openForOutput(out);
+      try {
+        const runId = db.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "duplicate-finding-links-second-run") });
+        db.upsertFindings(created.id, runId, [
+          { findingKey: "second-variant", title: "Second variant helper reentry", location: "src/Router.sol:3", severity: "medium", status: "confirmed-executable" },
+        ]);
+        return runId;
+      } finally {
+        db.close();
+      }
+    })();
+    assert.ok(secondRunId > 0);
+    const refreshed = await json(await fetch(base + `/api/projects/${created.uuid}/findings`));
+    const secondVariant = refreshed.findings.find((finding) => finding.finding_key === "second-variant");
+    assert.ok(secondVariant);
+    const chainedResponse = await patch(`/api/findings/${secondVariant.id}/tracking`, { status: "duplicate", duplicateOfFindingId: variant.id });
+    assert.equal(chainedResponse.status, 400);
+    assert.match((await chainedResponse.json()).error, /itself a duplicate/);
 
     const selfResponse = await patch(`/api/findings/${variant.id}/tracking`, { status: "duplicate", duplicateOfFindingId: variant.id });
     assert.equal(selfResponse.status, 400);

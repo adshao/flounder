@@ -600,9 +600,9 @@ const ROUTES: Route[] = [
   }),
   route({
     method: "PATCH", path: "/api/findings/:id/tracking",
-    summary: "Set a finding's submission-tracking state (open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored) — for following a bug from discovery to vendor disclosure. When status is duplicate, duplicateOfFindingId may link to the canonical finding in the same project.",
+    summary: "Set a finding's submission-tracking state (open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored) — for following a bug from discovery to vendor disclosure. Duplicate status always requires a direct link to a canonical finding in the same project.",
     params: { id: "finding id" },
-    body: { status: "open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored", duplicateOfFindingId: "number? — canonical finding id when status is duplicate" },
+    body: { status: "open|triaging|submitted|accepted|fixed|duplicate|rejected|ignored", duplicateOfFindingId: "number — required canonical finding id when status is duplicate" },
     handler: findingTracking,
   }),
 
@@ -4348,7 +4348,14 @@ async function findingTracking(c: Ctx): Promise<void> {
     const target = c.store.getFinding(parsed);
     if (!target) return sendJson(c.res, 400, { error: "duplicate target finding does not exist" });
     if (Number(target.project_id) !== Number(finding.project_id)) return sendJson(c.res, 400, { error: "duplicate target must be in the same project" });
+    if (String(target.tracking_status ?? "") === "duplicate") {
+      const canonical = Number(target.duplicate_of_finding_id ?? 0);
+      return sendJson(c.res, 400, { error: canonical > 0 ? `duplicate target is itself a duplicate; use canonical finding ${canonical}` : "duplicate target has no canonical finding link" });
+    }
     duplicateOfFindingId = parsed;
+  }
+  if (status === "duplicate" && duplicateOfFindingId === null) {
+    return sendJson(c.res, 400, { error: "duplicateOfFindingId is required when status is duplicate" });
   }
   const ok = c.store.setFindingTracking(id, status, duplicateOfFindingId);
   ok ? sendJson(c.res, 200, { ok: true }) : sendJson(c.res, 404, { error: "no such finding" });
@@ -5633,7 +5640,15 @@ function normalizeProjectVerifyFindings(store: MetadataStore, projectId: number,
   if (id === undefined) return input;
   const finding = store.getFinding(id);
   if (finding && Number(finding.project_id) === projectId) {
-    return { ...findingDetailRow(finding), ...row, originId: id };
+    const duplicateOf = String(finding.tracking_status ?? "") === "duplicate"
+      ? positiveIntegerId(finding.duplicate_of_finding_id)
+      : undefined;
+    const canonical = duplicateOf === undefined ? undefined : store.getFinding(duplicateOf);
+    const originId = canonical && Number(canonical.project_id) === projectId ? duplicateOf : id;
+    // Keep the selected variant's concrete claim/evidence as the Verify input, but
+    // settle the result on its canonical finding. This avoids spending a full
+    // execution pass only to strand stronger evidence on non-independent work.
+    return { ...findingDetailRow(finding), ...row, originId };
   }
   return { ...row, originId: id };
 }

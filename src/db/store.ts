@@ -1154,10 +1154,64 @@ export class MetadataStore {
       this.reconcileFindingReportRunIds();
       this.reconcileConfirmDecisionReports();
       this.reconcileAuditedScopeBacklog();
+      this.reconcileFindingDuplicateLinks();
     }, "immediate");
     // Artifact paths may be remote, slow, or large. Parse them without holding the
     // SQLite writer lock, then apply the collected immutable verdicts atomically.
     this.reconcileRefutedVerifyArtifacts();
+  }
+
+  /** Duplicate is a relationship, not a standalone terminal label. Older data
+   * could persist orphan duplicates or duplicate chains. Reopen invalid orphans
+   * and flatten valid chains so every duplicate points directly at one canonical
+   * finding in the same project. */
+  private reconcileFindingDuplicateLinks(): void {
+    type DuplicateRow = {
+      id: number;
+      project_id: number;
+      tracking_status: string | null;
+      duplicate_of_finding_id: number | null;
+    };
+    const rows = this.db.prepare(
+      "SELECT id, project_id, tracking_status, duplicate_of_finding_id FROM finding ORDER BY id",
+    ).all() as DuplicateRow[];
+    const byId = new Map(rows.map((row) => [row.id, row]));
+    const clearOrphan = this.db.prepare(
+      "UPDATE finding SET tracking_status = NULL, duplicate_of_finding_id = NULL WHERE id = ?",
+    );
+    const clearStaleLink = this.db.prepare(
+      "UPDATE finding SET duplicate_of_finding_id = NULL WHERE id = ?",
+    );
+    const flatten = this.db.prepare(
+      "UPDATE finding SET duplicate_of_finding_id = ? WHERE id = ?",
+    );
+
+    for (const row of rows) {
+      if (row.tracking_status !== "duplicate") {
+        if (row.duplicate_of_finding_id !== null) clearStaleLink.run(row.id);
+        continue;
+      }
+
+      const seen = new Set<number>([row.id]);
+      let targetId = row.duplicate_of_finding_id;
+      let canonical: DuplicateRow | undefined;
+      while (targetId !== null) {
+        const target = byId.get(targetId);
+        if (!target || target.project_id !== row.project_id || seen.has(target.id)) break;
+        seen.add(target.id);
+        if (target.tracking_status !== "duplicate") {
+          canonical = target;
+          break;
+        }
+        targetId = target.duplicate_of_finding_id;
+      }
+
+      if (!canonical) {
+        clearOrphan.run(row.id);
+      } else if (row.duplicate_of_finding_id !== canonical.id) {
+        flatten.run(canonical.id, row.id);
+      }
+    }
   }
 
   private hasColumn(table: string, column: string): boolean {
@@ -2317,7 +2371,14 @@ export class MetadataStore {
   /** Update a finding's submission-tracking state (does NOT touch updated_at, so the audit
    * "found" time and newest-first ordering are preserved). */
   setFindingTracking(id: number, status: string, duplicateOfFindingId?: number | null): boolean {
-    const duplicateOf = status === "duplicate" ? (duplicateOfFindingId ?? null) : null;
+    let duplicateOf: number | null = null;
+    if (status === "duplicate") {
+      if (!Number.isInteger(duplicateOfFindingId) || Number(duplicateOfFindingId) <= 0 || Number(duplicateOfFindingId) === id) return false;
+      const source = this.db.prepare("SELECT project_id FROM finding WHERE id = ?").get(id) as { project_id: number } | undefined;
+      const target = this.db.prepare("SELECT project_id, tracking_status FROM finding WHERE id = ?").get(Number(duplicateOfFindingId)) as { project_id: number; tracking_status: string | null } | undefined;
+      if (!source || !target || source.project_id !== target.project_id || target.tracking_status === "duplicate") return false;
+      duplicateOf = Number(duplicateOfFindingId);
+    }
     return this.db.prepare("UPDATE finding SET tracking_status = ?, duplicate_of_finding_id = ? WHERE id = ?").run(status || null, duplicateOf, id).changes > 0;
   }
 
