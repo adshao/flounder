@@ -148,7 +148,7 @@ export function buildRunHealth(input: {
     reasons.push(reason);
   };
 
-  if (input.stoppedReason === "error" || input.stoppedReason === "stalled" || modelErrorSteps > 0) {
+  if (input.stoppedReason === "error" || input.stoppedReason === "stalled") {
     setStatus("infra-failed", `run stopped as ${input.stoppedReason} or recorded model/session errors`);
   }
   if (infraErrors > 0) {

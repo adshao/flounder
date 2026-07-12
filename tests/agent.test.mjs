@@ -10,7 +10,7 @@ import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest, splitCommandLineForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
-import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, runAudit } from "../dist/agent/audit.js";
+import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, runAudit, verifyBatchStoppedReason } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
@@ -19,7 +19,7 @@ import { differentialNetworkForExploitRun, runDifferentialConfirmation } from ".
 import { runDischargeChallenge, runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
-import { assistantMessageError, buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas, withDetailedCodexReasoningSummary } from "../dist/agent/pi-session.js";
+import { assistantMessageError, auditSessionHasDurableHandoff, buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas, withDetailedCodexReasoningSummary } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 import { renderDisclosure } from "../dist/reports/disclosure.js";
@@ -641,7 +641,49 @@ test("run health distinguishes blocked, shallow, and coverage-incomplete runs", 
     coverageGaps: [{ id: "G1", status: "open", obligation: "Parser length must bind payload bytes", reason: "Budget ended before parser sink was audited" }],
   }).status, "needs-coverage");
   assert.equal(buildRunHealth({ ...base, stoppedReason: "error" }).status, "infra-failed");
+  assert.equal(buildRunHealth({ ...base, mode: "verify", steps: [...base.steps, { tool: "(session-error)" }] }).status, "healthy");
   assert.equal(buildRunHealth({ ...base, infraErrors: 1 }).status, "infra-failed");
+  assert.equal(verifyBatchStoppedReason("error", 7, 7), "finished");
+  assert.equal(verifyBatchStoppedReason("error", 6, 7), "error");
+});
+
+test("audit sessions settle post-handoff transport errors only after phase-required artifacts exist", () => {
+  assert.equal(auditSessionHasDurableHandoff({
+    deep: true,
+    synthesize: false,
+    hasScopeOutcome: true,
+    hasFindingsArtifact: true,
+  }), true);
+  assert.equal(auditSessionHasDurableHandoff({
+    deep: true,
+    synthesize: false,
+    hasScopeOutcome: false,
+    hasFindingsArtifact: true,
+  }), false);
+  assert.equal(auditSessionHasDurableHandoff({
+    deep: true,
+    synthesize: false,
+    hasScopeOutcome: true,
+    hasFindingsArtifact: false,
+  }), false);
+  assert.equal(auditSessionHasDurableHandoff({
+    deep: true,
+    synthesize: true,
+    hasScopeOutcome: true,
+    hasFindingsArtifact: true,
+  }), true);
+  assert.equal(auditSessionHasDurableHandoff({
+    deep: true,
+    synthesize: true,
+    hasScopeOutcome: true,
+    hasFindingsArtifact: false,
+  }), false);
+  assert.equal(auditSessionHasDurableHandoff({
+    deep: false,
+    synthesize: false,
+    hasScopeOutcome: true,
+    hasFindingsArtifact: true,
+  }), false);
 });
 
 test("scope inventory merge appends novel scopes while preserving existing status", () => {

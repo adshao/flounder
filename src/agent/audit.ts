@@ -407,7 +407,7 @@ export async function runAudit(
     digDifferentialDone = true;
     manualFindings = true;
     steps = aggregatedSteps;
-    stoppedReason = phaseFailureReason ?? "finished";
+    stoppedReason = verifyBatchStoppedReason(phaseFailureReason, verifyDone, toVerify.length);
   } else if (cfg.auditMapOnly) {
     auditMode = "map";
     // MAP only (`flounder map`): enumerate and persist the scope inventory, then stop — no
@@ -1196,6 +1196,18 @@ export async function runAudit(
     summary,
     ...(finalCoverage ? { scopeCoverage: finalCoverage } : {}),
   };
+}
+
+export function verifyBatchStoppedReason(
+  phaseFailureReason: string | undefined,
+  settledVerdicts: number,
+  totalClaims: number,
+): string {
+  // A provider transport may close after the model has already persisted a valid
+  // terminal verdict. Durable verdicts are the Verify completion contract; only a
+  // claim without one remains blocked by the transport failure.
+  if (totalClaims > 0 && settledVerdicts === totalClaims) return "finished";
+  return phaseFailureReason ?? "finished";
 }
 
 export function dischargeChallengeFindingTitle(verdict: { title?: string }, fallback: string): string {
