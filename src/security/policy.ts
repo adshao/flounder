@@ -678,7 +678,11 @@ function isAllowedBuildCommand(program: string, args: string[]): boolean {
       (second === "pip" && lower[2] === "install")
     );
   }
-  if (name === "forge") return ["build", "install", "compile", "update"].includes(first ?? "");
+  // `forge inspect` is compiler-backed, read-only introspection (for example,
+  // storage-layout or ABI output). Treat it like a build command so sealed
+  // audits run it against the prepared build workspace with dependencies
+  // available, while it remains ineligible for executable confirmation.
+  if (name === "forge") return ["build", "install", "compile", "update", "inspect"].includes(first ?? "");
   if (name === "cmake") return isAllowedCmakeBuild(args);
   if (name === "ninja") return true;
   if (name === "make" || name === "gmake") return true;

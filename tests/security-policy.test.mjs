@@ -12,6 +12,7 @@ test("agent bash allows build/dependency commands (the build phase) across ecosy
     cmd("npm", "install"),
     cmd("go", "mod", "download"),
     cmd("forge", "build"),
+    cmd("forge", "inspect", "src/Vault.sol:Vault", "storage-layout"),
     cmd("pip", "install", "-r", "requirements.txt"),
     cmd("python3", "-m", "venv", ".venv"),
     cmd("python3", "-m", "pip", "install", "-r", "requirements.txt"),
@@ -50,6 +51,7 @@ test("a build command is NOT confirmation-eligible (build cannot mint a finding)
   assert.equal(isAgentConfirmCommand(cmd("env", "SCARB_CACHE=./.scarb-cache", "scarb", "fetch")), false);
   assert.equal(isAgentConfirmCommand(cmd("blueprint", "build", "--all")), false);
   assert.equal(isAgentConfirmCommand(cmd("func-js", "contracts/pool.fc")), false);
+  assert.equal(isAgentConfirmCommand(cmd("forge", "inspect", "src/Vault.sol:Vault", "storage-layout")), false);
   assert.equal(isAgentBuildCommand(cmd("func-js")), false);
   assert.equal(isAgentConfirmCommand(cmd("tolk-js", "contracts/router.tolk")), false);
   assert.equal(isAgentConfirmCommand(cmd("tact", "--config", "tact.config.json")), false);
@@ -77,6 +79,8 @@ test("a build command is NOT confirmation-eligible (build cannot mint a finding)
 test("a build command still cannot smuggle a remote/mainnet target in its argv", () => {
   assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "build", "--target-dir", "https://evil.example/x")).blocked, true);
   assert.equal(analyzeAgentBashCommandSafety(cmd("forge", "build", "--fork-url", "https://mainnet.example")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("forge", "inspect", "src/Vault.sol:Vault", "storage-layout", "--root", "../outside")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("forge", "inspect", "src/Vault.sol:Vault", "storage-layout", "--rpc-url", "https://mainnet.example")).blocked, true);
   assert.equal(analyzeAgentBashCommandSafety(cmd("cmake", "-S", "https://evil.example/project", "-B", "build")).blocked, true);
   assert.equal(analyzeAgentBashCommandSafety(cmd("cmake", "-P", "script.cmake")).blocked, true);
 });
