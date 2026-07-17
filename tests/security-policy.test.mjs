@@ -26,6 +26,9 @@ test("agent bash allows build/dependency commands (the build phase) across ecosy
     cmd("blueprint", "build", "--all"),
     cmd("npx", "blueprint", "build", "--all"),
     cmd("yarn", "blueprint", "build", "--all"),
+    cmd("yarn", "hardhat", "compile"),
+    cmd("pnpm", "hardhat", "compile"),
+    cmd("bun", "hardhat", "compile"),
     cmd("func-js", "contracts/pool.fc"),
     cmd("tolk-js", "contracts/router.tolk"),
     cmd("tact", "--config", "tact.config.json"),
@@ -50,6 +53,7 @@ test("a build command is NOT confirmation-eligible (build cannot mint a finding)
   assert.equal(isAgentConfirmCommand(cmd("scarb", "--offline", "build")), false);
   assert.equal(isAgentConfirmCommand(cmd("env", "SCARB_CACHE=./.scarb-cache", "scarb", "fetch")), false);
   assert.equal(isAgentConfirmCommand(cmd("blueprint", "build", "--all")), false);
+  assert.equal(isAgentConfirmCommand(cmd("yarn", "hardhat", "compile")), false);
   assert.equal(isAgentConfirmCommand(cmd("func-js", "contracts/pool.fc")), false);
   assert.equal(isAgentConfirmCommand(cmd("forge", "inspect", "src/Vault.sol:Vault", "storage-layout")), false);
   assert.equal(isAgentBuildCommand(cmd("func-js")), false);

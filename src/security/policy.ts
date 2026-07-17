@@ -669,7 +669,10 @@ function isAllowedBuildCommand(program: string, args: string[]): boolean {
   if (name === "cargo") return ["build", "fetch", "check", "generate-lockfile", "vendor", "update"].includes(cargoSubcommand(args) ?? "");
   if (name === "go") return first === "build" || first === "mod"; // go build / go mod download|tidy|vendor
   if (name === "npm") return ["install", "ci", "i"].includes(first ?? "");
-  if (name === "pnpm" || name === "yarn" || name === "bun") return ["install", "i", "ci"].includes(first ?? "") || (name === "yarn" && args.length === 0) || (first === "blueprint" && second === "build");
+  if (name === "pnpm" || name === "yarn" || name === "bun") return ["install", "i", "ci"].includes(first ?? "")
+    || (name === "yarn" && args.length === 0)
+    || (first === "hardhat" && second === "compile")
+    || (first === "blueprint" && second === "build");
   if (name === "pip" || name === "pip3") return first === "install";
   if (name === "python" || name === "python3") {
     return first === "-m" && (
