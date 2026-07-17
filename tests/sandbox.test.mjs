@@ -4,11 +4,45 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { defaultConfig, sandboxExecutionOptions, sandboxNetworkForPurpose } from "../dist/config.js";
-import { autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, runSandboxCommand, sandboxToolPath } from "../dist/security/sandbox.js";
+import { autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, compactSandboxWorkspace, runSandboxCommand, sandboxToolPath } from "../dist/security/sandbox.js";
 
 async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
+
+test("completed sandbox workspaces discard rebuildable output but retain source and scratch evidence", async () => {
+  const workspace = await tempDir("flounder-sandbox-compact-");
+  try {
+    await mkdir(path.join(workspace, "src"), { recursive: true });
+    await mkdir(path.join(workspace, "out"), { recursive: true });
+    await mkdir(path.join(workspace, "target", "debug"), { recursive: true });
+    await mkdir(path.join(workspace, "node_modules", "pkg"), { recursive: true });
+    await mkdir(path.join(workspace, "notes"), { recursive: true });
+    await writeFile(path.join(workspace, "src", "lib.rs"), "pub fn audited() {}\n");
+    await writeFile(path.join(workspace, "out", "checked-in.json"), "{}\n");
+    await writeFile(path.join(workspace, "target", "debug", "large-binary"), "rebuildable\n");
+    await writeFile(path.join(workspace, "node_modules", "pkg", "index.js"), "module.exports = {};\n");
+    await writeFile(path.join(workspace, "notes", "trace.txt"), "keep non-build output\n");
+    await writeFile(path.join(workspace, "target", "poc.rs"), "#[test] fn poc() {}\n");
+
+    const result = await compactSandboxWorkspace(
+      workspace,
+      new Set(["src/lib.rs", "out/checked-in.json"]),
+      new Map([["target/poc.rs", "#[test] fn poc() {}\n"]]),
+    );
+
+    assert.equal(result.removedDirectories, 2);
+    assert.equal(result.restoredScratchFiles, 1);
+    assert.equal(await readFile(path.join(workspace, "src", "lib.rs"), "utf8"), "pub fn audited() {}\n");
+    assert.equal(await readFile(path.join(workspace, "out", "checked-in.json"), "utf8"), "{}\n");
+    assert.equal(await readFile(path.join(workspace, "target", "poc.rs"), "utf8"), "#[test] fn poc() {}\n");
+    assert.equal(await readFile(path.join(workspace, "notes", "trace.txt"), "utf8"), "keep non-build output\n");
+    await assert.rejects(readFile(path.join(workspace, "target", "debug", "large-binary")), /ENOENT/);
+    await assert.rejects(readFile(path.join(workspace, "node_modules", "pkg", "index.js")), /ENOENT/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
 
 function truncatedElf64() {
   const elf = Buffer.alloc(64);

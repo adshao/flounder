@@ -16,6 +16,11 @@ export interface SandboxWorkspace {
   relative: string;
 }
 
+export interface SandboxWorkspaceCompactionResult {
+  removedDirectories: number;
+  restoredScratchFiles: number;
+}
+
 export const SANDBOX_BACKENDS = ["auto", "oci", "apple-container", "host"] as const;
 export type SandboxBackend = typeof SANDBOX_BACKENDS[number];
 export type SandboxNetworkMode = "none" | "enabled";
@@ -92,6 +97,53 @@ export async function prepareSandboxWorkspace(sourcePaths: string[], runDir: str
     }
   }
   return { absolute, relative };
+}
+
+/**
+ * Remove rebuildable dependency and compiler output from a completed isolated
+ * workspace while retaining target source and model-authored evidence. A
+ * directory that contained a pristine baseline file is never removed. Scratch
+ * files are restored after pruning so even an unusual PoC path under a build
+ * directory remains durable.
+ */
+export async function compactSandboxWorkspace(
+  workspaceAbsolute: string,
+  baselineFiles: ReadonlySet<string>,
+  scratchFiles: ReadonlyMap<string, string>,
+): Promise<SandboxWorkspaceCompactionResult> {
+  const removed: string[] = [];
+  const walk = async (absoluteDir: string, relativeDir: string): Promise<void> => {
+    let entries: import("node:fs").Dirent[];
+    try {
+      entries = await readdir(absoluteDir, { withFileTypes: true });
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code === "ENOENT") return;
+      throw error;
+    }
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+      const relative = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
+      const absolute = path.join(absoluteDir, entry.name);
+      if (isRebuildableSandboxDirectory(entry.name) && !hasBaselineDescendant(baselineFiles, relative)) {
+        await rm(absolute, { recursive: true, force: true });
+        removed.push(relative);
+        continue;
+      }
+      await walk(absolute, relative);
+    }
+  };
+
+  await walk(workspaceAbsolute, "");
+  const filesToRestore: ReproductionFile[] = [];
+  for (const [scratchPath, content] of scratchFiles) {
+    const normalized = normalizeRelativePath(scratchPath);
+    if (!normalized) continue;
+    if (removed.some((directory) => normalized.startsWith(`${directory}/`))) {
+      filesToRestore.push({ path: normalized, content });
+    }
+  }
+  await writeSandboxFiles(workspaceAbsolute, filesToRestore);
+  return { removedDirectories: removed.length, restoredScratchFiles: filesToRestore.length };
 }
 
 /** Reject command-level policy violations (live networks, non-test runners, remote RPC). */
@@ -1010,6 +1062,51 @@ async function isDirectory(input: string): Promise<boolean> {
 
 function shouldSkipCopyName(name: string): boolean {
   return new Set([".git", ".hg", ".svn", "node_modules", "vendor", "target", "build", "dist", "coverage", "runs", "__pycache__", ".cache", ".next", ".nuxt", ".turbo"]).has(name);
+}
+
+const REBUILDABLE_SANDBOX_DIRECTORIES = new Set([
+  ".build",
+  ".cache",
+  ".gradle",
+  ".mypy_cache",
+  ".next",
+  ".nuxt",
+  ".pytest_cache",
+  ".ruff_cache",
+  ".svm",
+  ".tmp",
+  ".turbo",
+  ".venv",
+  "__pycache__",
+  "artifacts",
+  "bin",
+  "broadcast",
+  "build",
+  "cache",
+  "coverage",
+  "dist",
+  "node_modules",
+  "obj",
+  "out",
+  "runs",
+  "target",
+  "typechain-types",
+  "vendor",
+  "venv",
+  "zig-cache",
+  "zig-out",
+]);
+
+function isRebuildableSandboxDirectory(name: string): boolean {
+  return REBUILDABLE_SANDBOX_DIRECTORIES.has(name.toLowerCase());
+}
+
+function hasBaselineDescendant(baselineFiles: ReadonlySet<string>, directory: string): boolean {
+  const prefix = `${directory}/`;
+  for (const file of baselineFiles) {
+    if (file.startsWith(prefix)) return true;
+  }
+  return false;
 }
 
 function appendLimited(current: string, next: string, maxBytes: number): string {

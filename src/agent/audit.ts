@@ -14,7 +14,7 @@ import { publicPath } from "../util/paths.js";
 import { materialFingerprint, phaseInputFingerprint } from "../util/material-fingerprint.js";
 import { canonicalFindingKey } from "../util/finding-identity.js";
 import { positiveIntegerId } from "../util/ids.js";
-import { listWorkspaceFiles, normalizeRelativePath, prepareSandboxWorkspace, writeSandboxFiles, type SandboxWorkspace } from "../security/sandbox.js";
+import { compactSandboxWorkspace, listWorkspaceFiles, normalizeRelativePath, prepareSandboxWorkspace, writeSandboxFiles, type SandboxWorkspace } from "../security/sandbox.js";
 import { runDifferentialConfirmation, type DifferentialResult } from "./differential.js";
 import { runDischargeChallenge, runRefutation, type RefutationError, type RefutationVerdict } from "./refutation.js";
 import { runAuditLoop } from "./loop.js";
@@ -385,11 +385,13 @@ export async function runAudit(
       await logger.event("audit_verify_done", { index: idx + 1, of: toVerify.length, claim: claimLabel, produced: verifySession.findings.length, stoppedReason: phase.stoppedReason });
       const commandIdPrefix = `${verifyLabel}:`;
       for (const produced of verifySession.findings) if (produced.commandRunId) produced.commandRunId = `${commandIdPrefix}${produced.commandRunId}`;
+      const scratchFiles = [...verifySession.scratchFiles.entries()].map(([scratchPath, content]) => [`${verifyLabel}/${scratchPath}`, content] as [string, string]);
+      await compactCompletedAuditWorkspace(verifyWorkspace, verifySession, logger, "verify", verifyLabel);
       return {
         findings: verifySession.findings,
         steps: phase.steps,
         commandRuns: verifySession.commandRuns.map((run) => ({ ...run, id: `${commandIdPrefix}${run.id}` })),
-        scratchFiles: [...verifySession.scratchFiles.entries()].map(([scratchPath, content]) => [`${verifyLabel}/${scratchPath}`, content]),
+        scratchFiles,
       };
     };
     const verifyResults = await runWithConcurrency(toVerify, Math.max(1, Math.floor(cfg.auditVerifyConcurrency)), (finding, idx) => verifyOne(finding as Record<string, unknown>, idx));
@@ -683,6 +685,7 @@ export async function runAudit(
           recorder.findings(unioned, logger.runDir, "dig checkpoint"); // persist this scope's findings live (content-keyed upsert)
           if (completed) digDone += 1;
           recorder.runScopes(digDone, reportedRunScopesTarget);
+          await compactCompletedAuditWorkspace(ws, digSession, logger, "dig", scope.id);
           return { findings: unioned, outcomes, steps: digSteps, commandRuns: scopedRuns, scratchFiles: scopedScratchFiles, resourceRequests: digSession.resourceRequests ?? [] };
         } catch (error) {
           await resetInFlightScope(scope);
@@ -1775,6 +1778,26 @@ async function copyCorpusIntoWorkspace(workspace: SandboxWorkspace, corpus: Doc[
   });
   await writeSandboxFiles(workspace.absolute, files);
   return files.map((file) => file.path);
+}
+
+async function compactCompletedAuditWorkspace(
+  workspace: SandboxWorkspace,
+  auditSession: Pick<AgentSession, "baselineFiles" | "scratchFiles">,
+  logger: RunLogger,
+  phase: "verify" | "dig",
+  label: string,
+): Promise<void> {
+  if (!auditSession.baselineFiles) return;
+  try {
+    const result = await compactSandboxWorkspace(workspace.absolute, auditSession.baselineFiles, auditSession.scratchFiles);
+    await logger.event("audit_workspace_compacted", { phase, label, ...result });
+  } catch (error) {
+    await logger.event("audit_workspace_compaction_failed", {
+      phase,
+      label,
+      errorCode: (error as NodeJS.ErrnoException).code ?? "unknown",
+    });
+  }
 }
 
 function historyLocation(cfg: AuditorConfig): { outputDir: string; targetName: string; historyDir?: string } {
