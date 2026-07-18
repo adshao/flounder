@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { enforceSubmissionReadiness, needsSubmissionReadinessWork } from "../util/submission-readiness.js";
+import { enforceSubmissionReadiness, isSubmissionReadyDecision, needsSubmissionReadinessWork } from "../util/submission-readiness.js";
 import { canonicalFindingKey } from "../util/finding-identity.js";
 import { phaseInputFingerprint } from "../util/material-fingerprint.js";
 import type {
@@ -150,6 +150,23 @@ export interface ConfirmRow {
   reproCommandId?: string | undefined;
   reportMarkdown?: string | undefined;
 }
+
+export interface ConfirmDecisionAdjudicationInput {
+  recommendation: "submit-candidate" | "drop";
+  rationale: string;
+  evidenceDecisionId?: number | undefined;
+  submissionConfidence?: "low" | "medium" | "high" | undefined;
+  gateEvidence?: {
+    scope: string;
+    liveImpact: string;
+    knownIssue: string;
+    payout: string;
+  } | undefined;
+}
+
+export type ConfirmDecisionAdjudicationResult =
+  | { ok: true; decision: Record<string, unknown> }
+  | { ok: false; error: string };
 
 export interface Coverage {
   total: number;
@@ -444,6 +461,8 @@ CREATE TABLE IF NOT EXISTS confirm_decision(
   human_gates TEXT,
   engagement_profile_json TEXT,
   adjudication_json TEXT,
+  operator_adjudication_json TEXT,
+  adjudicated_at TEXT,
   merged_from_json TEXT,
   repro_command_id TEXT,
   report_markdown TEXT,
@@ -622,6 +641,8 @@ const ADDITIVE_COLUMNS = [
   ["confirm_decision", "human_gates", "ALTER TABLE confirm_decision ADD COLUMN human_gates TEXT"],
   ["confirm_decision", "engagement_profile_json", "ALTER TABLE confirm_decision ADD COLUMN engagement_profile_json TEXT"],
   ["confirm_decision", "adjudication_json", "ALTER TABLE confirm_decision ADD COLUMN adjudication_json TEXT"],
+  ["confirm_decision", "operator_adjudication_json", "ALTER TABLE confirm_decision ADD COLUMN operator_adjudication_json TEXT"],
+  ["confirm_decision", "adjudicated_at", "ALTER TABLE confirm_decision ADD COLUMN adjudicated_at TEXT"],
   ["confirm_decision", "merged_from_json", "ALTER TABLE confirm_decision ADD COLUMN merged_from_json TEXT"],
   ["confirm_decision", "repro_command_id", "ALTER TABLE confirm_decision ADD COLUMN repro_command_id TEXT"],
   ["confirm_decision", "severity", "ALTER TABLE confirm_decision ADD COLUMN severity TEXT"],
@@ -661,6 +682,14 @@ function confirmMemberKeys(member: string): string[] {
   const embedded = cleaned.match(/\b(k[0-9a-z]+)\b/i)?.[1];
   if (embedded) add(embedded);
   return [...keys];
+}
+
+function decisionMemberKeySet(row: Record<string, unknown>): Set<string> {
+  const keys = new Set<string>();
+  for (const member of parseJsonArray(row.members_json)) {
+    for (const key of confirmMemberKeys(String(member))) keys.add(key);
+  }
+  return keys;
 }
 
 const SEVERITY_RANK: Record<string, number> = {
@@ -2816,6 +2845,143 @@ export class MetadataStore {
     return this.db.prepare("SELECT * FROM confirm_decision WHERE id = ?").get(id) as Record<string, unknown> | undefined;
   }
 
+  /** Resolve operator-only submission gates without weakening execution confirmation.
+   * A submit-candidate may reuse evidence only from the same project, material snapshot,
+   * and canonical bug membership. The original machine decision is retained as an audit trail. */
+  adjudicateConfirmDecision(id: number, input: ConfirmDecisionAdjudicationInput): ConfirmDecisionAdjudicationResult {
+    const target = this.getConfirmDecision(id);
+    if (!target) return { ok: false, error: "no such confirm decision" };
+    const rationale = input.rationale.trim();
+    if (!rationale) return { ok: false, error: "rationale is required" };
+    if (input.recommendation !== "submit-candidate" && input.recommendation !== "drop") {
+      return { ok: false, error: "recommendation must be submit-candidate or drop" };
+    }
+
+    return this.transaction(() => {
+      const ts = now();
+      const originalAdjudication = target.adjudication_json ? jsonParseOrNull(String(target.adjudication_json)) : undefined;
+      const operatorRecord: Record<string, unknown> = {
+        recommendation: input.recommendation,
+        rationale,
+        reviewed_at: ts,
+        original: {
+          recommendation: target.recommendation ?? null,
+          submission_confidence: target.submission_confidence ?? null,
+          evidence_level: target.evidence_level ?? null,
+          human_gates: target.human_gates ?? null,
+          adjudication: originalAdjudication ?? null,
+        },
+      };
+
+      if (input.recommendation === "drop") {
+        this.db.prepare(
+          `UPDATE confirm_decision
+              SET recommendation = 'drop', submission_confidence = 'low',
+                  operator_adjudication_json = ?, adjudicated_at = ?
+            WHERE id = ?`,
+        ).run(JSON.stringify(operatorRecord), ts, id);
+        return { ok: true, decision: this.getConfirmDecision(id)! };
+      }
+
+      if (target.reproduced !== "yes") {
+        return { ok: false, error: "submit-candidate requires a reproduced confirm decision" };
+      }
+      const gates = input.gateEvidence;
+      if (!gates || [gates.scope, gates.liveImpact, gates.knownIssue, gates.payout].some((value) => !value?.trim())) {
+        return { ok: false, error: "submit-candidate requires evidence for scope, liveImpact, knownIssue, and payout" };
+      }
+
+      const evidence = input.evidenceDecisionId == null ? target : this.getConfirmDecision(input.evidenceDecisionId);
+      if (!evidence) return { ok: false, error: "no such evidence confirm decision" };
+      if (Number(evidence.project_id) !== Number(target.project_id)) {
+        return { ok: false, error: "evidence confirm decision belongs to a different project" };
+      }
+      const targetKeys = decisionMemberKeySet(target);
+      const evidenceKeys = decisionMemberKeySet(evidence);
+      if (targetKeys.size === 0 || targetKeys.size !== evidenceKeys.size || ![...targetKeys].every((key) => evidenceKeys.has(key))) {
+        return { ok: false, error: "evidence confirm decision does not cover the same canonical bug" };
+      }
+      if (evidence.reproduced !== "yes" || !isRealTargetEvidenceLevel(String(evidence.evidence_level ?? ""))) {
+        return { ok: false, error: "evidence confirm decision is not real-target or local-fork reproduced" };
+      }
+      if (!String(evidence.repro_evidence ?? "").trim() || !String(evidence.repro_command_id ?? "").trim()) {
+        return { ok: false, error: "evidence confirm decision lacks executable reproduction provenance" };
+      }
+
+      const targetRun = target.run_id == null ? undefined : this.getRun(Number(target.run_id));
+      const evidenceRun = evidence.run_id == null ? undefined : this.getRun(Number(evidence.run_id));
+      const targetMaterial = String(targetRun?.material_fingerprint ?? "").trim();
+      const evidenceMaterial = String(evidenceRun?.material_fingerprint ?? "").trim();
+      if (!targetMaterial || !evidenceMaterial || targetMaterial !== evidenceMaterial) {
+        return { ok: false, error: "evidence confirm decision has missing or different prepared material" };
+      }
+
+      const payout = isRecord(originalAdjudication) ? originalAdjudication.payout_estimate : undefined;
+      const payoutRecord = payout && typeof payout === "object" && !Array.isArray(payout)
+        ? payout as Record<string, unknown>
+        : {};
+      const finalAdjudication = {
+        gates: [
+          { id: "scope", status: "pass", evidence: gates.scope.trim() },
+          { id: "live_impact", status: "pass", evidence: gates.liveImpact.trim() },
+          { id: "known_issue", status: "pass", evidence: gates.knownIssue.trim() },
+          { id: "payout", status: "pass", evidence: gates.payout.trim() },
+        ],
+        scope_status: "pass",
+        live_impact_status: "pass",
+        known_issue_status: "pass",
+        payout_status: "pass",
+        payout_estimate: {
+          ...payoutRecord,
+          status: "estimated",
+          basis: gates.payout.trim(),
+        },
+        operator_review: {
+          reviewed_at: ts,
+          rationale,
+          evidence_decision_id: Number(evidence.id),
+        },
+      };
+      const submissionConfidence = input.submissionConfidence ?? "medium";
+      const candidate = {
+        ...target,
+        recommendation: "submit-candidate",
+        evidence_level: evidence.evidence_level,
+        submission_confidence: submissionConfidence,
+        repro_evidence: evidence.repro_evidence,
+        repro_command_id: evidence.repro_command_id,
+        corroboration: evidence.corroboration ?? target.corroboration,
+        human_gates: null,
+        adjudication_json: JSON.stringify(finalAdjudication),
+      };
+      if (!isSubmissionReadyDecision(candidate, { requireImpactInventory: false })) {
+        return { ok: false, error: "operator adjudication did not satisfy submission readiness" };
+      }
+
+      operatorRecord.evidence_decision_id = Number(evidence.id);
+      operatorRecord.material_fingerprint = targetMaterial;
+      operatorRecord.gate_evidence = gates;
+      this.db.prepare(
+        `UPDATE confirm_decision
+            SET recommendation = 'submit-candidate', evidence_level = ?, submission_confidence = ?,
+                repro_evidence = ?, repro_command_id = ?, corroboration = ?, human_gates = NULL,
+                adjudication_json = ?, operator_adjudication_json = ?, adjudicated_at = ?
+          WHERE id = ?`,
+      ).run(
+        String(evidence.evidence_level),
+        submissionConfidence,
+        String(evidence.repro_evidence),
+        String(evidence.repro_command_id),
+        sqlText(evidence.corroboration ?? target.corroboration),
+        JSON.stringify(finalAdjudication),
+        JSON.stringify(operatorRecord),
+        ts,
+        id,
+      );
+      return { ok: true, decision: this.getConfirmDecision(id)! };
+    });
+  }
+
   /** Persist the final submission report for one real-target decision. Finding-level reports
    * remain independent evidence summaries; this is the decision-level submission package. */
   setConfirmDecisionReport(projectId: number, decisionId: number, markdown: string): boolean {
@@ -3445,11 +3611,12 @@ export class MetadataStore {
 
   // --- internals ------------------------------------------------------------
 
-  private transaction(fn: () => void, mode: "deferred" | "immediate" = "deferred"): void {
+  private transaction<T>(fn: () => T, mode: "deferred" | "immediate" = "deferred"): T {
     this.db.exec(mode === "immediate" ? "BEGIN IMMEDIATE" : "BEGIN");
     try {
-      fn();
+      const result = fn();
       this.db.exec("COMMIT");
+      return result;
     } catch (error) {
       this.db.exec("ROLLBACK");
       throw error;

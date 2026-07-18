@@ -34,6 +34,7 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
       "PATCH /api/projects/:uuid", "DELETE /api/projects/:uuid",
       "POST /api/projects/:uuid/runs", "GET /api/projects/:uuid/findings",
       "GET /api/findings/:id/lifecycle", "POST /api/findings/:id/retry",
+      "POST /api/confirm-decisions/:id/adjudicate",
       "GET /api/projects/:uuid/scopes", "GET /api/projects/:uuid/backlog", "GET /api/projects/:uuid/confirm-decisions",
       "PATCH /api/backlog/:id",
       "GET /api/providers", "POST /api/providers", "GET /api/providers/:id",
@@ -2154,6 +2155,206 @@ test("api: report launch queues only reproduced real-target findings that were n
     const conflictRecovered = await post(`/api/projects/${created.uuid}/runs`, { verb: "report", findingIds: [conflicted.id] });
     assert.equal(conflictRecovered.status, 200);
     assert.ok((await conflictRecovered.json()).jobId);
+  });
+});
+
+test("api: operator adjudication requires correlated real-target evidence before report", async () => {
+  await withServer(async (base, out) => {
+    const post = (url, body) => fetch(base + url, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const created = await (await post("/api/projects", { name: "operator-adjudication", sourcePaths: ["./src"] })).json();
+    const store = MetadataStore.openForOutput(out);
+    let findingId;
+    let evidenceDecisionId;
+    let targetDecisionId;
+    try {
+      const auditRun = store.startRun({
+        projectId: created.id,
+        kind: "audit",
+        runDir: path.join(out, "operator-adjudication-audit"),
+        materialFingerprint: "sha256:operator-adjudication",
+      });
+      store.upsertFindings(created.id, auditRun, [{
+        findingKey: "koperatorgate",
+        title: "Delegated role is inert",
+        location: "contracts/Access.sol:42",
+        severity: "low",
+        status: "confirmed-differential",
+      }, {
+        findingKey: "kunrelatedgate",
+        title: "Unrelated confirmed behavior",
+        location: "contracts/Other.sol:10",
+        severity: "low",
+        status: "confirmed-executable",
+      }]);
+      findingId = Number(store.queryFindings(created.id, { search: "Delegated role is inert" })[0].id);
+      store.finishRun(auditRun, "done");
+
+      const evidenceRun = store.startRun({
+        projectId: created.id,
+        kind: "confirm",
+        runDir: path.join(out, "operator-adjudication-evidence"),
+        materialFingerprint: "sha256:operator-adjudication",
+      });
+      store.upsertConfirmDecisions(created.id, evidenceRun, [{
+        bug: "Fork reproduction with incomplete engagement context",
+        reproduced: "yes",
+        recommendation: "needs-human",
+        members: ["koperatorgate"],
+        evidenceLevel: "local-fork-reproduced",
+        reproEvidence: "cmd-fork changed three role bits through the deployed proxy on a pinned local fork",
+        reproCommandId: "cmd-fork",
+        humanGates: "Known-issue review is pending.",
+        engagementProfile: { policy_kind: "source_review", required_gates: ["scope"] },
+      }]);
+      evidenceDecisionId = Number(store.listConfirmDecisions(created.id)[0].id);
+      store.finishRun(evidenceRun, "done");
+
+      const targetRun = store.startRun({
+        projectId: created.id,
+        kind: "confirm",
+        runDir: path.join(out, "operator-adjudication-policy"),
+        materialFingerprint: "sha256:operator-adjudication",
+      });
+      store.upsertConfirmDecisions(created.id, targetRun, [{
+        bug: "Delegated role is inert",
+        reproduced: "yes",
+        recommendation: "needs-human",
+        members: ["koperatorgate"],
+        evidenceLevel: "source-only-local-confirmed",
+        reproEvidence: "The exact deployed runtime was executed locally; live RPC was unavailable.",
+        reproCommandId: "cmd-local",
+        humanGates: "Live impact, novelty, and payout remain pending.",
+        engagementProfile: {
+          policy_kind: "bug_bounty",
+          platform: "Example bounty",
+          required_gates: ["scope", "live_impact", "known_issue", "payout"],
+        },
+        adjudication: {
+          gates: [
+            { id: "scope", status: "pass" },
+            { id: "live_impact", status: "unknown" },
+            { id: "known_issue", status: "needs-human" },
+            { id: "payout", status: "unknown" },
+          ],
+          payout_estimate: { status: "unknown", eligible_min_usd: 500, eligible_max_usd: 1000 },
+        },
+      }]);
+      targetDecisionId = Number(store.listConfirmDecisions(created.id).find((row) => Number(row.run_id) === targetRun).id);
+      store.finishRun(targetRun, "done");
+
+      const unrelatedRun = store.startRun({
+        projectId: created.id,
+        kind: "confirm",
+        runDir: path.join(out, "operator-adjudication-unrelated"),
+        materialFingerprint: "sha256:operator-adjudication",
+      });
+      store.upsertConfirmDecisions(created.id, unrelatedRun, [{
+        bug: "Unrelated same-project reproduction",
+        reproduced: "yes",
+        recommendation: "needs-human",
+        members: ["kunrelatedgate"],
+        evidenceLevel: "local-fork-reproduced",
+        reproEvidence: "cmd-unrelated reproduced another bug on a pinned local fork",
+        reproCommandId: "cmd-unrelated",
+      }]);
+      store.finishRun(unrelatedRun, "done");
+    } finally {
+      store.close();
+    }
+
+    const missingRationale = await post(`/api/confirm-decisions/${targetDecisionId}/adjudicate`, {
+      recommendation: "submit-candidate",
+      rationale: "",
+    });
+    assert.equal(missingRationale.status, 400);
+
+    const missingGateEvidence = await post(`/api/confirm-decisions/${targetDecisionId}/adjudicate`, {
+      recommendation: "submit-candidate",
+      rationale: "Reviewed the external submission gates.",
+      evidenceDecisionId,
+      gateEvidence: { scope: "In scope", liveImpact: "Live fork passed", knownIssue: "No disclosure found", payout: "" },
+    });
+    assert.equal(missingGateEvidence.status, 409);
+
+    const other = await (await post("/api/projects", { name: "operator-adjudication-other", sourcePaths: ["./src"] })).json();
+    const otherStore = MetadataStore.openForOutput(out);
+    let otherDecisionId;
+    try {
+      const otherRun = otherStore.startRun({
+        projectId: other.id,
+        kind: "confirm",
+        runDir: path.join(out, "operator-adjudication-other-confirm"),
+        materialFingerprint: "sha256:operator-adjudication",
+      });
+      otherStore.upsertConfirmDecisions(other.id, otherRun, [{
+        bug: "Unrelated reproduced bug",
+        reproduced: "yes",
+        recommendation: "needs-human",
+        members: ["koperatorgate"],
+        evidenceLevel: "local-fork-reproduced",
+        reproEvidence: "cmd-other reproduced an unrelated effect on a local fork",
+        reproCommandId: "cmd-other",
+      }]);
+      otherDecisionId = Number(otherStore.listConfirmDecisions(other.id)[0].id);
+      otherStore.finishRun(otherRun, "done");
+    } finally {
+      otherStore.close();
+    }
+    const crossProject = await post(`/api/confirm-decisions/${targetDecisionId}/adjudicate`, {
+      recommendation: "submit-candidate",
+      rationale: "Reviewed the external submission gates.",
+      evidenceDecisionId: otherDecisionId,
+      gateEvidence: { scope: "In scope", liveImpact: "Live fork passed", knownIssue: "No disclosure found", payout: "Reward tier applies" },
+    });
+    assert.equal(crossProject.status, 409);
+    assert.match((await crossProject.json()).error, /different project/);
+
+    const decisions = await (await fetch(base + `/api/projects/${created.uuid}/confirm-decisions?includeStale=true`)).json();
+    const unrelatedDecisionId = decisions.confirmDecisions.find((row) => row.bug === "Unrelated same-project reproduction").id;
+    const differentBug = await post(`/api/confirm-decisions/${targetDecisionId}/adjudicate`, {
+      recommendation: "submit-candidate",
+      rationale: "Reviewed the external submission gates.",
+      evidenceDecisionId: unrelatedDecisionId,
+      gateEvidence: { scope: "In scope", liveImpact: "Live fork passed", knownIssue: "No disclosure found", payout: "Reward tier applies" },
+    });
+    assert.equal(differentBug.status, 409);
+    assert.match((await differentBug.json()).error, /same canonical bug/);
+
+    const adjudicated = await post(`/api/confirm-decisions/${targetDecisionId}/adjudicate`, {
+      recommendation: "submit-candidate",
+      rationale: "The same-material fork evidence and external bounty checks settle every submission gate.",
+      evidenceDecisionId,
+      submissionConfidence: "medium",
+      gateEvidence: {
+        scope: "The affected source path is in the pinned bounty scope.",
+        liveImpact: "The pinned local fork exercised the deployed proxy and changed three role bits.",
+        knownIssue: "Bounded public searches found no matching disclosure or fix.",
+        payout: "The published Low tier is eligible for an estimated $500-$1,000 award.",
+      },
+    });
+    assert.equal(adjudicated.status, 200);
+    const decision = (await adjudicated.json()).decision;
+    assert.equal(decision.recommendation, "submit-candidate");
+    assert.equal(decision.evidence_level, "local-fork-reproduced");
+    assert.equal(decision.repro_command_id, "cmd-fork");
+    assert.equal(decision.human_gates, null);
+    assert.equal(decision.engagement_profile.policy_kind, "bug_bounty");
+    assert.equal(decision.adjudication.known_issue_status, "pass");
+    assert.equal(decision.operator_adjudication.evidence_decision_id, evidenceDecisionId);
+    assert.equal(decision.operator_adjudication.original.recommendation, "needs-human");
+
+    const report = await post(`/api/projects/${created.uuid}/runs`, { verb: "report", findingIds: [findingId] });
+    assert.equal(report.status, 200);
+    const job = (await (await fetch(base + `/api/jobs/${(await report.json()).jobId}`)).json()).job;
+    const spec = JSON.parse(job.spec_json);
+    assert.equal(spec.reportFindings.length, 1);
+    assert.equal(spec.reportFindings[0].decisionId, targetDecisionId);
+    assert.equal(spec.reportFindings[0].evidenceLevel, "local-fork-reproduced");
+    assert.equal(spec.reportFindings[0].decisions[0].engagement_profile.policy_kind, "bug_bounty");
   });
 });
 
