@@ -27,6 +27,8 @@ export type SandboxNetworkMode = "none" | "enabled";
 export const DEFAULT_SANDBOX_IMAGE = "flounder-sandbox:latest";
 const APPLE_CONTAINER_SEALED_NETWORK = "flounder-sealed";
 const APPLE_CONTAINER_NETWORK_DNS = ["1.1.1.1", "8.8.8.8"] as const;
+const APPLE_CONTAINER_COMPLETED_CLEANUP_GRACE_MS = 30_000;
+const APPLE_CONTAINER_TIMEOUT_CLIENT_GRACE_MS = 500;
 const CACHE_TEMP_PREFIX = ".flounder-cache-";
 
 export interface SandboxExecutionOptions {
@@ -566,6 +568,17 @@ async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<
     env: containerClientEnv(),
     timeoutMs: input.command.timeoutMs ?? 120_000,
     maxLogBytes: input.maxLogBytes,
+    onTimeout: async () => {
+      // `container run --rm` may outlive an already-stopped container while its
+      // XPC client unwinds. Runtime state, not client lifetime, decides whether
+      // the target command actually exceeded its deadline.
+      const state = await inspectAppleContainerState(containerName);
+      if (state === "stopped" || state === "absent") return "completed";
+      await killAppleContainer(containerName);
+      return "timed-out";
+    },
+    timeoutKillDelayMs: APPLE_CONTAINER_TIMEOUT_CLIENT_GRACE_MS,
+    timeoutCompletionGraceMs: APPLE_CONTAINER_COMPLETED_CLEANUP_GRACE_MS,
   });
   if (result.timedOut) {
     // The Apple CLI may still be unwinding its `container run` XPC session when
@@ -584,13 +597,26 @@ async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<
   return result;
 }
 
-async function runSpawnedProcess(input: { program: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxLogBytes: number; onTimeout?: () => void; timeoutKillDelayMs?: number }): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+type ProcessTimeoutDisposition = "timed-out" | "completed";
+
+async function runSpawnedProcess(input: {
+  program: string;
+  args: string[];
+  cwd: string;
+  env: NodeJS.ProcessEnv;
+  timeoutMs: number;
+  maxLogBytes: number;
+  onTimeout?: () => void | ProcessTimeoutDisposition | Promise<void | ProcessTimeoutDisposition>;
+  timeoutKillDelayMs?: number;
+  timeoutCompletionGraceMs?: number;
+}): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
   let stdout = "";
   let stderr = "";
   let timedOut = false;
   let exitCode: number | null = null;
   let terminateTimer: ReturnType<typeof setTimeout> | undefined;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
+  let timeoutHandling: Promise<void> | undefined;
   const child = spawn(input.program, input.args, {
     cwd: input.cwd,
     shell: false,
@@ -603,15 +629,32 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
     }, 2_000);
   };
   const timer = setTimeout(() => {
-    timedOut = true;
-    try {
-      input.onTimeout?.();
-    } catch (error) {
-      stderr = appendLimited(stderr, error instanceof Error ? error.message : String(error), input.maxLogBytes);
-    }
-    const delay = Math.max(0, input.timeoutKillDelayMs ?? 0);
-    if (delay > 0) terminateTimer = setTimeout(terminateChild, delay);
-    else terminateChild();
+    timeoutHandling = (async () => {
+      let disposition: ProcessTimeoutDisposition = "timed-out";
+      try {
+        if ((await input.onTimeout?.()) === "completed") disposition = "completed";
+      } catch (error) {
+        stderr = appendLimited(stderr, error instanceof Error ? error.message : String(error), input.maxLogBytes);
+      }
+
+      if (disposition === "completed") {
+        timedOut = false;
+        if (exitCode !== null) return;
+        const grace = Math.max(0, input.timeoutCompletionGraceMs ?? 0);
+        terminateTimer = setTimeout(() => {
+          if (exitCode !== null) return;
+          timedOut = true;
+          terminateChild();
+        }, grace);
+        return;
+      }
+
+      timedOut = true;
+      if (exitCode !== null) return;
+      const delay = Math.max(0, input.timeoutKillDelayMs ?? 0);
+      if (delay > 0) terminateTimer = setTimeout(terminateChild, delay);
+      else terminateChild();
+    })();
   }, input.timeoutMs);
 
   child.stdout?.on("data", (chunk) => {
@@ -632,6 +675,7 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
     });
   });
   clearTimeout(timer);
+  if (timeoutHandling) await timeoutHandling;
   if (terminateTimer) clearTimeout(terminateTimer);
   if (killTimer) clearTimeout(killTimer);
   return { stdout, stderr, exitCode, timedOut };
@@ -1312,6 +1356,42 @@ async function forceRemoveAppleContainer(name: string): Promise<{ ok: boolean; m
     }
   }
   return { ok: false, message };
+}
+
+type AppleContainerState = "running" | "stopped" | "absent" | "unknown";
+
+async function inspectAppleContainerState(name: string): Promise<AppleContainerState> {
+  const result = await runSpawnedProcess({
+    program: "container",
+    args: ["inspect", name],
+    cwd: process.cwd(),
+    env: containerClientEnv(),
+    timeoutMs: 5_000,
+    maxLogBytes: 8_000,
+  });
+  const output = [result.stdout, result.stderr].filter(Boolean).join("\n").trim();
+  if (appleContainerIsAlreadyAbsent(output)) return "absent";
+  if (result.exitCode !== 0 || result.timedOut) return "unknown";
+  try {
+    const rows = JSON.parse(result.stdout) as Array<{ status?: { state?: unknown } }>;
+    const state = rows[0]?.status?.state;
+    if (state === "stopped") return "stopped";
+    if (typeof state === "string") return "running";
+  } catch {
+    // Unknown inspect output is never treated as proof that a command finished.
+  }
+  return "unknown";
+}
+
+async function killAppleContainer(name: string): Promise<void> {
+  await runSpawnedProcess({
+    program: "container",
+    args: ["kill", "--signal", "KILL", name],
+    cwd: process.cwd(),
+    env: containerClientEnv(),
+    timeoutMs: 5_000,
+    maxLogBytes: 2_000,
+  });
 }
 
 function appleContainerIsAlreadyAbsent(output: string): boolean {

@@ -99,11 +99,21 @@ async function fakeContainerCli(options = {}) {
   await writeFile(bin, `#!/usr/bin/env bash
 LOG_FILE=${JSON.stringify(options.logFile ?? "")}
 RUN_SLEEP_SECONDS=${JSON.stringify(String(options.runSleepSeconds ?? 0))}
+INSPECT_STATE=${JSON.stringify(String(options.inspectState ?? ""))}
 DELETE_FAIL_COUNT=${JSON.stringify(String(options.deleteFailCount ?? 0))}
 DELETE_STATE_FILE=${JSON.stringify(deleteStateFile)}
 if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then printf '%s' ${JSON.stringify(options.imageInspectStderr ?? "")} >&2; exit ${options.imageInspectExit ?? 0}; fi
 if [ "$1" = "network" ] && [ "$2" = "inspect" ]; then exit ${options.networkInspectExit ?? 0}; fi
 if [ "$1" = "network" ] && [ "$2" = "create" ]; then exit ${options.networkCreateExit ?? 0}; fi
+if [ "$1" = "inspect" ]; then
+  if [ -n "$LOG_FILE" ]; then printf 'INSPECT:%s\n' "\${2:-}" >> "$LOG_FILE"; fi
+  if [ -n "$INSPECT_STATE" ]; then printf '[{"status":{"state":"%s"}}]\n' "$INSPECT_STATE"; exit 0; fi
+  exit 1
+fi
+if [ "$1" = "kill" ]; then
+  if [ -n "$LOG_FILE" ]; then printf 'KILL:%s:%s:%s\n' "\${2:-}" "\${3:-}" "\${4:-}" >> "$LOG_FILE"; fi
+  exit ${options.killExit ?? 0}
+fi
 if [ "$1" = "delete" ]; then
   if [ -n "$LOG_FILE" ]; then printf 'DELETE:%s\\n' "\${3:-}" >> "$LOG_FILE"; fi
   DELETE_COUNT=0
@@ -494,7 +504,7 @@ test("sandbox Apple container backend force-deletes timed-out containers", async
   const workspace = await tempDir("flounder-sandbox-apple-timeout-");
   const logDir = await tempDir("flounder-sandbox-apple-timeout-log-");
   const logFile = path.join(logDir, "container.log");
-  const fakeBin = await fakeContainerCli({ logFile, runSleepSeconds: 5, deleteFailCount: 1 });
+  const fakeBin = await fakeContainerCli({ logFile, runSleepSeconds: 5, inspectState: "running", deleteFailCount: 1 });
   const oldPath = process.env.PATH;
   try {
     process.env.PATH = `${fakeBin}${path.delimiter}${oldPath ?? ""}`;
@@ -510,6 +520,37 @@ test("sandbox Apple container backend force-deletes timed-out containers", async
     assert.equal(result.timedOut, true);
     const cleanupLog = await waitForFileMatch(logFile, /DELETE:flounder-[^\n]+\nDELETE:flounder-/);
     assert.equal(cleanupLog.match(/DELETE:flounder-/g)?.length, 2);
+    assert.match(cleanupLog, /KILL:--signal:KILL:flounder-/);
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(workspace, { recursive: true, force: true });
+    await rm(logDir, { recursive: true, force: true });
+    await rm(fakeBin, { recursive: true, force: true });
+  }
+});
+
+test("sandbox Apple container backend does not misclassify completed commands while the client unwinds", async () => {
+  const workspace = await tempDir("flounder-sandbox-apple-completed-timeout-");
+  const logDir = await tempDir("flounder-sandbox-apple-completed-timeout-log-");
+  const logFile = path.join(logDir, "container.log");
+  const fakeBin = await fakeContainerCli({ logFile, runSleepSeconds: 0.2, inspectState: "stopped" });
+  const oldPath = process.env.PATH;
+  try {
+    process.env.PATH = `${fakeBin}${path.delimiter}${oldPath ?? ""}`;
+    const result = await runSandboxCommand(
+      { program: "node", args: ["--test"], timeoutMs: 100 },
+      workspace,
+      8000,
+      [],
+      undefined,
+      { backend: "apple-container", image: "flounder-sandbox:completed", network: "enabled" },
+    );
+
+    assert.equal(result.exitCode, 0);
+    assert.equal(result.timedOut, false);
+    const log = await readFile(logFile, "utf8");
+    assert.match(log, /INSPECT:flounder-/);
+    assert.doesNotMatch(log, /KILL:|DELETE:/);
   } finally {
     process.env.PATH = oldPath;
     await rm(workspace, { recursive: true, force: true });
