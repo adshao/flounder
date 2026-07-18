@@ -88,8 +88,9 @@ export function unionFindClusters(ids: string[], equivalent: (a: string, b: stri
  * Run the fix-equivalence matrix over reproduced bugs and return their clusters. Only
  * items that carry BOTH a fix and a passing PoC (with a blocked-exploit signal) can be
  * probed; an item missing either cannot be tested and stays its own singleton cluster
- * (honest — the framework never merges what it cannot prove). Bounded by `maxItems` so a
- * large set cannot trigger an O(N^2) explosion of compiles/forks.
+ * (honest — the framework never merges what it cannot prove). Confirm is unbounded by
+ * default, so the full matrix runs unless a caller explicitly supplies `maxItems` for a
+ * bounded run.
  */
 export async function consolidateByFixEquivalence(input: {
   items: FixEquivItem[];
@@ -103,8 +104,8 @@ export async function consolidateByFixEquivalence(input: {
   const { items } = input;
   const ids = items.map((item) => item.id);
   const edges: FixEquivEdge[] = [];
-  const maxItems = input.maxItems ?? 8;
-  if (items.length > maxItems) {
+  const maxItems = input.maxItems;
+  if (maxItems !== undefined && items.length > maxItems) {
     await input.logger.event("audit_confirm_equiv_skipped", { items: items.length, maxItems });
     return { clusters: ids.map((id) => [id]), edges, skipped: true };
   }
