@@ -706,18 +706,52 @@ export async function runAudit(
         }
       };
       await logger.event("audit_dig_concurrent_start", { scopes: toDig.length, target: reportedRunScopesTarget, concurrency });
-      const perScope: Awaited<ReturnType<typeof digScope>>[] = [];
+      type DigResult = Awaited<ReturnType<typeof digScope>>;
+      type SettledDig = { index: number; result: DigResult } | { index: number; error: unknown };
+      const settledResults: Array<{ index: number; result: DigResult }> = [];
+      const inFlight = new Map<number, Promise<SettledDig>>();
       let cursor = 0;
-      while (cursor < toDig.length && digDone < reportedRunScopesTarget) {
-        const remaining = reportedRunScopesTarget - digDone;
-        const batchSize = Math.min(concurrency, remaining, toDig.length - cursor);
-        const batch = toDig.slice(cursor, cursor + batchSize);
-        cursor += batchSize;
-        perScope.push(...await runWithConcurrency(batch, concurrency, digScope));
+      const refreshConcurrentTarget = async (): Promise<void> => {
+        const targetNow = effectiveRunScopesTarget(digDone);
+        if (targetNow === reportedRunScopesTarget) return;
+        reportedRunScopesTarget = targetNow;
+        recorder.runScopes(digDone, reportedRunScopesTarget);
+        await logger.event("audit_dig_target_changed", { done: digDone, target: reportedRunScopesTarget });
+      };
+      const fillAvailableSlots = async (): Promise<void> => {
+        await refreshConcurrentTarget();
+        // Reserve one target slot for every active scope. A scope that hands off
+        // incomplete coverage does not increment digDone, so its released slot is
+        // immediately backfilled by the next pending scope. This keeps the bounded
+        // pool busy without auditing beyond the operator's requested target.
+        while (cursor < toDig.length && inFlight.size < concurrency && digDone + inFlight.size < reportedRunScopesTarget) {
+          const index = cursor;
+          cursor += 1;
+          const task = digScope(toDig[index] as AuditScope).then<SettledDig, SettledDig>(
+            (result) => ({ index, result }),
+            (error: unknown) => ({ index, error }),
+          );
+          inFlight.set(index, task);
+        }
+      };
+
+      await fillAvailableSlots();
+      while (inFlight.size > 0) {
+        const settled = await Promise.race(inFlight.values());
+        inFlight.delete(settled.index);
+        if ("error" in settled) {
+          // Every task is wrapped into a fulfilled SettledDig, so draining here
+          // cannot mask the original error or leave an unhandled rejection.
+          await Promise.all(inFlight.values());
+          throw settled.error;
+        }
+        settledResults.push(settled);
+        await fillAvailableSlots();
       }
+      const perScope = settledResults.sort((a, b) => a.index - b.index).map(({ result }) => result);
       // Merge every dig's findings, transcript steps, and command runs into the run
       // aggregates so the persisted artifacts reflect the concurrent digs, not just
-      // the map phase. runWithConcurrency preserves scope order.
+      // the map phase. Settled results are restored to scope order above.
       for (const result of perScope) {
         aggregated.push(...result.findings);
         newScopeOutcomes.push(...result.outcomes);
@@ -1726,7 +1760,7 @@ async function writeAppendMapExistingScopesSeed(scopes: AuditScope[], workspaceC
 }
 
 // Bounded worker pool: run `worker` over `items` with at most `limit` in flight,
-// returning results in input order. Used to deep-audit scopes concurrently.
+// returning results in input order. Used to verify findings concurrently.
 async function runWithConcurrency<T, R>(items: T[], limit: number, worker: (item: T, index: number) => Promise<R>): Promise<R[]> {
   const results = new Array<R>(items.length);
   let next = 0;

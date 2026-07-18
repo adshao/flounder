@@ -3336,6 +3336,89 @@ test("map → dig --dig-concurrency audits scopes in parallel, isolated per-scop
   }
 });
 
+test("map → dig keeps concurrency slots full when one scope finishes early", async () => {
+  const dir = await tempDir();
+  try {
+    class RollingDigProbeLlmClient {
+      constructor() {
+        this.mock = new MockAuditLlmClient();
+        this.events = [];
+        this.started = new Set();
+        this.finished = new Set();
+      }
+
+      async complete(input) {
+        const scopeId = input.user.match(/scope\s+(S\d+)/i)?.[1];
+        if (scopeId && !this.started.has(scopeId)) {
+          this.started.add(scopeId);
+          this.events.push(`start:${scopeId}`);
+          if (scopeId === "S1") await new Promise((resolve) => setTimeout(resolve, 1_500));
+        }
+
+        let response = await this.mock.complete(input);
+        const parsed = JSON.parse(response);
+        if (input.user.includes("Phase: MAP") && parsed.tool === "write" && parsed.args?.path === "scopes.json") {
+          const scopes = JSON.parse(parsed.args.content);
+          scopes.push({
+            id: "S3",
+            obligation: "tertiary advice region must bind to its source",
+            region: "halo2_missing_constraint.rs:5",
+            lenses: ["unbound-input"],
+            exposure: "medium",
+            difficulty: "medium",
+            score: 50,
+            why: "a third scope exposes whether the bounded pool backfills an idle worker slot.",
+          });
+          scopes.push({
+            id: "S4",
+            obligation: "quaternary advice region must bind to its source",
+            region: "halo2_missing_constraint.rs:5",
+            lenses: ["unbound-input"],
+            exposure: "low",
+            difficulty: "medium",
+            score: 40,
+            why: "a fourth scope proves rolling backfill still respects the requested coverage target.",
+          });
+          parsed.args.content = JSON.stringify(scopes);
+          response = JSON.stringify(parsed);
+        }
+        if (scopeId && parsed.done === true && !this.finished.has(scopeId)) {
+          this.finished.add(scopeId);
+          this.events.push(`done:${scopeId}`);
+        }
+        return response;
+      }
+    }
+
+    const cfg = defaultConfig();
+    cfg.targetName = "rolling-concurrency-e2e";
+    cfg.sourcePaths = [fixtures];
+    cfg.corpusPaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditDeep = true;
+    cfg.auditSynthesize = false;
+    cfg.auditMapSteps = 6;
+    cfg.auditDigSteps = 8;
+    cfg.auditMaxScopes = 3;
+    cfg.auditDigSamples = 1;
+    cfg.auditDigMaxSamples = 1;
+    cfg.auditAdaptiveDig = false;
+    cfg.auditDigConcurrency = 2;
+    const llm = new RollingDigProbeLlmClient();
+
+    const { scopeCoverage } = await runAudit(cfg, { llm });
+
+    assert.deepEqual(scopeCoverage, { total: 4, audited: 3, pending: 1, deferred: 0 });
+    const thirdStarted = llm.events.indexOf("start:S3");
+    const slowFinished = llm.events.indexOf("done:S1");
+    assert.ok(thirdStarted >= 0 && slowFinished >= 0, `expected S1 and S3 lifecycle events, got ${llm.events.join(", ")}`);
+    assert.ok(thirdStarted < slowFinished, `S3 should backfill the idle slot before S1 finishes, got ${llm.events.join(", ")}`);
+    assert.ok(!llm.events.includes("start:S4"), `the rolling pool must not reserve work beyond the target, got ${llm.events.join(", ")}`);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("map → dig is resumable: a second run skips map and audits the next pending scope", async () => {
   const dir = await tempDir();
   try {
