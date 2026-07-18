@@ -146,6 +146,7 @@ export function prepareResourceRequests(report: PrepareReport, focusCommand?: Re
     requests.push({
       id: `prepare-${slug(check.tool)}-version`,
       status: "open",
+      origin: "framework-prepare",
       kind: "sandbox-image",
       needed: `Sandbox image with ${check.tool} ${check.expected}`,
       reason: `${check.command} did not match the pinned tool version (${actual}).`,
@@ -163,6 +164,7 @@ export function prepareResourceRequests(report: PrepareReport, focusCommand?: Re
     requests.push({
       id: `prepare-${slug(result.toolchain)}-${slug(result.cwd)}-${slug(result.command)}`,
       status: "open",
+      origin: "framework-prepare",
       kind,
       needed: `Working ${result.toolchain} prepare environment for ${result.cwd}`,
       reason: `Prepare command "${result.command}" in ${result.cwd} ${status}.${diagnostic}`,

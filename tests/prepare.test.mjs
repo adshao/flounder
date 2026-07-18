@@ -373,6 +373,7 @@ test("prepareResourceRequests captures failed Foundry warm-up as product-owned r
       ["forge", "forge build", false],
     ]);
     assert.equal(requests.length, 1);
+    assert.equal(requests[0].origin, "framework-prepare");
     assert.equal(requests[0].kind, "sandbox-image");
     assert.match(requests[0].reason, /forge build/);
     assert.match(requests[0].reason, /Broken pipe/);

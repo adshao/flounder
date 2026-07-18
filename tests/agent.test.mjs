@@ -10,7 +10,7 @@ import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest, splitCommandLineForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
-import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, runAudit, verifyBatchStoppedReason } from "../dist/agent/audit.js";
+import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, runAudit, settleVerifyResourceRequests, verifyBatchStoppedReason } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
@@ -583,6 +583,7 @@ test("discovery backlog artifacts parse and merge without becoming findings", ()
       scope_id: "S1",
       needed: "Foundry image with solc 0.7.6",
       reason: "The native tests cannot compile in the baseline sandbox.",
+      origin: "framework-prepare",
       unblock: "Run the PoC against the project test suite.",
       priority: "high",
     },
@@ -611,6 +612,7 @@ test("discovery backlog artifacts parse and merge without becoming findings", ()
   assert.equal(resources.length, 1);
   assert.equal(resources[0].kind, "sandbox-image");
   assert.equal(resources[0].priority, "high");
+  assert.equal(resources[0].origin, undefined, "model-authored requests cannot forge framework provenance");
 
   const followups = readScratchFollowupScopes(session);
   assert.equal(followups.length, 1);
@@ -669,6 +671,18 @@ test("run health distinguishes blocked, shallow, and coverage-incomplete runs", 
   assert.equal(buildRunHealth({ ...base, infraErrors: 1 }).status, "infra-failed");
   assert.equal(verifyBatchStoppedReason("error", 7, 7), "finished");
   assert.equal(verifyBatchStoppedReason("error", 6, 7), "error");
+});
+
+test("execution-confirmed Verify claims settle only framework prepare resource requests", () => {
+  const requests = [
+    { id: "prepare-cargo-build", status: "open", origin: "framework-prepare", kind: "toolchain", needed: "Working Cargo prepare environment", reason: "cargo build exited 101" },
+    { id: "full-chain-memory", status: "open", kind: "environment", needed: "Higher-memory program-test sandbox", reason: "A lightweight proof is not enough" },
+  ];
+  const confirmed = { title: "Caller-controlled timestamp is accepted", confirmationStatus: "confirmed-executable" };
+
+  assert.deepEqual(settleVerifyResourceRequests(requests, confirmed).map((request) => request.status), ["resolved", "open"]);
+  assert.deepEqual(settleVerifyResourceRequests(requests, { ...confirmed, confirmationStatus: "suspected" }).map((request) => request.status), ["open", "open"]);
+  assert.deepEqual(settleVerifyResourceRequests(requests, { ...confirmed, title: "REFUTED: Caller-controlled timestamp is bound" }).map((request) => request.status), ["open", "open"]);
 });
 
 test("audit sessions settle post-handoff transport errors only after phase-required artifacts exist", () => {

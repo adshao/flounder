@@ -23,6 +23,8 @@ export interface CoverageGap {
 export interface ResourceRequest {
   id: string;
   status: DiscoveryArtifactStatus;
+  /** Trusted framework provenance. Model-authored requests intentionally omit this. */
+  origin?: "framework-prepare";
   kind: "toolchain" | "dependency" | "sandbox-image" | "network" | "credential" | "artifact" | "environment" | "other";
   scopeId?: string;
   findingId?: string;

@@ -319,6 +319,7 @@ export async function runAudit(
       ingestFindingsFromScratch(verifySession);
       const normalizedVerdicts = normalizeVerifyVerdicts(verifySession.findings);
       verifySession.findings = normalizedVerdicts.findings;
+      const primaryVerdict = verifySession.findings[0];
       if (normalizedVerdicts.conflict) {
         if (!phaseFailureReason) phaseFailureReason = "error";
         await logger.event("audit_verify_conflicting_verdicts", {
@@ -329,7 +330,8 @@ export async function runAudit(
         });
       }
       if (verifySession.resourceRequests?.length) {
-        session.resourceRequests = mergeResourceRequests(session.resourceRequests ?? [], verifySession.resourceRequests.map((request) => ({
+        const settledRequests = settleVerifyResourceRequests(verifySession.resourceRequests, primaryVerdict);
+        session.resourceRequests = mergeResourceRequests(session.resourceRequests ?? [], settledRequests.map((request) => ({
           ...request,
           ...(request.findingId ? {} : { findingId: String(originId ?? (claimLabel || idx + 1)) }),
           ...(request.scopeId || !inheritedScopeId ? {} : { scopeId: inheritedScopeId }),
@@ -361,7 +363,6 @@ export async function runAudit(
       // row (status + PoC) rather than inserting a duplicate. The link is positional — claim N is
       // seeded from input finding N — so it survives the verify session renaming the title. Only the
       // primary verdict inherits it; any extra finding the session split out stays its own new row.
-      const primaryVerdict = verifySession.findings[0];
       if (originId !== undefined && primaryVerdict) {
         primaryVerdict.originId = originId;
         if (attempt) primaryVerdict.phaseAttempt = attempt;
@@ -1424,6 +1425,20 @@ function isConfirmed(status: ConfirmationStatus): boolean {
  * passed command attached to `REFUTED:` proves the mitigation, not the bug. */
 export function isExecutionConfirmedFinding(finding: AgentFinding): boolean {
   return !isRefutedFindingTitle(finding.title) && isConfirmed(finding.confirmationStatus);
+}
+
+/** A failed eager/full-project warm-up is no longer a blocker when the same
+ * isolated Verify worker subsequently execution-confirms its primary claim.
+ * Model-authored requests remain open because they may ask for stronger or
+ * more realistic evidence than the command that produced the verdict. */
+export function settleVerifyResourceRequests(
+  requests: ResourceRequest[],
+  primaryVerdict: AgentFinding | undefined,
+): ResourceRequest[] {
+  if (!primaryVerdict || !isExecutionConfirmedFinding(primaryVerdict)) return requests;
+  return requests.map((request) => request.origin === "framework-prepare" && request.status !== "resolved"
+    ? { ...request, status: "resolved" }
+    : request);
 }
 
 /** Collapse same-claim duplicates from one Verify worker and reject contradictory
