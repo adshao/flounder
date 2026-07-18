@@ -376,6 +376,19 @@ const ROUTES: Route[] = [
     handler: confirmDecisionReport,
   }),
   route({
+    method: "POST", path: "/api/confirm-decisions/:id/adjudicate",
+    summary: "Record a constrained operator decision for Confirm submission gates. A submit-candidate requires same-project, same-material, same-bug real-target execution evidence and explicit evidence for every bounty gate.",
+    params: { id: "confirm decision id" },
+    body: {
+      recommendation: "'submit-candidate' | 'drop'",
+      rationale: "string — required operator rationale",
+      evidenceDecisionId: "number? — corroborating Confirm row with real-target execution evidence",
+      submissionConfidence: "'low' | 'medium' | 'high'? (default medium)",
+      gateEvidence: "{ scope, liveImpact, knownIssue, payout } — non-empty evidence strings required for submit-candidate",
+    },
+    handler: confirmDecisionAdjudicate,
+  }),
+  route({
     method: "GET", path: "/api/projects/:uuid/confirm-decisions",
     summary: "List current-material confirm decisions (one per distinct bug). Filter ?reproduced=yes for bugs reproduced on the real target; pass ?includeStale=true to inspect decisions from older prepared material snapshots.",
     params: { uuid: "project UUID" },
@@ -3503,6 +3516,8 @@ function confirmDecisionDisplayRow(row: Record<string, unknown>): Record<string,
   if (engagementProfile) out.engagement_profile = engagementProfile;
   const adjudication = safeParse(row.adjudication_json);
   if (adjudication) out.adjudication = adjudication;
+  const operatorAdjudication = safeParse(row.operator_adjudication_json);
+  if (operatorAdjudication) out.operator_adjudication = operatorAdjudication;
   out.has_report = decisionHasFormalReport(row);
   return out;
 }
@@ -3602,6 +3617,50 @@ function confirmDecisionReport(c: Ctx): void {
     markdown: stored || renderDecisionReportMarkdown(row, linkedFindings),
     source: stored ? "db" : "generated",
   });
+}
+
+async function confirmDecisionAdjudicate(c: Ctx): Promise<void> {
+  const body = (await readBody(c.req)) as {
+    recommendation?: unknown;
+    rationale?: unknown;
+    evidenceDecisionId?: unknown;
+    submissionConfidence?: unknown;
+    gateEvidence?: unknown;
+  };
+  if (body.recommendation !== "submit-candidate" && body.recommendation !== "drop") {
+    return sendJson(c.res, 400, { error: "recommendation must be submit-candidate or drop" });
+  }
+  if (typeof body.rationale !== "string" || !body.rationale.trim()) {
+    return sendJson(c.res, 400, { error: "rationale is required" });
+  }
+  if (body.submissionConfidence !== undefined && !["low", "medium", "high"].includes(String(body.submissionConfidence))) {
+    return sendJson(c.res, 400, { error: "submissionConfidence must be low, medium, or high" });
+  }
+  if (body.evidenceDecisionId !== undefined && (!Number.isInteger(body.evidenceDecisionId) || Number(body.evidenceDecisionId) <= 0)) {
+    return sendJson(c.res, 400, { error: "evidenceDecisionId must be a positive integer" });
+  }
+  const gates = body.gateEvidence && typeof body.gateEvidence === "object" && !Array.isArray(body.gateEvidence)
+    ? body.gateEvidence as Record<string, unknown>
+    : undefined;
+  const gateEvidence = gates && ["scope", "liveImpact", "knownIssue", "payout"].every((key) => typeof gates[key] === "string")
+    ? {
+      scope: String(gates.scope),
+      liveImpact: String(gates.liveImpact),
+      knownIssue: String(gates.knownIssue),
+      payout: String(gates.payout),
+    }
+    : undefined;
+  const result = c.store.adjudicateConfirmDecision(Number(c.params.id), {
+    recommendation: body.recommendation,
+    rationale: body.rationale,
+    evidenceDecisionId: body.evidenceDecisionId === undefined ? undefined : Number(body.evidenceDecisionId),
+    submissionConfidence: body.submissionConfidence as "low" | "medium" | "high" | undefined,
+    gateEvidence,
+  });
+  if (!result.ok) {
+    return sendJson(c.res, result.error === "no such confirm decision" ? 404 : 409, { error: result.error });
+  }
+  sendJson(c.res, 200, { decision: confirmDecisionDisplayRow(result.decision) });
 }
 
 function renderFindingReportMarkdown(row: Record<string, unknown>, decisions: Array<Record<string, unknown>> = []): string {
