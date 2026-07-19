@@ -108,11 +108,11 @@ async function waitForFileMatch(file, pattern, timeoutMs = 2000) {
   return last;
 }
 
-async function fakeDockerCli() {
+async function fakeDockerCli(options = {}) {
   const dir = await tempDir("flounder-fake-docker-bin-");
   const bin = path.join(dir, "docker");
   await writeFile(bin, `#!/usr/bin/env bash
-if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then exit 0; fi
+if [ "$1" = "image" ] && [ "$2" = "inspect" ]; then printf '%s' ${JSON.stringify(options.imageInspectStderr ?? "")} >&2; exit ${options.imageInspectExit ?? 0}; fi
 if [ "$1" = "run" ]; then
   printf 'DOCKER_ARGS:'
   for arg in "$@"; do printf '[%s]' "$arg"; done
@@ -244,6 +244,28 @@ test("sandbox readiness reports missing OCI image before agent commands run", as
   assert.equal(readiness.backend, "auto");
   assert.equal(readiness.image, image);
   assert.match(readiness.message ?? "", /No sandbox backend is available|OCI sandbox image/);
+});
+
+test("sandbox readiness distinguishes an unreachable Docker daemon from a missing image", async () => {
+  const fakeBin = await fakeDockerCli({
+    imageInspectExit: 1,
+    imageInspectStderr: "Cannot connect to the Docker daemon at unix:///tmp/docker.sock. Is the docker daemon running?",
+  });
+  const oldPath = process.env.PATH;
+  const image = "flounder-sandbox:diagnostic";
+  try {
+    process.env.PATH = `${fakeBin}${path.delimiter}/usr/bin${path.delimiter}/bin`;
+    clearSandboxAvailabilityCache(image);
+    const readiness = await checkSandboxReadiness({ backend: "oci", image, allowHostFallback: false, network: "none" });
+
+    assert.equal(readiness.ok, false);
+    assert.match(readiness.message ?? "", /Docker is not reachable/);
+    assert.match(readiness.message ?? "", /Cannot connect to the Docker daemon/);
+  } finally {
+    process.env.PATH = oldPath;
+    clearSandboxAvailabilityCache(image);
+    await rm(fakeBin, { recursive: true, force: true });
+  }
 });
 
 test("sandbox capped logs preserve early diagnostics and late context", async () => {
