@@ -1351,10 +1351,15 @@ export class MetadataStore {
     ).all(daemonId, before, version, boundedLimit) as VerifyArtifactRun[];
   }
 
-  /** Apply a daemon-uploaded terminal verify artifact through the exact same
-   * canonical ordering, conflict, and real-target protection logic as local startup
-   * repair. The version marker is committed in the same transaction. */
-  reconcileTerminalVerifyArtifacts(runId: number, artifacts: Array<Record<string, unknown>>, version: number): boolean {
+  /** Apply daemon-uploaded terminal verify artifacts through the same canonical
+   * ordering and backlog projection logic as the live run. The version marker is
+   * committed atomically with both repairs. */
+  reconcileTerminalVerifyArtifacts(
+    runId: number,
+    artifacts: Array<Record<string, unknown>>,
+    version: number,
+    backlog?: DiscoveryBacklogInput[],
+  ): boolean {
     const run = this.db.prepare(
       `SELECT id, project_id, daemon_id, kind, run_dir, status, budgets_json, material_fingerprint, artifact_reconcile_version
          FROM run WHERE id = ?`,
@@ -1362,6 +1367,7 @@ export class MetadataStore {
     if (!run || run.status === "running" || !runIsVerify(run)) return false;
     if (run.artifact_reconcile_version >= version) return true;
     this.applyRefutedVerifyArtifacts([run], new Map([[run.id, artifacts]]), () => {
+      if (backlog !== undefined) this.replaceDiscoveryBacklogRows(run.project_id, run.id, backlog);
       this.db.prepare("UPDATE run SET artifact_reconcile_version = ? WHERE id = ? AND artifact_reconcile_version < ?")
         .run(version, run.id, version);
     });
@@ -2021,49 +2027,52 @@ export class MetadataStore {
   // --- discovery health + backlog -----------------------------------------
 
   replaceDiscoveryBacklog(projectId: number, runId: number, rows: DiscoveryBacklogInput[]): void {
-    this.transaction(() => {
-      this.db.prepare("DELETE FROM discovery_backlog WHERE run_id = ?").run(runId);
-      if (rows.length === 0) {
-        this.reconcileAuditedScopeBacklog(projectId);
-        return;
-      }
-      const reconcile = this.db.prepare(
-        `UPDATE discovery_backlog
-            SET status = ?, updated_at = ?
-          WHERE project_id = ? AND run_id <> ? AND kind = ? AND status = 'open'
-            AND COALESCE(scope_id, '') = COALESCE(?, '')
-            AND COALESCE(title, '') = COALESCE(?, '')
-            AND COALESCE(location, '') = COALESCE(?, '')`,
-      );
-      const stmt = this.db.prepare(
-        `INSERT INTO discovery_backlog(project_id, run_id, kind, status, scope_id, title, location, reason, next_action, priority, payload_json, created_at, updated_at)
-         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
-      );
-      const ts = now();
-      for (const row of rows) {
-        const status = normalizeDiscoveryBacklogStatus(row.status);
-        // Keep historical rows without leaving an older copy of the same action open.
-        // A fresh open row supersedes its predecessor; an explicit resolved/stale row
-        // closes it. The narrow identity avoids closing unrelated gaps in one scope.
-        reconcile.run(status === "open" ? "stale" : status, ts, projectId, runId, row.kind, row.scopeId ?? null, row.title ?? null, row.location ?? null);
-        stmt.run(
-          projectId,
-          runId,
-          row.kind,
-          status,
-          row.scopeId ?? null,
-          row.title ?? null,
-          row.location ?? null,
-          row.reason ?? null,
-          row.nextAction ?? null,
-          row.priority === undefined ? null : String(row.priority),
-          jsonOrNull(row.payload),
-          ts,
-          ts,
-        );
-      }
+    this.transaction(() => this.replaceDiscoveryBacklogRows(projectId, runId, rows));
+  }
+
+  private replaceDiscoveryBacklogRows(projectId: number, runId: number, rows: DiscoveryBacklogInput[]): void {
+    this.db.prepare("DELETE FROM discovery_backlog WHERE run_id = ?").run(runId);
+    const snapshot = coalesceDiscoveryBacklogRows(rows);
+    if (snapshot.length === 0) {
       this.reconcileAuditedScopeBacklog(projectId);
-    });
+      return;
+    }
+    const reconcile = this.db.prepare(
+      `UPDATE discovery_backlog
+          SET status = ?, updated_at = ?
+        WHERE project_id = ? AND run_id <> ? AND kind = ? AND status = 'open'
+          AND COALESCE(scope_id, '') = COALESCE(?, '')
+          AND COALESCE(title, '') = COALESCE(?, '')
+          AND COALESCE(location, '') = COALESCE(?, '')`,
+    );
+    const stmt = this.db.prepare(
+      `INSERT INTO discovery_backlog(project_id, run_id, kind, status, scope_id, title, location, reason, next_action, priority, payload_json, created_at, updated_at)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    );
+    const ts = now();
+    for (const row of snapshot) {
+      const status = normalizeDiscoveryBacklogStatus(row.status);
+      // Keep historical rows without leaving an older copy of the same action open.
+      // A fresh open row supersedes its predecessor; an explicit resolved/stale row
+      // closes it. The narrow identity avoids closing unrelated gaps in one scope.
+      reconcile.run(status === "open" ? "stale" : status, ts, projectId, runId, row.kind, row.scopeId ?? null, row.title ?? null, row.location ?? null);
+      stmt.run(
+        projectId,
+        runId,
+        row.kind,
+        status,
+        row.scopeId ?? null,
+        row.title ?? null,
+        row.location ?? null,
+        row.reason ?? null,
+        row.nextAction ?? null,
+        row.priority === undefined ? null : String(row.priority),
+        jsonOrNull(row.payload),
+        ts,
+        ts,
+      );
+    }
+    this.reconcileAuditedScopeBacklog(projectId);
   }
 
   /** Close coverage work whose exact mapped scope has completed. Older releases
@@ -3557,6 +3566,23 @@ function nullableNumber(value: unknown): number | null {
 
 function normalizeDiscoveryBacklogStatus(status: unknown): DiscoveryBacklogStatus {
   return status === "resolved" || status === "stale" || status === "ignored" ? status : "open";
+}
+
+/** One backlog row represents one operator action, even when several findings
+ * consume it. Preserve an open consumer over terminal copies so coalescing can
+ * never hide unfinished work. */
+function coalesceDiscoveryBacklogRows(rows: DiscoveryBacklogInput[]): DiscoveryBacklogInput[] {
+  const byAction = new Map<string, DiscoveryBacklogInput>();
+  for (const row of rows) {
+    const status = normalizeDiscoveryBacklogStatus(row.status);
+    const normalized = { ...row, status };
+    const key = JSON.stringify([row.kind, row.scopeId ?? null, row.title ?? null, row.location ?? null]);
+    const previous = byAction.get(key);
+    if (!previous || normalizeDiscoveryBacklogStatus(previous.status) !== "open" || status === "open") {
+      byAction.set(key, normalized);
+    }
+  }
+  return [...byAction.values()];
 }
 
 function reportRunKey(projectId: number, runDir: string): string {

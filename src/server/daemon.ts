@@ -679,6 +679,11 @@ export function remoteFindingRows(findings: AgentFinding[], runDir: string, targ
 }
 
 const VERIFY_ARTIFACT_NAMES = ["audit_hypotheses.json", "audit_findings.json"] as const;
+const VERIFY_BACKLOG_ARTIFACTS = [
+  { name: "coverage_gaps.json", keys: ["coverage_gaps", "gaps"] },
+  { name: "resource_requests.json", keys: ["resource_requests", "requests", "resources"] },
+  { name: "followup_scopes.json", keys: ["followup_scopes", "scopes", "followups"] },
+] as const;
 const MAX_VERIFY_ARTIFACT_FILE_BYTES = 4 * 1024 * 1024;
 const MAX_VERIFY_ARTIFACT_REPLAY_ROWS = 1_000;
 const MAX_VERIFY_ARTIFACT_REPLAY_PAGES = 20;
@@ -686,9 +691,7 @@ const MAX_VERIFY_ARTIFACT_REPLAY_PAGES = 20;
 /** Read only the two verdict artifacts, only below this daemon's configured output
  * root, and return negative verdicts stripped to the bounded protocol fields. */
 export async function loadVerifyArtifactReplay(outRoot: string, runDir: string): Promise<Array<Record<string, unknown>>> {
-  const root = await realpath(path.resolve(outRoot));
-  const run = await realpath(path.resolve(runDir));
-  if (!pathIsWithin(root, run)) throw new Error("verify artifact run directory escapes the daemon output root");
+  const run = await resolveVerifyReplayRun(outRoot, runDir);
 
   const all: Array<Record<string, unknown>> = [];
   for (const name of VERIFY_ARTIFACT_NAMES) {
@@ -727,6 +730,36 @@ export async function loadVerifyArtifactReplay(outRoot: string, runDir: string):
   return negative;
 }
 
+/** Load the durable discovery backlog snapshot that accompanied a terminal Verify
+ * run. Undefined means no backlog artifact existed; an empty array is an explicit
+ * empty snapshot and may clear a failed live projection during replay. */
+export async function loadVerifyBacklogArtifactReplay(outRoot: string, runDir: string): Promise<DiscoveryBacklogInput[] | undefined> {
+  const run = await resolveVerifyReplayRun(outRoot, runDir);
+  const rows: DiscoveryBacklogInput[] = [];
+  let found = false;
+  for (const artifact of VERIFY_BACKLOG_ARTIFACTS) {
+    const candidate = path.join(run, artifact.name);
+    let resolved: string;
+    try {
+      resolved = await realpath(candidate);
+    } catch (error) {
+      if (isMissingFile(error)) continue;
+      throw error;
+    }
+    found = true;
+    if (!pathIsWithin(run, resolved)) throw new Error("verify backlog artifact file escapes its run directory");
+    const fileStat = await stat(resolved);
+    if (!fileStat.isFile() || fileStat.size > MAX_VERIFY_ARTIFACT_FILE_BYTES) throw new Error("verify backlog artifact file is not a bounded regular file");
+    const parsed = JSON.parse(await readFile(resolved, "utf8")) as unknown;
+    for (const value of artifactRows(parsed, artifact.keys)) {
+      const row = sanitizeVerifyBacklogArtifactRow(artifact.name, value);
+      if (row) rows.push(row);
+    }
+    if (rows.length > MAX_VERIFY_ARTIFACT_REPLAY_ROWS) throw new Error("too many verify backlog artifact rows");
+  }
+  return found ? rows : undefined;
+}
+
 /** Best-effort paged replay. A failed/missing/corrupt run remains unversioned on
  * the server and will be retried the next time this daemon registers. */
 export async function replayTerminalVerifyArtifacts(
@@ -752,15 +785,17 @@ export async function replayTerminalVerifyArtifacts(
       const runId = positiveIntegerId(row.runId);
       if (runId === undefined || typeof row.runDir !== "string" || !row.runDir) continue;
       let artifacts: Array<Record<string, unknown>>;
+      let backlog: DiscoveryBacklogInput[] | undefined;
       try {
         artifacts = await loadVerifyArtifactReplay(outRoot, row.runDir);
+        backlog = await loadVerifyBacklogArtifactReplay(outRoot, row.runDir);
       } catch {
         continue;
       }
       const replay = await fetch(base + `/api/daemon/reconciliation/runs/${runId}`, {
         method: "POST",
         headers,
-        body: JSON.stringify({ version, artifacts }),
+        body: JSON.stringify({ version, artifacts, ...(backlog !== undefined ? { backlog } : {}) }),
       }).catch(() => null);
       if (replay?.ok) reconciled += 1;
     }
@@ -780,6 +815,93 @@ function findingArtifactRows(value: unknown): Array<Record<string, unknown>> {
     if (Array.isArray(rows)) return rows.filter(isObjectRecord);
   }
   throw new Error("verify artifact wrapper has no finding rows");
+}
+
+async function resolveVerifyReplayRun(outRoot: string, runDir: string): Promise<string> {
+  const root = await realpath(path.resolve(outRoot));
+  const run = await realpath(path.resolve(runDir));
+  if (!pathIsWithin(root, run)) throw new Error("verify artifact run directory escapes the daemon output root");
+  return run;
+}
+
+function artifactRows(value: unknown, keys: readonly string[]): Array<Record<string, unknown>> {
+  if (Array.isArray(value)) return value.filter(isObjectRecord);
+  if (!isObjectRecord(value)) throw new Error("verify backlog artifact must be an array or wrapper object");
+  for (const key of keys) {
+    const rows = value[key];
+    if (Array.isArray(rows)) return rows.filter(isObjectRecord);
+  }
+  throw new Error("verify backlog artifact wrapper has no recognized rows");
+}
+
+function sanitizeVerifyBacklogArtifactRow(name: string, value: Record<string, unknown>): DiscoveryBacklogInput | undefined {
+  const scopeId = replayText(value.scopeId ?? value.scope_id);
+  const priority = typeof value.priority === "number" && Number.isFinite(value.priority)
+    ? value.priority
+    : replayText(value.priority);
+  if (name === "resource_requests.json") {
+    const title = replayText(value.needed);
+    const reason = replayText(value.reason);
+    const location = replayText(value.kind);
+    const nextAction = replayText(value.unblock ?? value.retryCommand ?? value.retry_command);
+    if (!title || !reason || !location) return undefined;
+    return {
+      kind: "resource-request",
+      status: replayBacklogStatus(value.status),
+      ...(scopeId ? { scopeId } : {}),
+      title,
+      location,
+      reason,
+      ...(nextAction ? { nextAction } : {}),
+      ...(priority !== undefined ? { priority } : {}),
+      payload: value,
+    };
+  }
+  if (name === "coverage_gaps.json") {
+    const title = replayText(value.obligation ?? value.title ?? value.gap);
+    const reason = replayText(value.reason ?? value.why ?? value.evidence);
+    const location = replayText(value.region ?? value.phase ?? value.location);
+    const nextAction = replayText(value.nextAction ?? value.next_action);
+    if (!title || !reason) return undefined;
+    return {
+      kind: "coverage-gap",
+      status: replayBacklogStatus(value.status),
+      ...(scopeId ? { scopeId } : {}),
+      title,
+      ...(location ? { location } : {}),
+      reason,
+      ...(nextAction ? { nextAction } : {}),
+      ...(priority !== undefined ? { priority } : {}),
+      payload: value,
+    };
+  }
+  const title = replayText(value.obligation ?? value.title);
+  const location = replayText(value.region ?? value.location);
+  const followupScopeId = scopeId ?? replayText(value.id);
+  const parentScopeId = replayText(value.parentScopeId ?? value.parent_scope_id);
+  const followupPriority = priority ?? (typeof value.score === "number" && Number.isFinite(value.score) ? value.score : undefined);
+  if (!title || !location) return undefined;
+  return {
+    kind: "followup-scope",
+    status: "open",
+    ...(followupScopeId ? { scopeId: followupScopeId } : {}),
+    title,
+    location,
+    reason: parentScopeId
+      ? `Follow-up proposed from ${parentScopeId}.`
+      : "Follow-up scope proposed by the audit run.",
+    nextAction: "Dig this pending scope.",
+    ...(followupPriority !== undefined ? { priority: followupPriority } : {}),
+    payload: value,
+  };
+}
+
+function replayBacklogStatus(value: unknown): DiscoveryBacklogInput["status"] {
+  return value === "resolved" || value === "stale" || value === "ignored" ? value : "open";
+}
+
+function replayText(value: unknown): string | undefined {
+  return typeof value === "string" && value.trim() && value.length <= 1_000_000 ? value : undefined;
 }
 
 function sanitizeVerifyArtifactRow(artifact: Record<string, unknown>, originId: number): Record<string, unknown> {

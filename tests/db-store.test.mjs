@@ -328,6 +328,40 @@ test("store: a newer backlog snapshot supersedes only the identical open action"
   db.close();
 });
 
+test("store: duplicate backlog actions are coalesced without dropping an open consumer", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "backlog-duplicate-consumers" });
+  const runId = db.startRun({ projectId, kind: "verify", runDir: "/runs/backlog-duplicate-consumers" });
+
+  db.replaceDiscoveryBacklog(projectId, runId, [
+    {
+      kind: "resource-request",
+      status: "resolved",
+      scopeId: "FILL-008",
+      title: "Working package-manager prepare environment",
+      location: "toolchain",
+      reason: "The first finding confirmed without this prepare step.",
+      payload: { id: "prepare-package-manager", findingId: "101", status: "resolved" },
+    },
+    {
+      kind: "resource-request",
+      status: "open",
+      scopeId: "FILL-008",
+      title: "Working package-manager prepare environment",
+      location: "toolchain",
+      reason: "The second finding still needs the prepare step.",
+      payload: { id: "prepare-package-manager", findingId: "102", status: "open" },
+    },
+  ]);
+
+  const rows = db.listDiscoveryBacklog(projectId, { kind: "resource-request", status: "all" });
+  assert.equal(rows.length, 1);
+  assert.equal(rows[0].status, "open");
+  assert.equal(rows[0].reason, "The second finding still needs the prepare step.");
+  assert.equal(JSON.parse(rows[0].payload_json).findingId, "102");
+  db.close();
+});
+
 test("store: audited scopes resolve exact coverage backlog rows, including persisted legacy rows", async () => {
   const { dbPath } = await tempDbPath();
   let db = new MetadataStore(dbPath);

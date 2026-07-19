@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { startUiServer } from "../dist/server/app.js";
-import { daemonJobTerminalState, ensureDaemonDirectories, loadVerifyArtifactReplay } from "../dist/server/daemon.js";
+import { daemonJobTerminalState, ensureDaemonDirectories, loadVerifyArtifactReplay, loadVerifyBacklogArtifactReplay, replayTerminalVerifyArtifacts } from "../dist/server/daemon.js";
 import { MetadataStore } from "../dist/db/store.js";
 
 const execFileAsync = promisify(execFile);
@@ -102,6 +102,30 @@ test("daemon: terminal verify artifact replay is allowlisted, bounded, and conta
   assert.equal(reviewed.refutationStatus, "refuted");
   assert.equal(reviewed.refutationReason, "The PoC relies on an excluded attacker capability.");
 
+  await writeFile(path.join(runDir, "resource_requests.json"), JSON.stringify([
+    {
+      id: "prepare-package-manager",
+      status: "resolved",
+      kind: "toolchain",
+      scopeId: "FILL-008",
+      findingId: "101",
+      needed: "Working package-manager prepare environment",
+      reason: "The first finding confirmed without this prepare step.",
+    },
+    {
+      id: "prepare-package-manager",
+      status: "open",
+      kind: "toolchain",
+      scopeId: "FILL-008",
+      findingId: "102",
+      needed: "Working package-manager prepare environment",
+      reason: "The second finding still needs the prepare step.",
+    },
+  ]));
+  const backlog = await loadVerifyBacklogArtifactReplay(out, runDir);
+  assert.equal(backlog.length, 2);
+  assert.deepEqual(backlog.map((row) => row.status), ["resolved", "open"]);
+
   const outside = await mkdtemp(path.join(os.tmpdir(), "flounder-artifact-outside-"));
   await assert.rejects(loadVerifyArtifactReplay(out, outside), /escapes the daemon output root/);
 
@@ -173,6 +197,26 @@ test("daemon: terminal verify replay is owner-only, versioned, and updates canon
         refutationReason: "The independent reviewer rejected the attacker model and appeal failed.",
         evidence: "The executable mitigation check disproved the claim.",
       }],
+      backlog: [
+        {
+          kind: "resource-request",
+          status: "resolved",
+          scopeId: "FILL-008",
+          title: "Working package-manager prepare environment",
+          location: "toolchain",
+          reason: "One finding confirmed without the prepare step.",
+          payload: { findingId: "101" },
+        },
+        {
+          kind: "resource-request",
+          status: "open",
+          scopeId: "FILL-008",
+          title: "Working package-manager prepare environment",
+          location: "toolchain",
+          reason: "Another finding still needs the prepare step.",
+          payload: { findingId: "102" },
+        },
+      ],
     });
     assert.equal(applied.status, 200);
     const after = MetadataStore.openForOutput(out);
@@ -181,9 +225,61 @@ test("daemon: terminal verify replay is owner-only, versioned, and updates canon
     assert.equal(after.getFinding(findingId).refutation_reason, "The independent reviewer rejected the attacker model and appeal failed.");
     assert.equal(after.getFinding(findingId).report_path, null);
     assert.equal(after.getRun(verifyRun).artifact_reconcile_version, ownerWork.version);
+    const backlog = after.listDiscoveryBacklog(projectId, { kind: "resource-request", status: "all" });
+    assert.equal(backlog.length, 1);
+    assert.equal(backlog[0].status, "open");
+    assert.equal(JSON.parse(backlog[0].payload_json).findingId, "102");
     after.close();
     const empty = await j(await asDaemon(base, token, "POST", "/api/daemon/reconciliation/worklist", {}));
     assert.equal(empty.runs.some((run) => run.runId === verifyRun), false);
+  });
+});
+
+test("daemon: terminal verify replay repairs a backlog update lost after artifact persistence", async () => {
+  await withServerAndToken(async ({ base, token, out }) => {
+    const owner = await j(await asDaemon(base, token, "POST", "/api/daemon/register", { name: "backlog-replay-owner", capabilities: {} }));
+    const runDir = path.join(out, "backlog-replay-run");
+    await mkdir(runDir, { recursive: true });
+    await writeFile(path.join(runDir, "resource_requests.json"), JSON.stringify([
+      {
+        id: "prepare-package-manager",
+        status: "resolved",
+        kind: "toolchain",
+        scopeId: "FILL-008",
+        findingId: "101",
+        needed: "Working package-manager prepare environment",
+        reason: "The first finding confirmed without this prepare step.",
+      },
+      {
+        id: "prepare-package-manager",
+        status: "open",
+        kind: "toolchain",
+        scopeId: "FILL-008",
+        findingId: "102",
+        needed: "Working package-manager prepare environment",
+        reason: "The second finding still needs the prepare step.",
+      },
+    ]));
+
+    const setup = MetadataStore.openForOutput(out);
+    const projectId = setup.upsertProject({ name: "backlog-replay-project" });
+    const verifyRun = setup.startRun({ projectId, kind: "verify", runDir, daemonId: owner.daemonId });
+    setup.finishRun(verifyRun, "done");
+    setup.close();
+
+    const reconciled = await replayTerminalVerifyArtifacts(base, {
+      authorization: `Bearer ${token}`,
+      "content-type": "application/json",
+    }, out);
+    assert.equal(reconciled, 1);
+
+    const after = MetadataStore.openForOutput(out);
+    const backlog = after.listDiscoveryBacklog(projectId, { kind: "resource-request", status: "all" });
+    assert.equal(backlog.length, 1);
+    assert.equal(backlog[0].status, "open");
+    assert.equal(JSON.parse(backlog[0].payload_json).findingId, "102");
+    assert.ok(after.getRun(verifyRun).artifact_reconcile_version > 0);
+    after.close();
   });
 });
 

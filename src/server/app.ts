@@ -18,7 +18,7 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_AUDIT_MODEL, defaultOutputDir } from "../config.js";
-import { MetadataStore, type RunKind, type Coverage, type DiscoveryBacklogFilter, type DiscoveryBacklogKind, type DiscoveryBacklogStatus, type ProviderInput, type ProviderProfile, type ProjectInput, type ProjectListOptions, type ProviderRoles, type RoleOverride } from "../db/store.js";
+import { MetadataStore, type RunKind, type Coverage, type DiscoveryBacklogFilter, type DiscoveryBacklogInput, type DiscoveryBacklogKind, type DiscoveryBacklogStatus, type ProviderInput, type ProviderProfile, type ProjectInput, type ProjectListOptions, type ProviderRoles, type RoleOverride } from "../db/store.js";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getProviders, getModels } from "@earendil-works/pi-ai/compat";
 import { type LaunchSpec, ActivityBus, type Activity, type ReportFindingSpec, type ConfirmSettledRow } from "./run-manager.js";
@@ -59,7 +59,7 @@ const PERSISTED_ACTIVITY_TAIL_BYTES = 16 * 1024 * 1024;
 const BUG_BOUNTY_CONTEST_KIND = "bug-bounty-contest";
 const DEFAULT_CONTEST_BATCH_SCOPES = 10;
 const DEFAULT_CONTEST_DIG_CONCURRENCY = 5;
-const VERIFY_ARTIFACT_RECONCILIATION_VERSION = 3;
+const VERIFY_ARTIFACT_RECONCILIATION_VERSION = 4;
 const VERIFY_ARTIFACT_RECONCILIATION_LIMIT = 50;
 const MAX_VERIFY_ARTIFACT_REPLAY_ROWS = 1_000;
 const MAX_VERIFY_ARTIFACT_REPLAY_BYTES = 8 * 1024 * 1024;
@@ -4874,21 +4874,30 @@ async function daemonReconcileRunArtifacts(c: Ctx): Promise<void> {
   if (run.status === "running") return sendJson(c.res, 409, { error: "only terminal runs can replay artifacts" });
   if (!daemonRunIsVerify(run)) return sendJson(c.res, 400, { error: "only verify runs can replay verdict artifacts" });
 
-  const body = (await readBody(c.req)) as { version?: unknown; artifacts?: unknown };
+  const body = (await readBody(c.req)) as { version?: unknown; artifacts?: unknown; backlog?: unknown };
   if (body.version !== VERIFY_ARTIFACT_RECONCILIATION_VERSION) {
     return sendJson(c.res, 409, { error: "unsupported artifact reconciliation version", version: VERIFY_ARTIFACT_RECONCILIATION_VERSION });
   }
   if (!Array.isArray(body.artifacts) || body.artifacts.length > MAX_VERIFY_ARTIFACT_REPLAY_ROWS) {
     return sendJson(c.res, 400, { error: `artifacts must be an array of at most ${MAX_VERIFY_ARTIFACT_REPLAY_ROWS} rows` });
   }
-  if (Buffer.byteLength(JSON.stringify(body.artifacts), "utf8") > MAX_VERIFY_ARTIFACT_REPLAY_BYTES) {
+  if (body.backlog !== undefined && (!Array.isArray(body.backlog) || body.backlog.length > MAX_VERIFY_ARTIFACT_REPLAY_ROWS)) {
+    return sendJson(c.res, 400, { error: `backlog must be an array of at most ${MAX_VERIFY_ARTIFACT_REPLAY_ROWS} rows` });
+  }
+  if (Buffer.byteLength(JSON.stringify({ artifacts: body.artifacts, backlog: body.backlog }), "utf8") > MAX_VERIFY_ARTIFACT_REPLAY_BYTES) {
     return sendJson(c.res, 413, { error: "artifact replay payload is too large" });
   }
   const artifacts = normalizeVerifyArtifactReplay(body.artifacts);
   if (!artifacts) return sendJson(c.res, 400, { error: "artifact replay rows must be unique negative verify verdicts with positive origin ids" });
-  const applied = c.store.reconcileTerminalVerifyArtifacts(runId, artifacts, VERIFY_ARTIFACT_RECONCILIATION_VERSION);
+  let backlog: DiscoveryBacklogInput[] | undefined;
+  if (body.backlog !== undefined) {
+    const normalized = normalizeVerifyBacklogReplay(body.backlog as unknown[]);
+    if (!normalized) return sendJson(c.res, 400, { error: "backlog replay rows are invalid" });
+    backlog = normalized;
+  }
+  const applied = c.store.reconcileTerminalVerifyArtifacts(runId, artifacts, VERIFY_ARTIFACT_RECONCILIATION_VERSION, backlog);
   if (!applied) return sendJson(c.res, 409, { error: "run is not eligible for artifact reconciliation" });
-  sendJson(c.res, 200, { ok: true, version: VERIFY_ARTIFACT_RECONCILIATION_VERSION, verdicts: artifacts.length });
+  sendJson(c.res, 200, { ok: true, version: VERIFY_ARTIFACT_RECONCILIATION_VERSION, verdicts: artifacts.length, ...(backlog ? { backlog: backlog.length } : {}) });
 }
 
 function daemonRunIsVerify(run: Record<string, unknown>): boolean {
@@ -4922,6 +4931,42 @@ function normalizeVerifyArtifactReplay(input: unknown[]): Array<Record<string, u
     }
     seen.add(originId);
     rows.push(row);
+  }
+  return rows;
+}
+
+function normalizeVerifyBacklogReplay(input: unknown[]): DiscoveryBacklogInput[] | null {
+  const rows: DiscoveryBacklogInput[] = [];
+  for (const value of input) {
+    if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+    const raw = value as Record<string, unknown>;
+    if (raw.kind !== "coverage-gap" && raw.kind !== "resource-request" && raw.kind !== "followup-scope") return null;
+    if (raw.status !== undefined && raw.status !== "open" && raw.status !== "resolved" && raw.status !== "stale" && raw.status !== "ignored") return null;
+    const text = (key: string): string | undefined | null => {
+      const entry = raw[key];
+      if (entry === undefined) return undefined;
+      return typeof entry === "string" && entry.length <= 1_000_000 ? entry : null;
+    };
+    const scopeId = text("scopeId");
+    const title = text("title");
+    const location = text("location");
+    const reason = text("reason");
+    const nextAction = text("nextAction");
+    if (scopeId === null || title === null || location === null || reason === null || nextAction === null) return null;
+    if (raw.priority !== undefined
+      && !(typeof raw.priority === "number" && Number.isFinite(raw.priority))
+      && !(typeof raw.priority === "string" && raw.priority.length <= 1_000_000)) return null;
+    rows.push({
+      kind: raw.kind,
+      ...(raw.status ? { status: raw.status as DiscoveryBacklogStatus } : {}),
+      ...(scopeId !== undefined ? { scopeId } : {}),
+      ...(title !== undefined ? { title } : {}),
+      ...(location !== undefined ? { location } : {}),
+      ...(reason !== undefined ? { reason } : {}),
+      ...(nextAction !== undefined ? { nextAction } : {}),
+      ...(raw.priority !== undefined ? { priority: raw.priority as string | number } : {}),
+      ...(raw.payload !== undefined ? { payload: raw.payload } : {}),
+    });
   }
   return rows;
 }
