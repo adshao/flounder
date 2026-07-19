@@ -1127,7 +1127,7 @@ async function projectGet(c: Ctx): Promise<void> {
         : [],
       confirmDecisions: confirmDecisions.map(confirmDecisionDisplayRow),
       scopes,
-      latestRunHealth: runHealthDisplayRow(c.store.latestRunHealth(id)),
+      latestRunHealth: runHealthDisplayRow(projectCurrentRunHealth(c.store, id, confirmDecisions)),
       backlogCounts: c.store.discoveryBacklogCounts(id),
       discoveryBacklog: c.store.listDiscoveryBacklog(id, { status: "open", limit: 50 }).map((row) => discoveryBacklogDisplayRow(row, mappedScopeIds)),
       openResourceRequests: c.store.listDiscoveryBacklog(id, { kind: "resource-request", status: "open", limit: 10 }).map((row) => discoveryBacklogDisplayRow(row, mappedScopeIds)),
@@ -3546,7 +3546,7 @@ function confirmDecisionDisplayRow(row: Record<string, unknown>): Record<string,
 
 function confirmDecisionRunHealth(rows: Array<{ reproduced?: unknown; recommendation?: unknown }>): { status: string; reasons: string[]; signals: Record<string, unknown> } | undefined {
   if (rows.length === 0) return undefined;
-  const couldNotSetUp = rows.filter((row) => row.reproduced === "could-not-set-up").length;
+  const couldNotSetUp = rows.filter((row) => row.reproduced === "could-not-set-up" && row.recommendation !== "drop").length;
   const needsHuman = rows.filter((row) => row.recommendation === "needs-human").length;
   if (couldNotSetUp === 0 && needsHuman === 0) return undefined;
   const reproducedYes = rows.filter((row) => row.reproduced === "yes").length;
@@ -3564,6 +3564,33 @@ function confirmDecisionRunHealth(rows: Array<{ reproduced?: unknown; recommenda
       couldNotSetUp,
     },
   };
+}
+
+function projectCurrentRunHealth(
+  store: MetadataStore,
+  projectId: number,
+  confirmDecisions: Array<Record<string, unknown>>,
+): Record<string, unknown> | undefined {
+  const currentConfirmHealth = confirmDecisionRunHealth(confirmDecisions);
+  if (currentConfirmHealth) {
+    const latestDecisionRun = confirmDecisions
+      .map((decision) => Number(decision.run_id))
+      .filter(Number.isFinite)
+      .sort((a, b) => b - a)
+      .map((runId) => store.getRun(runId))
+      .find((run) => run && stringValue(run.kind) === "confirm");
+    return {
+      ...(latestDecisionRun ?? {}),
+      kind: "confirm",
+      run_status: stringValue(latestDecisionRun?.status) || "done",
+      health_status: currentConfirmHealth.status,
+      health_reasons_json: JSON.stringify(currentConfirmHealth.reasons),
+      health_signals_json: JSON.stringify(currentConfirmHealth.signals),
+    };
+  }
+
+  const latest = store.latestRunHealth(projectId);
+  return stringValue(latest?.kind) === "confirm" ? undefined : latest;
 }
 
 function decisionHasFormalReport(row: Record<string, unknown>): boolean {
@@ -5474,8 +5501,7 @@ function projectSnapshotStatus(row: Record<string, unknown>): ProjectStatusFilte
   if (latestStatus === "error" || latestStatus === "killed") return "failed";
   const progress = row.progress as Coverage | null | undefined;
   const total = typeof progress?.total === "number" ? progress.total : 0;
-  const pending = typeof progress?.pending === "number" ? progress.pending : 0;
-  if ((total > 0 && pending > 0) || numberField(row, "verifyPendingFindings") > 0 || numberField(row, "confirmPendingFindings") > 0) return "needs-work";
+  if (projectCoverageNeedsWork(row) || numberField(row, "verifyPendingFindings") > 0 || numberField(row, "confirmPendingFindings") > 0) return "needs-work";
   if (
     total > 0
     || numberField(row, "findingsTotal") > 0
@@ -5486,6 +5512,22 @@ function projectSnapshotStatus(row: Record<string, unknown>): ProjectStatusFilte
     return "done";
   }
   return "not-started";
+}
+
+function projectCoverageNeedsWork(row: Record<string, unknown>): boolean {
+  const progress = row.progress as Coverage | null | undefined;
+  const total = Math.max(0, Math.floor(progress?.total ?? 0));
+  const audited = Math.max(0, Math.floor(progress?.audited ?? 0));
+  const pending = Math.max(0, Math.floor(progress?.pending ?? 0));
+  if (total === 0 || pending === 0) return false;
+
+  const config = row.config && typeof row.config === "object" && !Array.isArray(row.config)
+    ? row.config as Record<string, unknown>
+    : {};
+  const mode = normalizeCoverageMode(config.scopeCoverageMode, numberValue(config.maxScopes) ?? undefined);
+  if (mode === "focused") return audited < Math.min(total, 10);
+  if (mode === "standard") return audited < Math.min(total, 30);
+  return true;
 }
 
 function countProjectStatuses(rows: Array<Record<string, unknown>>): ProjectStatusCounts {
@@ -5535,18 +5577,10 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       : currentConfirmDecisions(store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes" && isRealTargetDecisionEvidence(stringValue(row.evidence_level))).length;
     const auditConfirmedFindings = countAuditConfirmedFindings(findings);
-    const submissionWorkKeys = new Set(confirmDecisions.filter((row) => needsSubmissionReadinessWork(row)).flatMap(confirmDecisionMemberKeys));
     const verifyPendingFindings = (counts.suspected ?? 0) + (counts["confirmed-source"] ?? 0);
     const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, allRuns);
     const confirmPendingFindings = requiresRealTargetConfirmation
-      ? findings.filter((finding) => {
-          const status = String(finding.status ?? "");
-          const key = stringValue(finding.finding_key).toLowerCase();
-          return !findingTrackingBlocksProgress(finding)
-            && !findingIndependentReviewBlocksProgress(finding)
-            && (status === "confirmed-executable" || status === "confirmed-differential")
-            && (!finding.confirm_status || (key && submissionWorkKeys.has(key)));
-        }).length
+      ? confirmWorkRows(store, id, currentRunIds, materialBoundary, confirmDecisions).length
       : 0;
     return {
       id,
@@ -5574,7 +5608,7 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       runCount: store.countRuns(id),
       currentRunCount: currentResultRows.length,
       latestRun: runApiRows(store, latestDisplayRun(currentRuns), undefined, viewBoundary)[0] ?? null,
-      latestRunHealth: runHealthDisplayRow(store.latestRunHealth(id)),
+      latestRunHealth: runHealthDisplayRow(projectCurrentRunHealth(store, id, confirmDecisions)),
       backlogCounts: store.discoveryBacklogCounts(id),
       activeRuns: activeByTarget.get(String(project.name)) ?? 0,
       material: materialSummary(allRuns, materialBoundary, activePrepareRefresh),

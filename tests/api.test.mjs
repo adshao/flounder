@@ -726,6 +726,80 @@ test("api: normal bug bounty projects keep real-target confirm before reports", 
   });
 });
 
+test("api: project completion uses current phase work and cumulative standard coverage", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", {
+      name: "settled-standard-project",
+      sourcePaths: ["./src"],
+      config: { scopeCoverageMode: "standard", maxScopes: 30, engagement: { kind: "bug-bounty" } },
+    }));
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        ...Array.from({ length: 30 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 40 - i })),
+        ...Array.from({ length: 2 }, (_, i) => ({ scopeId: `pending-${i}`, title: `Pending ${i}`, status: "pending", score: 2 - i })),
+      ]);
+      const auditRun = store.startRun({
+        projectId: created.id,
+        kind: "audit",
+        runDir: path.join(out, "settled-standard-audit"),
+        materialFingerprint: "sha256:settled-standard",
+      });
+      store.upsertFindings(created.id, auditRun, [{
+        findingKey: "ksettledstandard",
+        title: "Settled source finding",
+        status: "confirmed-executable",
+      }]);
+      store.finishRun(auditRun, "done");
+
+      const confirmRun = store.startRun({
+        projectId: created.id,
+        kind: "confirm",
+        runDir: path.join(out, "settled-standard-confirm"),
+        materialFingerprint: "sha256:settled-standard",
+      });
+      store.upsertConfirmDecisions(created.id, confirmRun, [{
+        bug: "Settled source finding",
+        reproduced: "yes",
+        recommendation: "drop",
+        members: ["ksettledstandard"],
+        evidenceLevel: "source-only-local-confirmed",
+      }, {
+        bug: "Known issue that does not need more setup",
+        reproduced: "could-not-set-up",
+        recommendation: "drop",
+        members: ["kknownsetup"],
+        evidenceLevel: "could-not-set-up",
+      }]);
+      store.recordRunHealth(confirmRun, {
+        status: "needs-human",
+        reasons: ["Historical decision needed operator review."],
+        signals: { needsHuman: 1 },
+      });
+      store.finishRun(confirmRun, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.equal(detail.latestRunHealth, null, "settled decisions hide stale historical confirm health");
+
+    const list = await json(await fetch(base + "/api/projects"));
+    const row = list.projects.find((project) => project.uuid === created.uuid);
+    assert.equal(row.confirmPendingFindings, 0, "snapshot pending work matches the actual Confirm worklist");
+    assert.equal(row.progress.audited, 30);
+    assert.equal(row.progress.pending, 2);
+
+    const done = await json(await fetch(base + "/api/projects?status=done"));
+    assert.ok(done.projects.some((project) => project.uuid === created.uuid), "Standard is complete at 30 cumulative audited scopes");
+    const needsWork = await json(await fetch(base + "/api/projects?status=needs-work"));
+    assert.ok(!needsWork.projects.some((project) => project.uuid === created.uuid));
+  });
+});
+
 test("api: bug bounty contest pipeline opens short batches and expands the map when pending scopes are exhausted", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
