@@ -3096,9 +3096,11 @@ function decisionReportWorklist(
       const decisionId = Number(decision.id);
       const severity = stringValue(decision.severity) || maxSeverityFromRows(linkedFindings) || undefined;
       const evidenceLevel = stringValue(decision.evidence_level) || "unknown";
+      const evidenceRunDir = decisionEvidenceRunDir(store, decision);
       return {
         unit: "decision",
         decisionId,
+        ...(evidenceRunDir ? { evidenceRunDir } : {}),
         findingId: primary ? Number(primary.id) : undefined,
         findingKey: `decision-${decisionId}`,
         reportKey: `decision-${decisionId}`,
@@ -3121,6 +3123,20 @@ function decisionReportWorklist(
       };
     }),
   };
+}
+
+function decisionEvidenceRunDir(store: MetadataStore, decision: Record<string, unknown>): string | undefined {
+  let evidenceDecision = decision;
+  const operator = (safeParse(decision.operator_adjudication_json) as Record<string, unknown>) ?? {};
+  const evidenceDecisionId = Number(operator.evidence_decision_id);
+  if (Number.isFinite(evidenceDecisionId)) {
+    evidenceDecision = store.getConfirmDecision(evidenceDecisionId) ?? decision;
+  }
+  const runId = Number(evidenceDecision.run_id);
+  if (!Number.isFinite(runId)) return undefined;
+  const run = store.getRun(runId);
+  if (!run || stringValue(run.kind) !== "confirm") return undefined;
+  return stringValue(run.run_dir) || undefined;
 }
 
 function decisionReportFingerprint(store: MetadataStore, decision: Record<string, unknown>, boundary?: Record<string, unknown>): string {

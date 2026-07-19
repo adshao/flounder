@@ -17,7 +17,7 @@ import { MetadataStore } from "../dist/db/store.js";
 import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
 import { differentialNetworkForExploitRun, runDifferentialConfirmation } from "../dist/agent/differential.js";
 import { runDischargeChallenge, runRefutation } from "../dist/agent/refutation.js";
-import { renderReportFileManifest } from "../dist/agent/report.js";
+import { renderReportFileManifest, stageReportEvidence } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
 import { assistantMessageError, auditSessionHasDurableHandoff, buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas, withDetailedCodexReasoningSummary } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
@@ -855,6 +855,7 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   assert.ok(reportPrompt.includes("checking any source/evidence needed for accuracy"), "report mode should verify code/evidence before writing");
   assert.ok(reportPrompt.includes("## Evidence Basis"), "formal reports should expose the evidence base");
   assert.ok(reportPrompt.includes("source, corpus, PoC files, or artifacts"), "report mode should inspect missing details instead of guessing");
+  assert.ok(reportPrompt.includes("inspect its confirm decision, transcript, and PoC files"), "report mode should consume staged Confirm evidence before claiming it is unavailable");
   assert.ok(reportPrompt.includes("If a detail is not established"), "report mode should surface evidence gaps instead of inventing details");
   assert.ok(reportPrompt.includes('Do NOT include a "Linked Findings" section'), "formal reports should not expose internal linked finding sections");
   assert.ok(reportPrompt.includes("Finding # labels"), "formal reports should not expose internal finding ids");
@@ -1079,6 +1080,48 @@ test("report manifest is compact but keeps finding-relevant path hints", () => {
   assert.ok(manifest.includes("source/pkg/helper.nr:12"));
   assert.ok(manifest.includes("300/500 shown"));
   assert.ok(!manifest.includes("source/pkg/file-499.ts"));
+});
+
+test("report stages bounded Confirm artifacts and PoC source under relative evidence paths", async () => {
+  const out = await tempDir();
+  try {
+    const confirmRun = path.join(out, "target-confirm-run");
+    const scratch = path.join(confirmRun, "confirm", "workspace", "scratch", "fork-poc");
+    const workspace = path.join(out, "report-workspace");
+    await mkdir(path.join(scratch, "test"), { recursive: true });
+    await mkdir(path.join(scratch, "cache"), { recursive: true });
+    await mkdir(workspace, { recursive: true });
+    await writeFile(path.join(confirmRun, "confirm_decision.json"), '[{"reproduced":"yes","repro_command_id":"cmd9"}]');
+    await writeFile(path.join(confirmRun, "confirm_transcript.json"), '{"cmd9":{"command":"forge test --fork-block-number 123"}}');
+    await writeFile(path.join(scratch, "foundry.toml"), "[profile.default]\n");
+    await writeFile(path.join(scratch, "test", "ForkPoC.t.sol"), "contract ForkPoC {}\n");
+    await writeFile(path.join(scratch, "cache", "solidity-files-cache.json"), "{}");
+
+    const staged = await stageReportEvidence([{
+      decisionId: 9,
+      findingKey: "k9",
+      title: "Bug",
+      evidenceRunDir: confirmRun,
+    }], workspace, out);
+
+    assert.ok(staged.includes("report-evidence/decision-9/confirm_decision.json"));
+    assert.ok(staged.includes("report-evidence/decision-9/confirm_transcript.json"));
+    assert.ok(staged.includes("report-evidence/decision-9/scratch/fork-poc/foundry.toml"));
+    assert.ok(staged.includes("report-evidence/decision-9/scratch/fork-poc/test/ForkPoC.t.sol"));
+    assert.ok(!staged.some((entry) => entry.includes("cache")));
+    assert.ok(staged.every((entry) => !path.isAbsolute(entry)));
+    assert.match(await readFile(path.join(workspace, "report-evidence", "decision-9", "scratch", "fork-poc", "test", "ForkPoC.t.sol"), "utf8"), /ForkPoC/);
+
+    const manifest = renderReportFileManifest([], [], [{ decisionId: 9, findingKey: "k9", title: "Bug" }], staged);
+    assert.match(manifest, /Read-only Confirm evidence staged/);
+    assert.match(manifest, /confirm_transcript\.json/);
+    await assert.rejects(
+      stageReportEvidence([{ decisionId: 10, findingKey: "k10", title: "Bad", evidenceRunDir: path.dirname(out) }], workspace, out),
+      /outside the daemon output root/,
+    );
+  } finally {
+    await rm(out, { recursive: true, force: true });
+  }
 });
 
 test("project memory persists notes and recalls by keyword overlap", async () => {

@@ -2033,7 +2033,8 @@ test("api: report launch queues only reproduced real-target findings that were n
         refutationStatus: "conflict",
         refutationReason: "Local verification conflicts with the real-target reproduction.",
       }]);
-      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "report-launch-confirm") });
+      const confirmRunDir = path.join(out, "report-launch-confirm");
+      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: confirmRunDir });
       store.upsertConfirmDecisions(created.id, confirmRun, [
         {
           bug: "Ready bug",
@@ -2127,6 +2128,7 @@ test("api: report launch queues only reproduced real-target findings that were n
     assert.equal(spec.verb, "report");
     assert.equal(spec.reportFindings.length, 1);
     assert.equal(spec.reportFindings[0].unit, "decision");
+    assert.equal(spec.reportFindings[0].evidenceRunDir, path.join(out, "report-launch-confirm"));
     assert.match(spec.reportFindings[0].findingKey, /^decision-/);
     assert.equal(spec.reportFindings[0].title, "Ready bug");
     assert.equal(spec.reportFindings[0].linkedFindings[0].finding_key, "kready");
@@ -2140,6 +2142,7 @@ test("api: report launch queues only reproduced real-target findings that were n
     assert.equal(regeneratedSpec.verb, "report");
     assert.equal(regeneratedSpec.reportFindings.length, 1);
     assert.equal(regeneratedSpec.reportFindings[0].unit, "decision");
+    assert.equal(regeneratedSpec.reportFindings[0].evidenceRunDir, path.join(out, "report-launch-confirm"));
     assert.equal(regeneratedSpec.reportFindings[0].title, "Existing report bug");
     assert.equal(regeneratedSpec.reportFindings[0].linkedFindings[0].finding_key, "kexisting");
     assert.equal(regeneratedSpec.reportFindings[0].decisions[0].repro_command_id, "cmd-existing");

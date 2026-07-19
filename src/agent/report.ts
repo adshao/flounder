@@ -1,4 +1,5 @@
 import path from "node:path";
+import { copyFile, lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
 import { flounderHomeDir, type AuditorConfig } from "../config.js";
 import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
 import { loadCorpus, loadSource } from "../ingest/source.js";
@@ -16,6 +17,7 @@ import { buildTools, newSession, type AgentSession, type AgentTool, type ToolCon
 export interface ReportFindingInput {
   findingId?: number | undefined;
   decisionId?: number | undefined;
+  evidenceRunDir?: string | undefined;
   reportKey?: string | undefined;
   unit?: "finding" | "decision" | undefined;
   findingKey: string;
@@ -85,6 +87,7 @@ export async function runReport(
 
     const workspaceRoots = reportCfg.buildRoot ? [reportCfg.buildRoot] : reportCfg.sourcePaths;
     const workspace = await prepareSandboxWorkspace(workspaceRoots, logger.runDir, "report/workspace");
+    const stagedEvidence = await stageReportEvidence(options.findings, workspace.absolute, reportCfg.outputDir);
     const session: AgentSession = newSession();
     session.workspace = workspace;
     session.baselineFiles = await listWorkspaceFiles(workspace.absolute);
@@ -108,7 +111,7 @@ export async function runReport(
       tools: buildReportTools(),
       logger,
       cwd: workspace.absolute,
-      fileManifest: renderReportFileManifest(source, corpus, options.findings),
+      fileManifest: renderReportFileManifest(source, corpus, options.findings, stagedEvidence),
       report: seed,
       ...(options.signal ? { signal: options.signal } : {}),
       ...(options.onActivity ? { onActivity: options.onActivity } : {}),
@@ -243,7 +246,7 @@ function safeReportId(input: string): string {
   return input.toLowerCase().replace(/[^a-z0-9_.-]+/g, "-").replace(/^-+|-+$/g, "").slice(0, 100) || "finding";
 }
 
-export function renderReportFileManifest(source: Doc[], corpus: Doc[], findings: ReportFindingInput[]): string {
+export function renderReportFileManifest(source: Doc[], corpus: Doc[], findings: ReportFindingInput[], evidenceFiles: string[] = []): string {
   const relevant = reportPathHints(findings).slice(0, 80);
   const sourceLines = source.slice(0, 300).map((doc) => `- source ${publicPath(doc.path)} (${doc.content ? doc.content.split("\n").length : 0} lines)`);
   const corpusLines = corpus.slice(0, 120).map((doc) => `- corpus ${publicPath(doc.path)} (${doc.content ? doc.content.split("\n").length : 0} lines)`);
@@ -259,7 +262,103 @@ export function renderReportFileManifest(source: Doc[], corpus: Doc[], findings:
   if (corpusLines.length > 0) {
     sections.push(`Corpus inventory sample (${corpusLines.length}/${corpus.length} shown):\n${corpusLines.join("\n")}${corpus.length > corpusLines.length ? `\n…and ${corpus.length - corpusLines.length} more corpus files` : ""}`);
   }
+  if (evidenceFiles.length > 0) {
+    sections.push(`Read-only Confirm evidence staged for report accuracy (${evidenceFiles.length} files):\n${evidenceFiles.map((file) => `- ${file}`).join("\n")}`);
+  }
   return sections.join("\n\n") || "(no files loaded)";
+}
+
+const REPORT_EVIDENCE_TOP_LEVEL = [
+  "confirm_decision.json",
+  "confirm_report.md",
+  "impact_inventory.json",
+  "confirm_provenance.json",
+  "confirm_equivalence.json",
+  "confirm_transcript.json",
+] as const;
+const REPORT_EVIDENCE_EXTENSIONS = new Set([".sol", ".rs", ".nr", ".ts", ".js", ".py", ".go", ".json", ".toml", ".md", ".txt"]);
+const REPORT_EVIDENCE_MAX_FILE_BYTES = 8 * 1024 * 1024;
+const REPORT_EVIDENCE_MAX_TOTAL_BYTES = 24 * 1024 * 1024;
+const REPORT_EVIDENCE_MAX_FILES = 240;
+
+export async function stageReportEvidence(
+  findings: ReportFindingInput[],
+  workspaceRoot: string,
+  outputRoot: string,
+): Promise<string[]> {
+  const unique = new Map<string, ReportFindingInput>();
+  for (const finding of findings) {
+    if (finding.evidenceRunDir) unique.set(path.resolve(finding.evidenceRunDir), finding);
+  }
+  if (unique.size === 0) return [];
+
+  const outputReal = await realpath(path.resolve(outputRoot));
+  const staged: string[] = [];
+  let totalBytes = 0;
+  for (const [runDir, finding] of unique) {
+    const runReal = await realpath(runDir).catch(() => undefined);
+    if (!runReal) throw new Error(`Report evidence run is unavailable for decision ${finding.decisionId ?? "unknown"}.`);
+    if (!isPathWithin(outputReal, runReal)) {
+      throw new Error(`Unsafe Report evidence run for decision ${finding.decisionId ?? "unknown"}: path is outside the daemon output root.`);
+    }
+    const label = finding.decisionId !== undefined ? `decision-${finding.decisionId}` : safeReportId(finding.findingKey);
+    const destinationRoot = path.join(workspaceRoot, "report-evidence", label);
+    await mkdir(destinationRoot, { recursive: true });
+
+    const candidates: Array<{ source: string; relative: string }> = REPORT_EVIDENCE_TOP_LEVEL.map((name) => ({
+      source: path.join(runReal, name),
+      relative: name,
+    }));
+    const scratchRoot = path.join(runReal, "confirm", "workspace", "scratch");
+    for (const entry of await reportEvidenceScratchFiles(scratchRoot)) {
+      candidates.push({ source: entry.source, relative: path.posix.join("scratch", entry.relative) });
+    }
+
+    let copiedForRun = 0;
+    for (const candidate of candidates) {
+      if (staged.length >= REPORT_EVIDENCE_MAX_FILES || totalBytes >= REPORT_EVIDENCE_MAX_TOTAL_BYTES) break;
+      const info = await lstat(candidate.source).catch(() => undefined);
+      if (!info?.isFile() || info.isSymbolicLink() || info.size > REPORT_EVIDENCE_MAX_FILE_BYTES) continue;
+      if (totalBytes + info.size > REPORT_EVIDENCE_MAX_TOTAL_BYTES) continue;
+      const destination = path.join(destinationRoot, ...candidate.relative.split("/"));
+      await mkdir(path.dirname(destination), { recursive: true });
+      await copyFile(candidate.source, destination);
+      totalBytes += info.size;
+      copiedForRun += 1;
+      staged.push(path.posix.join("report-evidence", label, candidate.relative));
+    }
+    if (copiedForRun === 0) {
+      throw new Error(`Report evidence run has no readable Confirm artifacts for decision ${finding.decisionId ?? "unknown"}.`);
+    }
+  }
+  return staged;
+}
+
+async function reportEvidenceScratchFiles(root: string): Promise<Array<{ source: string; relative: string }>> {
+  const rootInfo = await stat(root).catch(() => undefined);
+  if (!rootInfo?.isDirectory()) return [];
+  const out: Array<{ source: string; relative: string }> = [];
+  const visit = async (current: string, relative: string): Promise<void> => {
+    if (out.length >= REPORT_EVIDENCE_MAX_FILES) return;
+    for (const entry of await readdir(current, { withFileTypes: true })) {
+      if (out.length >= REPORT_EVIDENCE_MAX_FILES) return;
+      if (entry.isSymbolicLink() || entry.name === "out" || entry.name === "cache" || entry.name === "node_modules" || entry.name === ".git") continue;
+      const child = path.join(current, entry.name);
+      const childRelative = relative ? path.posix.join(relative, entry.name) : entry.name;
+      if (entry.isDirectory()) {
+        await visit(child, childRelative);
+      } else if (entry.isFile() && REPORT_EVIDENCE_EXTENSIONS.has(path.extname(entry.name).toLowerCase())) {
+        out.push({ source: child, relative: childRelative });
+      }
+    }
+  };
+  await visit(root, "");
+  return out;
+}
+
+function isPathWithin(root: string, candidate: string): boolean {
+  const relative = path.relative(root, candidate);
+  return relative === "" || (!relative.startsWith(`..${path.sep}`) && relative !== ".." && !path.isAbsolute(relative));
 }
 
 function historyLocation(cfg: AuditorConfig): { outputDir: string; targetName: string; historyDir?: string } {
