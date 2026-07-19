@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { daemonVisibleSandboxReadiness, drainPipelineConfirmWork, resolvePipelineMaterials } from "../dist/server/daemon.js";
+import { daemonVisibleSandboxReadiness, drainPipelineConfirmWork, initializeDaemonProcessEnvironment, resolvePipelineMaterials } from "../dist/server/daemon.js";
 import { DEFAULT_SANDBOX_IMAGE } from "../dist/security/sandbox.js";
 
 test("daemon: missing default sandbox image is an auto-recoverable capability", () => {
@@ -45,6 +45,15 @@ test("daemon: missing Apple container image does not trigger Docker auto-build",
   assert.equal(visible.ok, false);
   assert.equal(visible.autoBuild, undefined);
   assert.match(visible.message ?? "", /Apple container/);
+});
+
+test("daemon: startup restores common container runtime paths", () => {
+  const env = { PATH: "/usr/bin:/bin" };
+  initializeDaemonProcessEnvironment(env);
+
+  const parts = env.PATH.split(path.delimiter);
+  assert.ok(parts.includes("/usr/local/bin"));
+  assert.ok(parts.includes("/opt/homebrew/bin"));
 });
 
 test("daemon: pipeline resolves project materials before dropping the daemon workspace dir", async () => {

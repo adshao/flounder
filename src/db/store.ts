@@ -759,22 +759,19 @@ function decisionEvidenceText(row: Pick<ConfirmRow, "reproEvidence" | "humanGate
 function hasSourceOnlyReproductionCrutch(row: Pick<ConfirmRow, "reproEvidence" | "humanGates" | "corroboration" | "novelty" | "adjudication">): boolean {
   const text = decisionEvidenceText(row);
   if (!text) return false;
+  const liveTarget = "(?:target|deployment|state|fork|rpc|network|service|chain|environment|system|node|instance|artifact|contract|verification|reproduction|execution)";
   return [
+    /\bsource[- ]only\b/,
     /\bsource[- ]level\b/,
-    /\bmock(?:ed|s)?\b/,
-    /\bconstrained mock/,
-    /\blocal execution\b/,
-    /\bpublished source\b/,
-    /\bverified deployed source locally\b/,
-    /\bimported (?:the )?(?:verified |published )?.*source\b/,
-    /\bforge (?:test|tests|poc|harness)\b/,
-    /\blocal (?:forge |foundry |hardhat )?harness\b/,
+    /\b(?:constrained|mock[- ]backed|mock[- ]only) mocks?\b/,
+    /\bmocks?\b.*\b(?:instead of|rather than|without)\b.*\b(?:live|deployed|production)\b/,
     /\bharness\b.*\bnot a live\b/,
-    /\bnot a live\b/,
-    /\brather than a live\b/,
-    /\bno live\b/,
-    /\bwithout (?:a )?live\b/,
-    /\bdid not (?:complete|use|fork)\b/,
+    new RegExp(`\\bnot (?:an? )?live ${liveTarget}\\b`),
+    new RegExp(`\\brather than (?:an? )?live ${liveTarget}\\b`),
+    new RegExp(`\\bno live ${liveTarget}\\b`),
+    new RegExp(`\\bwithout (?:an? )?live ${liveTarget}\\b`),
+    new RegExp(`\\bdid not (?:complete|use) (?:an? |the )?(?:live |production |deployed )?${liveTarget}\\b`),
+    /\bdid not fork\b/,
     /\blive fork (?:was )?not completed\b/,
     /\bexact (?:live |production |deployment )?(?:state|liveness).*not (?:confirmed|established)\b/,
     /\bproduction (?:impact|exposure|severity|configuration).*depends\b/,
@@ -919,6 +916,44 @@ function decisionEvidenceInput(row: {
     novelty: row.novelty ?? undefined,
     engagementProfile: row.engagement_profile_json ? jsonParseOrNull(row.engagement_profile_json) : undefined,
     adjudication: row.adjudication_json ? jsonParseOrNull(row.adjudication_json) : undefined,
+  };
+}
+
+function operatorAdjudicatedDecisionInput(
+  row: Record<string, unknown>,
+  decisionsById: Map<number, Record<string, unknown>>,
+): ConfirmRow {
+  const base = decisionEvidenceInput(row);
+  const operator = row.operator_adjudication_json ? jsonParseOrNull(String(row.operator_adjudication_json)) : undefined;
+  if (!isRecord(operator)) return base;
+  const recommendation = String(operator.recommendation ?? "").trim();
+  if (recommendation === "drop") {
+    return { ...base, recommendation: "drop", submissionConfidence: "low" };
+  }
+  if (recommendation !== "submit-candidate") return base;
+
+  const applied = isRecord(operator.applied) ? operator.applied : {};
+  const original = isRecord(operator.original) ? operator.original : {};
+  const evidenceId = Number(operator.evidence_decision_id ?? applied.evidence_decision_id);
+  const evidence = Number.isFinite(evidenceId) ? decisionsById.get(evidenceId) : undefined;
+  const evidenceLevel = [
+    applied.evidence_level,
+    evidence?.evidence_level,
+    original.evidence_level,
+    row.evidence_level,
+  ].map((value) => String(value ?? "").trim()).find((value) => isRealTargetEvidenceLevel(value));
+  const confidence = [applied.submission_confidence, original.submission_confidence, row.submission_confidence]
+    .map((value) => String(value ?? "").trim())
+    .find((value) => value === "low" || value === "medium" || value === "high");
+  return {
+    ...base,
+    recommendation: "submit-candidate",
+    evidenceLevel: evidenceLevel ?? base.evidenceLevel,
+    submissionConfidence: confidence ?? "medium",
+    reproEvidence: String(applied.repro_evidence ?? evidence?.repro_evidence ?? row.repro_evidence ?? "") || undefined,
+    reproCommandId: String(applied.repro_command_id ?? evidence?.repro_command_id ?? row.repro_command_id ?? "") || undefined,
+    corroboration: String(applied.corroboration ?? evidence?.corroboration ?? row.corroboration ?? "") || undefined,
+    humanGates: undefined,
   };
 }
 
@@ -1257,7 +1292,8 @@ export class MetadataStore {
       .prepare(
         `SELECT id, project_id, reproduced, recommendation, members_json, severity,
                 evidence_level, submission_confidence, repro_evidence, corroboration,
-                novelty, human_gates, engagement_profile_json, adjudication_json
+                novelty, human_gates, engagement_profile_json, adjudication_json,
+                operator_adjudication_json
            FROM confirm_decision`,
       )
       .all() as Array<{
@@ -1275,8 +1311,10 @@ export class MetadataStore {
         human_gates: string | null;
         engagement_profile_json: string | null;
         adjudication_json: string | null;
+        operator_adjudication_json: string | null;
       }>;
     if (rows.length === 0) return;
+    const decisionsById = new Map(rows.map((row) => [Number(row.id), row as Record<string, unknown>]));
 
     const findingsByProject = new Map<number, Map<string, { severity?: string }>>();
     const findingRows = this.db
@@ -1305,12 +1343,15 @@ export class MetadataStore {
     for (const row of rows) {
       const members = parseJsonArray(row.members_json).filter((member): member is string => typeof member === "string");
       const linked = linkedFindingMetadata(findingsByProject.get(row.project_id), members);
-      const input = decisionEvidenceInput(row);
+      const input = operatorAdjudicatedDecisionInput(row as Record<string, unknown>, decisionsById);
       const enforced = enforceSubmissionReadiness([input], { requireImpactInventory: false })[0] ?? input;
       const evidenceLevel = decisionEvidenceLevel(enforced);
+      const humanGates = enforced.recommendation === "submit-candidate"
+        ? null
+        : enforced.humanGates ?? row.human_gates;
       update.run(
         enforced.recommendation ?? row.recommendation,
-        enforced.humanGates ?? row.human_gates,
+        humanGates,
         row.severity?.trim() || maxSeverity(linked.map((entry) => entry.severity)),
         evidenceLevel,
         decisionSubmissionConfidence(enforced, evidenceLevel),
@@ -2874,6 +2915,7 @@ export class MetadataStore {
       };
 
       if (input.recommendation === "drop") {
+        operatorRecord.applied = { recommendation: "drop", submission_confidence: "low" };
         this.db.prepare(
           `UPDATE confirm_decision
               SET recommendation = 'drop', submission_confidence = 'low',
@@ -2961,6 +3003,15 @@ export class MetadataStore {
       operatorRecord.evidence_decision_id = Number(evidence.id);
       operatorRecord.material_fingerprint = targetMaterial;
       operatorRecord.gate_evidence = gates;
+      operatorRecord.applied = {
+        recommendation: "submit-candidate",
+        evidence_decision_id: Number(evidence.id),
+        evidence_level: String(evidence.evidence_level),
+        submission_confidence: submissionConfidence,
+        repro_evidence: String(evidence.repro_evidence),
+        repro_command_id: String(evidence.repro_command_id),
+        corroboration: evidence.corroboration ?? target.corroboration ?? null,
+      };
       this.db.prepare(
         `UPDATE confirm_decision
             SET recommendation = 'submit-candidate', evidence_level = ?, submission_confidence = ?,

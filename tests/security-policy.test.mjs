@@ -237,6 +237,7 @@ test("open-world egress is granted per command instead of per phase", () => {
   for (const c of [
     cmd("forge", "test", "--fork-url", "https://eth.llamarpc.com"),
     cmd("cast", "call", "--rpc-url", "https://mainnet.example", "0xabc", "balanceOf()"),
+    cmd("cast", "block-number", "--rpc-url", "https://mainnet.example"),
     cmd("curl", "-fsSL", "https://example.com/spec.json"),
     cmd("wget", "-q", "https://example.com/spec.json"),
     cmd("git", "clone", "https://github.com/example/project"),
@@ -283,6 +284,27 @@ test("open-world egress is granted per command instead of per phase", () => {
 
   assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "install"), "build"), true);
   assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "test"), "confirm"), false);
+});
+
+test("open-world egress permits structurally read-only JSON-RPC POST requests", () => {
+  const read = (method, params = []) => JSON.stringify({ jsonrpc: "2.0", method, params, id: 1 });
+  for (const c of [
+    cmd("curl", "-s", "-X", "POST", "https://rpc.example", "-H", "Content-Type: application/json", "--data", read("eth_blockNumber")),
+    cmd("curl", "-fsS", "--request", "POST", "https://rpc.example", "--data-raw", read("eth_getStorageAt", ["0xabc", "0x0", "latest"])),
+    cmd("curl", "-s", "--resolve", "rpc.example:443:13.33.82.23", "-X", "POST", "https://rpc.example", "--data", read("eth_getCode", ["0xabc", "latest"])),
+    cmd("curl", "-s", "https://rpc.example", "--data-binary", JSON.stringify([
+      { jsonrpc: "2.0", method: "eth_getBalance", params: ["0xabc", "latest"], id: 1 },
+      { jsonrpc: "2.0", method: "eth_call", params: [{ to: "0xabc", data: "0x" }, "latest"], id: 2 },
+    ])),
+  ]) assert.equal(openWorldCommandNeedsNetwork(c, "build"), true, `${c.args.join(" ")} should receive read-only RPC egress`);
+
+  for (const c of [
+    cmd("curl", "-X", "POST", "https://rpc.example", "--data", read("eth_sendRawTransaction", ["0xdead"])),
+    cmd("curl", "-X", "POST", "https://rpc.example", "--data", read("personal_unlockAccount", ["0xabc"])),
+    cmd("curl", "-X", "POST", "https://rpc.example", "--data", "@request.json"),
+    cmd("curl", "--resolve", "rpc.example:443:127.0.0.1", "-X", "POST", "https://rpc.example", "--data", read("eth_blockNumber")),
+    cmd("curl", "-X", "POST", "https://rpc.example", "-H", "Authorization: Bearer secret", "--data", read("eth_blockNumber")),
+  ]) assert.equal(openWorldCommandNeedsNetwork(c, "build"), false, `${c.args.join(" ")} must remain network-sealed`);
 });
 
 test("env wrappers cannot alter the executable or sandbox settings behind an egress decision", () => {

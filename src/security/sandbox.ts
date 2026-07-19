@@ -339,15 +339,15 @@ export async function checkSandboxReadiness(input: SandboxExecutionOptions = {})
     appleFailure = appleReady.message;
   }
 
-  const ociAvailable = await isOciSandboxAvailable(options.image);
-  if (ociAvailable) return { ok: true, backend: "oci", image: options.image, allowHostFallback: options.allowHostFallback };
+  const oci = await isOciSandboxAvailable(options.image);
+  if (oci.available) return { ok: true, backend: "oci", image: options.image, allowHostFallback: options.allowHostFallback };
   if (options.backend === "oci") {
     return {
       ok: false,
       backend: "oci",
       image: options.image,
       allowHostFallback: options.allowHostFallback,
-      message: `OCI sandbox image "${options.image}" is not available. Build or pull it first, or explicitly opt into host execution for trusted local targets.`,
+      message: oci.message ?? missingOciImageMessage(options.image),
     };
   }
   if (options.allowHostFallback) return { ok: true, backend: "host", image: options.image, allowHostFallback: true };
@@ -356,7 +356,7 @@ export async function checkSandboxReadiness(input: SandboxExecutionOptions = {})
     backend: "auto",
     image: options.image,
     allowHostFallback: false,
-    message: noAutoSandboxMessage(options.image, appleFailure),
+    message: noAutoSandboxMessage(options.image, appleFailure, oci.message),
   };
 }
 
@@ -436,16 +436,16 @@ async function runWithSelectedBackend(input: ProcessRunInput): Promise<{ stdout:
     appleFailure = appleReady.message;
   }
 
-  const ociAvailable = await isOciSandboxAvailable(input.options.image);
-  if (input.options.backend === "oci" || ociAvailable) {
-    if (!ociAvailable) {
-      return unavailableResult(`OCI sandbox image "${input.options.image}" is not available. Build or pull it first, or explicitly opt into host execution for trusted local targets.`);
+  const oci = await isOciSandboxAvailable(input.options.image);
+  if (input.options.backend === "oci" || oci.available) {
+    if (!oci.available) {
+      return unavailableResult(oci.message ?? missingOciImageMessage(input.options.image));
     }
     return runOciSandboxProcess(input);
   }
 
   if (input.options.allowHostFallback) return runHostSandboxProcess(input);
-  return unavailableResult(noAutoSandboxMessage(input.options.image, appleFailure));
+  return unavailableResult(noAutoSandboxMessage(input.options.image, appleFailure, oci.message));
 }
 
 function unavailableResult(message: string): { stdout: string; stderr: string; exitCode: number; timedOut: boolean } {
@@ -1146,15 +1146,20 @@ function replaceAll(input: string, needle: string, replacement: string): string 
   return input.split(needle).join(replacement);
 }
 
-const ociAvailability = new Map<string, Promise<boolean>>();
+const ociAvailability = new Map<string, Promise<OciAvailability>>();
 const appleContainerAvailability = new Map<string, Promise<AppleContainerAvailability>>();
+
+interface OciAvailability {
+  available: boolean;
+  message?: string;
+}
 
 interface AppleContainerAvailability {
   available: boolean;
   message?: string;
 }
 
-function isOciSandboxAvailable(image: string): Promise<boolean> {
+function isOciSandboxAvailable(image: string): Promise<OciAvailability> {
   let cached = ociAvailability.get(image);
   if (!cached) {
     cached = checkOciSandboxAvailable(image);
@@ -1163,7 +1168,7 @@ function isOciSandboxAvailable(image: string): Promise<boolean> {
   return cached;
 }
 
-async function checkOciSandboxAvailable(image: string): Promise<boolean> {
+async function checkOciSandboxAvailable(image: string): Promise<OciAvailability> {
   const result = await runSpawnedProcess({
     program: "docker",
     args: ["image", "inspect", image],
@@ -1172,7 +1177,39 @@ async function checkOciSandboxAvailable(image: string): Promise<boolean> {
     timeoutMs: 5000,
     maxLogBytes: 2000,
   });
-  return result.exitCode === 0 && !result.timedOut;
+  if (result.exitCode === 0 && !result.timedOut) return { available: true };
+  if (result.timedOut) {
+    return {
+      available: false,
+      message: `Docker did not respond while inspecting OCI sandbox image "${image}". Verify the Docker daemon is running and reachable.`,
+    };
+  }
+  const output = sandboxRuntimeDiagnostic(`${result.stderr}\n${result.stdout}`);
+  if (/spawn docker ENOENT|not found|No such file or directory/i.test(output)) {
+    return {
+      available: false,
+      message: `Docker CLI was not found on PATH while inspecting OCI sandbox image "${image}". Install Docker or configure the daemon process PATH.`,
+    };
+  }
+  if (/permission denied|operation not permitted/i.test(output)) {
+    return {
+      available: false,
+      message: `Flounder is not permitted to access the Docker API while inspecting OCI sandbox image "${image}". Verify Docker socket permissions for the daemon process.${output ? ` Docker reported: ${output}` : ""}`,
+    };
+  }
+  if (/cannot connect|connection refused|is the docker daemon running|docker daemon.*not running|error during connect/i.test(output)) {
+    return {
+      available: false,
+      message: `Docker is not reachable while inspecting OCI sandbox image "${image}". Start Docker and verify the daemon process can access its socket.${output ? ` Docker reported: ${output}` : ""}`,
+    };
+  }
+  if (/no such image|image.*not found|unable to find image/i.test(output)) {
+    return { available: false, message: missingOciImageMessage(image) };
+  }
+  return {
+    available: false,
+    message: `Docker could not inspect OCI sandbox image "${image}".${output ? ` Docker reported: ${output}` : ""}`,
+  };
 }
 
 function isAppleContainerSandboxAvailable(image: string): Promise<AppleContainerAvailability> {
@@ -1259,9 +1296,18 @@ async function ensureAppleContainerSealedNetwork(): Promise<{ ok: true } | { ok:
   };
 }
 
-function noAutoSandboxMessage(image: string, appleFailure?: string): string {
+function missingOciImageMessage(image: string): string {
+  return `OCI sandbox image "${image}" is not available. Build or pull it first, or explicitly opt into host execution for trusted local targets.`;
+}
+
+function noAutoSandboxMessage(image: string, appleFailure?: string, ociFailure?: string): string {
   const appleHint = appleFailure ? ` Apple container auto-selection was skipped: ${appleFailure}` : "";
-  return `No sandbox backend is available for image "${image}", and host execution fallback is disabled.${appleHint} Install/start Apple container on Apple silicon macOS or install Docker and build/pull the image, or pass --allow-host-execution only for trusted local targets.`;
+  const ociHint = ociFailure ? ` Docker OCI selection was skipped: ${ociFailure}` : "";
+  return `No sandbox backend is available for image "${image}", and host execution fallback is disabled.${appleHint}${ociHint} Install/start Apple container on Apple silicon macOS or install Docker and build/pull the image, or pass --allow-host-execution only for trusted local targets.`;
+}
+
+function sandboxRuntimeDiagnostic(input: string): string {
+  return redactMachineStrings(redactLocalPaths(input.trim(), machineRedactionPaths())).replace(/\s+/g, " ").slice(0, 500);
 }
 
 async function defaultSandboxDockerfilePath(): Promise<string | undefined> {
@@ -1324,6 +1370,7 @@ function dockerClientEnv(): NodeJS.ProcessEnv {
   for (const key of ["PATH", "HOME", "DOCKER_HOST", "DOCKER_CONTEXT", "DOCKER_CONFIG", "DOCKER_CERT_PATH", "DOCKER_TLS_VERIFY"]) {
     if (process.env[key] !== undefined) out[key] = process.env[key];
   }
+  out.PATH = sandboxToolPath(process.env.PATH);
   return out;
 }
 
@@ -1332,6 +1379,7 @@ function containerClientEnv(): NodeJS.ProcessEnv {
   for (const key of ["PATH", "HOME"]) {
     if (process.env[key] !== undefined) out[key] = process.env[key];
   }
+  out.PATH = sandboxToolPath(process.env.PATH);
   return out;
 }
 

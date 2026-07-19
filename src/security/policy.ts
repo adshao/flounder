@@ -241,6 +241,7 @@ export function openWorldCommandNeedsNetwork(command: StructuredReproductionComm
 }
 
 function isReadOnlyCurl(args: string[]): boolean {
+  if (isReadOnlyJsonRpcCurl(args)) return true;
   const forbiddenLong = /^--(?:data(?:-|=|$)|form(?:-|=|$)|upload-file(?:=|$)|json(?:=|$)|url-query(?:=|$)|config(?:=|$)|header(?:=|$)|proto(?:-|=|$)|next$)/i;
   if (args.some((arg) => forbiddenLong.test(arg))) return false;
   for (let idx = 0; idx < args.length; idx += 1) {
@@ -261,6 +262,112 @@ function isReadOnlyCurl(args: string[]): boolean {
     if (method && !/^(?:GET|HEAD)$/i.test(method)) return false;
   }
   return hasOnlyHttpRemoteTargets(args);
+}
+
+const READ_ONLY_JSON_RPC_METHODS = new Set([
+  "debug_traceCall",
+  "eth_blockNumber",
+  "eth_call",
+  "eth_chainId",
+  "eth_createAccessList",
+  "eth_estimateGas",
+  "eth_feeHistory",
+  "eth_gasPrice",
+  "eth_maxPriorityFeePerGas",
+  "eth_protocolVersion",
+  "eth_syncing",
+  "net_version",
+  "trace_block",
+  "trace_call",
+  "trace_replayTransaction",
+  "web3_clientVersion",
+]);
+
+function isReadOnlyJsonRpcCurl(args: string[]): boolean {
+  let method: string | undefined;
+  let body: string | undefined;
+  let rpcUrl: URL | undefined;
+  const resolveTargets: string[] = [];
+  for (let idx = 0; idx < args.length; idx += 1) {
+    const arg = args[idx] ?? "";
+    if (/^-[fsS]+$/.test(arg) || new Set(["--fail", "--fail-with-body", "--silent", "--show-error", "--no-progress-meter"]).has(arg)) continue;
+    if (arg === "-X" || arg === "--request") {
+      method = args[idx + 1];
+      idx += 1;
+      continue;
+    }
+    if (arg === "-H" || arg === "--header") {
+      const header = args[idx + 1] ?? "";
+      if (!/^(?:content-type|accept):\s*application\/json\s*$/i.test(header)) return false;
+      idx += 1;
+      continue;
+    }
+    if (arg === "-d" || arg === "--data" || arg === "--data-raw" || arg === "--data-binary") {
+      if (body !== undefined) return false;
+      body = args[idx + 1];
+      if (!body || body.startsWith("@")) return false;
+      idx += 1;
+      continue;
+    }
+    if (arg === "--resolve") {
+      const target = args[idx + 1];
+      if (!target) return false;
+      resolveTargets.push(target);
+      idx += 1;
+      continue;
+    }
+    if (arg === "--connect-timeout" || arg === "--max-time" || arg === "--retry" || arg === "--retry-delay") {
+      if (!/^\d+(?:\.\d+)?$/.test(args[idx + 1] ?? "")) return false;
+      idx += 1;
+      continue;
+    }
+    if (/^https?:\/\//i.test(arg)) {
+      if (rpcUrl) return false;
+      try {
+        rpcUrl = new URL(arg);
+      } catch {
+        return false;
+      }
+      if (isLocalUrl(arg)) return false;
+      continue;
+    }
+    return false;
+  }
+  if (!rpcUrl || !body || (method !== undefined && method.toUpperCase() !== "POST")) return false;
+  if (resolveTargets.some((target) => !isSafeCurlResolveTarget(target, rpcUrl))) return false;
+  let payload: unknown;
+  try {
+    payload = JSON.parse(body);
+  } catch {
+    return false;
+  }
+  const requests = Array.isArray(payload) ? payload : [payload];
+  return requests.length > 0 && requests.every(isReadOnlyJsonRpcRequest);
+}
+
+function isReadOnlyJsonRpcRequest(input: unknown): boolean {
+  if (!input || typeof input !== "object" || Array.isArray(input)) return false;
+  const request = input as Record<string, unknown>;
+  if (Object.keys(request).some((key) => !new Set(["jsonrpc", "id", "method", "params"]).has(key))) return false;
+  if (request.jsonrpc !== "2.0" || typeof request.method !== "string") return false;
+  if (request.params !== undefined && !Array.isArray(request.params) && (typeof request.params !== "object" || request.params === null)) return false;
+  return READ_ONLY_JSON_RPC_METHODS.has(request.method) || /^eth_get[A-Z][A-Za-z0-9]*$/.test(request.method);
+}
+
+function isSafeCurlResolveTarget(input: string, rpcUrl: URL): boolean {
+  const match = /^([^:]+):(\d+):((?:\d{1,3}\.){3}\d{1,3})$/.exec(input);
+  if (!match || match[1]?.toLowerCase() !== rpcUrl.hostname.toLowerCase()) return false;
+  const port = Number(match[2]);
+  if (port !== Number(rpcUrl.port || (rpcUrl.protocol === "https:" ? 443 : 80))) return false;
+  const octets = (match[3] ?? "").split(".").map(Number);
+  if (octets.length !== 4 || octets.some((part) => !Number.isInteger(part) || part < 0 || part > 255)) return false;
+  const [a, b] = octets;
+  return a !== 0
+    && a !== 10
+    && a !== 127
+    && !(a === 169 && b === 254)
+    && !(a === 172 && (b ?? 0) >= 16 && (b ?? 0) <= 31)
+    && !(a === 192 && b === 168);
 }
 
 function isReadOnlyWget(args: string[]): boolean {
@@ -358,7 +465,7 @@ function hasOnlyHttpRemoteTargets(args: string[]): boolean {
 
 function isReadOnlyCastCommand(args: string[]): boolean {
   const verb = args.find((arg) => !arg.startsWith("-"));
-  const readOnly = new Set(["call", "balance", "code", "storage", "block", "logs", "receipt", "tx", "chain-id", "client", "gas-price", "nonce"]);
+  const readOnly = new Set(["call", "balance", "code", "storage", "block", "block-number", "logs", "receipt", "tx", "chain-id", "client", "gas-price", "nonce"]);
   return Boolean(verb && readOnly.has(verb) && targetsNonLocalNetwork(args));
 }
 

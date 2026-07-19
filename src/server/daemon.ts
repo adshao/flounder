@@ -21,7 +21,7 @@ import type { Coverage, DiscoveryBacklogInput, FindingPhaseAttemptInput, RunKind
 import type { AgentFinding, AuditScope } from "../agent/tools.js";
 import type { RunHealth } from "../agent/discovery-artifacts.js";
 import { assertProviderAuthenticated, knownRuntimeProviders, providerAuthStatus } from "../provider-auth.js";
-import { buildDefaultSandboxImage, checkSandboxReadiness, DEFAULT_SANDBOX_IMAGE, isDefaultSandboxImage, type SandboxImageBuildResult, type SandboxReadiness } from "../security/sandbox.js";
+import { buildDefaultSandboxImage, checkSandboxReadiness, DEFAULT_SANDBOX_IMAGE, isDefaultSandboxImage, sandboxToolPath, type SandboxImageBuildResult, type SandboxReadiness } from "../security/sandbox.js";
 import { RunLogger } from "../trace/logger.js";
 import { positiveIntegerId } from "../util/ids.js";
 
@@ -39,6 +39,7 @@ type Activity = { kind: string; delta?: string; tool?: string; step?: number; st
 let defaultSandboxBuild: Promise<SandboxImageBuildResult> | undefined;
 
 export async function runDaemon(opts: DaemonOptions): Promise<void> {
+  initializeDaemonProcessEnvironment();
   const base = opts.server.replace(/\/$/, "");
   const headers = { authorization: `Bearer ${opts.token}`, "content-type": "application/json" };
   const out = opts.out ?? defaultOutputDir();
@@ -197,6 +198,10 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
+}
+
+export function initializeDaemonProcessEnvironment(env: NodeJS.ProcessEnv = process.env): void {
+  env.PATH = sandboxToolPath(env.PATH);
 }
 
 async function runPipelineJob(

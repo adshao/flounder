@@ -321,7 +321,7 @@ test("api: project run defaults leave map/dig turns unbounded and use standard s
   });
 });
 
-test("api: project run prefers the current prepared workspace over stored source paths", async () => {
+test("api: project phases prefer the current prepared workspace beyond the recent-run display window", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -356,6 +356,16 @@ test("api: project run prefers the current prepared workspace over stored source
     try {
       const prepareRun = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
       store.finishRun(prepareRun, "done");
+      for (let i = 0; i < 55; i += 1) {
+        const noiseRun = store.startRun({
+          projectId: created.id,
+          kind: "report",
+          runDir: path.join(out, `failed-followup-${i}`),
+          provider: "openai-codex",
+          model: "gpt-5.5",
+        });
+        store.finishRun(noiseRun, "error");
+      }
     } finally {
       store.close();
     }
@@ -372,6 +382,19 @@ test("api: project run prefers the current prepared workspace over stored source
     assert.deepEqual(spec.corpusPaths, []);
     assert.equal(spec.clue, undefined);
 
+    const audit = await json(await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "audit",
+      scope: "prepared-scope",
+    }));
+    assert.equal(audit.queued, true);
+    const auditJob = (await json(await fetch(base + "/api/jobs/" + audit.jobId))).job;
+    const auditSpec = JSON.parse(auditJob.spec_json);
+    assert.equal(auditSpec.scope, "prepared-scope");
+    assert.equal(auditSpec.dir, undefined);
+    assert.deepEqual(auditSpec.sourcePaths, [workspace]);
+    assert.equal(auditSpec.buildRoot, workspace);
+    assert.deepEqual(auditSpec.corpusPaths, []);
+
     const explicit = await json(await post(`/api/projects/${created.uuid}/runs`, {
       verb: "run",
       overrides: { sourcePaths: ["./explicit"], buildRoot: "./explicit", corpusPaths: ["docs.md"] },
@@ -383,6 +406,20 @@ test("api: project run prefers the current prepared workspace over stored source
     assert.deepEqual(explicitSpec.sourcePaths, ["./explicit"]);
     assert.equal(explicitSpec.buildRoot, "./explicit");
     assert.deepEqual(explicitSpec.corpusPaths, ["docs.md"]);
+
+    const explicitAudit = await json(await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "audit",
+      scope: "explicit-scope",
+      overrides: { sourcePaths: ["./explicit"], buildRoot: "./explicit", corpusPaths: ["docs.md"] },
+    }));
+    assert.equal(explicitAudit.queued, true);
+    const explicitAuditJob = (await json(await fetch(base + "/api/jobs/" + explicitAudit.jobId))).job;
+    const explicitAuditSpec = JSON.parse(explicitAuditJob.spec_json);
+    assert.equal(explicitAuditSpec.scope, "explicit-scope");
+    assert.equal(explicitAuditSpec.dir, created.uuid);
+    assert.deepEqual(explicitAuditSpec.sourcePaths, ["./explicit"]);
+    assert.equal(explicitAuditSpec.buildRoot, "./explicit");
+    assert.deepEqual(explicitAuditSpec.corpusPaths, ["docs.md"]);
   });
 });
 
@@ -686,6 +723,89 @@ test("api: normal bug bounty projects keep real-target confirm before reports", 
     const report = await post(`/api/projects/${created.uuid}/runs`, { verb: "report" });
     assert.equal(report.status, 400);
     assert.match((await report.json()).error, /no submission-ready decisions/i);
+  });
+});
+
+test("api: project completion uses current phase work and cumulative standard coverage", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", {
+      name: "settled-standard-project",
+      sourcePaths: ["./src"],
+      config: { scopeCoverageMode: "standard", maxScopes: 30, engagement: { kind: "bug-bounty" } },
+    }));
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        ...Array.from({ length: 30 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 40 - i })),
+        ...Array.from({ length: 2 }, (_, i) => ({ scopeId: `pending-${i}`, title: `Pending ${i}`, status: "pending", score: 2 - i })),
+      ]);
+      const auditRun = store.startRun({
+        projectId: created.id,
+        kind: "audit",
+        runDir: path.join(out, "settled-standard-audit"),
+        materialFingerprint: "sha256:settled-standard",
+      });
+      store.upsertFindings(created.id, auditRun, [{
+        findingKey: "ksettledstandard",
+        title: "Settled source finding",
+        status: "confirmed-executable",
+      }, {
+        findingKey: "ksettledduplicate",
+        title: "Duplicate suspected finding",
+        status: "suspected",
+      }]);
+      const currentFindings = store.listFindings(created.id);
+      const canonical = currentFindings.find((finding) => finding.finding_key === "ksettledstandard");
+      const duplicate = currentFindings.find((finding) => finding.finding_key === "ksettledduplicate");
+      store.setFindingTracking(Number(duplicate.id), "duplicate", Number(canonical.id));
+      store.finishRun(auditRun, "done");
+
+      const confirmRun = store.startRun({
+        projectId: created.id,
+        kind: "confirm",
+        runDir: path.join(out, "settled-standard-confirm"),
+        materialFingerprint: "sha256:settled-standard",
+      });
+      store.upsertConfirmDecisions(created.id, confirmRun, [{
+        bug: "Settled source finding",
+        reproduced: "yes",
+        recommendation: "drop",
+        members: ["ksettledstandard"],
+        evidenceLevel: "source-only-local-confirmed",
+      }, {
+        bug: "Known issue that does not need more setup",
+        reproduced: "could-not-set-up",
+        recommendation: "drop",
+        members: ["kknownsetup"],
+        evidenceLevel: "could-not-set-up",
+      }]);
+      store.recordRunHealth(confirmRun, {
+        status: "needs-human",
+        reasons: ["Historical decision needed operator review."],
+        signals: { needsHuman: 1 },
+      });
+      store.finishRun(confirmRun, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + `/api/projects/${created.uuid}`));
+    assert.equal(detail.latestRunHealth, null, "settled decisions hide stale historical confirm health");
+
+    const list = await json(await fetch(base + "/api/projects"));
+    const row = list.projects.find((project) => project.uuid === created.uuid);
+    assert.equal(row.verifyPendingFindings, 0, "duplicate findings do not become Verify work");
+    assert.equal(row.confirmPendingFindings, 0, "snapshot pending work matches the actual Confirm worklist");
+    assert.equal(row.progress.audited, 30);
+    assert.equal(row.progress.pending, 2);
+
+    const done = await json(await fetch(base + "/api/projects?status=done"));
+    assert.ok(done.projects.some((project) => project.uuid === created.uuid), "Standard is complete at 30 cumulative audited scopes");
+    const needsWork = await json(await fetch(base + "/api/projects?status=needs-work"));
+    assert.ok(!needsWork.projects.some((project) => project.uuid === created.uuid));
   });
 });
 
@@ -1996,7 +2116,8 @@ test("api: report launch queues only reproduced real-target findings that were n
         refutationStatus: "conflict",
         refutationReason: "Local verification conflicts with the real-target reproduction.",
       }]);
-      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "report-launch-confirm") });
+      const confirmRunDir = path.join(out, "report-launch-confirm");
+      const confirmRun = store.startRun({ projectId: created.id, kind: "confirm", runDir: confirmRunDir });
       store.upsertConfirmDecisions(created.id, confirmRun, [
         {
           bug: "Ready bug",
@@ -2090,6 +2211,7 @@ test("api: report launch queues only reproduced real-target findings that were n
     assert.equal(spec.verb, "report");
     assert.equal(spec.reportFindings.length, 1);
     assert.equal(spec.reportFindings[0].unit, "decision");
+    assert.equal(spec.reportFindings[0].evidenceRunDir, path.join(out, "report-launch-confirm"));
     assert.match(spec.reportFindings[0].findingKey, /^decision-/);
     assert.equal(spec.reportFindings[0].title, "Ready bug");
     assert.equal(spec.reportFindings[0].linkedFindings[0].finding_key, "kready");
@@ -2103,6 +2225,7 @@ test("api: report launch queues only reproduced real-target findings that were n
     assert.equal(regeneratedSpec.verb, "report");
     assert.equal(regeneratedSpec.reportFindings.length, 1);
     assert.equal(regeneratedSpec.reportFindings[0].unit, "decision");
+    assert.equal(regeneratedSpec.reportFindings[0].evidenceRunDir, path.join(out, "report-launch-confirm"));
     assert.equal(regeneratedSpec.reportFindings[0].title, "Existing report bug");
     assert.equal(regeneratedSpec.reportFindings[0].linkedFindings[0].finding_key, "kexisting");
     assert.equal(regeneratedSpec.reportFindings[0].decisions[0].repro_command_id, "cmd-existing");

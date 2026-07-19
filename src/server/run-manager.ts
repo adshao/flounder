@@ -127,6 +127,8 @@ export interface ConfirmSettledRow {
 export interface ReportFindingSpec {
   findingId?: number | undefined;
   decisionId?: number | undefined;
+  /** Internal Confirm run used to stage read-only reproduction evidence for Report. */
+  evidenceRunDir?: string | undefined;
   reportKey?: string | undefined;
   unit?: "finding" | "decision" | undefined;
   findingKey: string;

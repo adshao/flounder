@@ -970,6 +970,73 @@ test("store: source-level confirm evidence is not promoted to real-target submis
   db.close();
 });
 
+test("store: startup preserves operator-adjudicated fork evidence when safety notes rule out live writes", async () => {
+  const { dir, dbPath } = await tempDbPath();
+  try {
+    let db = MetadataStore.openForOutput(dir);
+    const projectId = db.upsertProject({ name: "operator-fork-safety-note" });
+    const auditRun = db.startRun({ projectId, kind: "audit", runDir: path.join(dir, "audit"), materialFingerprint: "sha256:operator-fork" });
+    db.upsertFindings(projectId, auditRun, [{
+      findingKey: "kforksafetynote",
+      title: "Fork-reproduced issue",
+      status: "confirmed-differential",
+    }]);
+    db.finishRun(auditRun, "done");
+    const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: path.join(dir, "confirm"), materialFingerprint: "sha256:operator-fork" });
+    db.upsertConfirmDecisions(projectId, confirmRun, [{
+      bug: "Fork-reproduced issue",
+      reproduced: "yes",
+      recommendation: "needs-human",
+      members: ["kforksafetynote"],
+      evidenceLevel: "local-fork-reproduced",
+      reproEvidence: "cmd-fork reproduced the deployed contract effect on a fixed local fork",
+      reproCommandId: "cmd-fork",
+      humanGates: "Known-issue and payout review remain pending.",
+      engagementProfile: { policy_kind: "bug_bounty", required_gates: ["scope", "live_impact", "known_issue", "payout"] },
+    }]);
+    db.finishRun(confirmRun, "done");
+    const decisionId = Number(db.listConfirmDecisions(projectId)[0].id);
+    const adjudicated = db.adjudicateConfirmDecision(decisionId, {
+      recommendation: "submit-candidate",
+      rationale: "The fixed local fork and public program review settle every gate.",
+      evidenceDecisionId: decisionId,
+      submissionConfidence: "medium",
+      gateEvidence: {
+        scope: "The affected contract is in the pinned bounty scope.",
+        liveImpact: "The fixed local fork reproduced the deployed effect with no live write or broadcast.",
+        knownIssue: "Bounded public checks found no matching disclosure.",
+        payout: "The published severity tier applies, without asserting a guaranteed award.",
+      },
+    });
+    assert.equal(adjudicated.ok, true);
+    assert.equal(adjudicated.decision.recommendation, "submit-candidate");
+    assert.equal(adjudicated.decision.evidence_level, "local-fork-reproduced");
+    db.close();
+
+    const legacy = new DatabaseSync(dbPath);
+    legacy.prepare(
+      `UPDATE confirm_decision
+          SET recommendation = 'needs-human', evidence_level = 'source-only-local-confirmed',
+              submission_confidence = 'low',
+              human_gates = 'Framework blocked submit-candidate: evidence level is source-only-local-confirmed'
+        WHERE id = ?`,
+    ).run(decisionId);
+    legacy.close();
+
+    db = MetadataStore.openForOutput(dir);
+    const restored = db.getConfirmDecision(decisionId);
+    assert.equal(restored.recommendation, "submit-candidate");
+    assert.equal(restored.evidence_level, "local-fork-reproduced");
+    assert.equal(restored.submission_confidence, "medium");
+    assert.equal(restored.human_gates, null);
+    assert.ok(restored.operator_adjudication_json);
+    assert.equal(db.countConfirmedBugs(projectId), 1);
+    db.close();
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("store: ambiguous reproduced decisions do not default to real-target evidence", async () => {
   const db = await tempDb();
   const projectId = db.upsertProject({ name: "p" });
