@@ -358,7 +358,7 @@ function hasOnlyHttpRemoteTargets(args: string[]): boolean {
 
 function isReadOnlyCastCommand(args: string[]): boolean {
   const verb = args.find((arg) => !arg.startsWith("-"));
-  const readOnly = new Set(["call", "balance", "code", "storage", "block", "logs", "receipt", "tx", "chain-id", "client", "gas-price", "nonce"]);
+  const readOnly = new Set(["call", "balance", "code", "storage", "block", "block-number", "logs", "receipt", "tx", "chain-id", "client", "gas-price", "nonce"]);
   return Boolean(verb && readOnly.has(verb) && targetsNonLocalNetwork(args));
 }
 

@@ -237,6 +237,7 @@ test("open-world egress is granted per command instead of per phase", () => {
   for (const c of [
     cmd("forge", "test", "--fork-url", "https://eth.llamarpc.com"),
     cmd("cast", "call", "--rpc-url", "https://mainnet.example", "0xabc", "balanceOf()"),
+    cmd("cast", "block-number", "--rpc-url", "https://mainnet.example"),
     cmd("curl", "-fsSL", "https://example.com/spec.json"),
     cmd("wget", "-q", "https://example.com/spec.json"),
     cmd("git", "clone", "https://github.com/example/project"),
