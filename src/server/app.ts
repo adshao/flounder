@@ -5226,7 +5226,8 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
 function verifyWorklist(store: MetadataStore, projectId: number, currentResultRunIds: Set<number>, materialBoundary?: Record<string, unknown>, fromStart = false): unknown[] {
   return reportableFindings(store.listFindings(projectId)
     .filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary))
-    .filter((row) => !isIgnoredFinding(row)))
+    .filter((row) => !isIgnoredFinding(row))
+    .filter((row) => !findingTrackingBlocksProgress(row)))
     .filter((row) => {
       const status = String(row.status ?? "");
       if (row.refutation_status === "conflict"
@@ -5577,7 +5578,7 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       : currentConfirmDecisions(store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter((row) => row.reproduced === "yes" && isRealTargetDecisionEvidence(stringValue(row.evidence_level))).length;
     const auditConfirmedFindings = countAuditConfirmedFindings(findings);
-    const verifyPendingFindings = (counts.suspected ?? 0) + (counts["confirmed-source"] ?? 0);
+    const verifyPendingFindings = verifyWorklist(store, id, currentRunIds, materialBoundary).length;
     const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, allRuns);
     const confirmPendingFindings = requiresRealTargetConfirmation
       ? confirmWorkRows(store, id, currentRunIds, materialBoundary, confirmDecisions).length

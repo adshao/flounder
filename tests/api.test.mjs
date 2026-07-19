@@ -752,7 +752,15 @@ test("api: project completion uses current phase work and cumulative standard co
         findingKey: "ksettledstandard",
         title: "Settled source finding",
         status: "confirmed-executable",
+      }, {
+        findingKey: "ksettledduplicate",
+        title: "Duplicate suspected finding",
+        status: "suspected",
       }]);
+      const currentFindings = store.listFindings(created.id);
+      const canonical = currentFindings.find((finding) => finding.finding_key === "ksettledstandard");
+      const duplicate = currentFindings.find((finding) => finding.finding_key === "ksettledduplicate");
+      store.setFindingTracking(Number(duplicate.id), "duplicate", Number(canonical.id));
       store.finishRun(auditRun, "done");
 
       const confirmRun = store.startRun({
@@ -789,6 +797,7 @@ test("api: project completion uses current phase work and cumulative standard co
 
     const list = await json(await fetch(base + "/api/projects"));
     const row = list.projects.find((project) => project.uuid === created.uuid);
+    assert.equal(row.verifyPendingFindings, 0, "duplicate findings do not become Verify work");
     assert.equal(row.confirmPendingFindings, 0, "snapshot pending work matches the actual Confirm worklist");
     assert.equal(row.progress.audited, 30);
     assert.equal(row.progress.pending, 2);
