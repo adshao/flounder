@@ -5236,7 +5236,7 @@ function verifyWorklist(store: MetadataStore, projectId: number, currentResultRu
         && store.hasFindingPhaseRetry(projectId, "finding", Number(row.id), "verify")) return true;
       if (status === "suspected" || status === "confirmed-source") return true;
       if (!fromStart || row.confirm_status != null) return false;
-      return status === "confirmed-executable" || status === "confirmed-differential";
+      return status === "needs-evidence" || status === "confirmed-executable" || status === "confirmed-differential";
     })
     .map((row) => {
       const inputFingerprint = findingPhaseFingerprint(store, row, "verify", materialBoundary);

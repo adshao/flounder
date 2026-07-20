@@ -1238,6 +1238,16 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
           confidence: 0.72,
         },
       ], "synthesis");
+      store.upsertFindings(created.id, runId, [
+        {
+          findingKey: "needs-evidence-bug",
+          title: "Proof binding could not be verified with the available toolchain",
+          location: "src/Rollup.sol:52",
+          severity: "high",
+          status: "needs-evidence",
+          confidence: 0.78,
+        },
+      ], "verify");
     } finally {
       store.close();
     }
@@ -1261,7 +1271,10 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
     }));
     assert.equal(restartVerify.phase, "verify");
     assert.equal(restartVerify.verifyFromStart, true);
-    assert.deepEqual(new Set(restartVerify.verifyFindings.map((finding) => finding.finding_key)), new Set(["suspected-bug", "duplicate-suspected-bug", "confirmed-bug"]));
+    assert.deepEqual(
+      new Set(restartVerify.verifyFindings.map((finding) => finding.finding_key)),
+      new Set(["suspected-bug", "duplicate-suspected-bug", "needs-evidence-bug", "confirmed-bug"]),
+    );
 
     const confirm = await json(await fetch(base + "/api/daemon/pipeline-worklist", {
       method: "POST",
