@@ -916,6 +916,51 @@ test("api: standard pipeline continue finishes pending verify work before openin
   });
 });
 
+test("api: Verify from start skips an empty Dig even when the ordinary pipeline round is settled", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", {
+      name: "verify-from-start-settled",
+      sourcePaths: ["./src"],
+      config: { scopeCoverageMode: "standard" },
+    }));
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        ...Array.from({ length: 30 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 30 - i })),
+      ]);
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir: path.join(out, "verify-from-start-settled-run") });
+      store.upsertFindings(created.id, runId, [
+        {
+          findingKey: "needs-evidence-retry",
+          title: "Prior verification needs another toolchain",
+          location: "src/A.sol:1",
+          severity: "high",
+          status: "needs-evidence",
+          evidence: "the earlier execution environment could not build the proof",
+        },
+      ], "verify");
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const pipeline = await json(await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "run",
+      pipeline: true,
+      verifyFromStart: true,
+    }));
+    assert.equal(pipeline.queued, true);
+    const pipelineJob = (await json(await fetch(base + "/api/jobs/" + pipeline.jobId))).job;
+    const pipelineSpec = JSON.parse(pipelineJob.spec_json);
+    assert.equal(pipelineSpec.verifyFromStart, true);
+    assert.equal(pipelineSpec.maxScopes, 0);
+    assert.equal(pipelineSpec.pipelineStart, "settle", "Verify restart must not create a zero-scope Run");
+  });
+});
+
 test("api: blocked confirm decisions stay idempotent until focused retry or explicit coverage continuation", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
