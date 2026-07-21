@@ -2510,10 +2510,14 @@ async function runLaunch(c: Ctx): Promise<void> {
     spec.verb === "run"
     && spec.pipeline
     && spec.maxScopes === 0
-    && pipelinePostAuditWorkPending(c.store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation)
+    && (
+      spec.verifyFromStart
+      || pipelinePostAuditWorkPending(c.store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation)
+    )
   ) {
     // Continue the evidence tail directly. Starting runAudit with maxScopes=0 still copies and
     // initializes the target and records a misleading empty Dig run before Verify/Confirm/Report.
+    // An explicit Verify restart is work even when the ordinary pending-work list is settled.
     spec.pipelineStart = "settle";
     spec.maxScopes = 0;
   }
@@ -2766,6 +2770,7 @@ function pipelineRoundComplete(
   materialBoundary: Record<string, unknown> | undefined,
   requiresRealTargetConfirmation: boolean,
 ): boolean {
+  if (spec.verifyFromStart) return false;
   if ((spec.nextActions?.length ?? 0) > 0) return false;
   if (spec.continueCoverage) return false;
   if (spec.maxScopes !== 0) return false;
@@ -5236,7 +5241,7 @@ function verifyWorklist(store: MetadataStore, projectId: number, currentResultRu
         && store.hasFindingPhaseRetry(projectId, "finding", Number(row.id), "verify")) return true;
       if (status === "suspected" || status === "confirmed-source") return true;
       if (!fromStart || row.confirm_status != null) return false;
-      return status === "confirmed-executable" || status === "confirmed-differential";
+      return status === "needs-evidence" || status === "confirmed-executable" || status === "confirmed-differential";
     })
     .map((row) => {
       const inputFingerprint = findingPhaseFingerprint(store, row, "verify", materialBoundary);
