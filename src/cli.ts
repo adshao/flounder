@@ -17,6 +17,7 @@ import { runDaemon } from "./server/daemon.js";
 import { isSandboxBackend } from "./security/sandbox.js";
 import { knownRuntimeProviders, loginProvider, printProviderCheck, providerAuthStatus } from "./provider-auth.js";
 import { absolutizeRunGroupManifest, normalizeRunGroupManifest } from "./evaluation/contracts.js";
+import { compactHistoricalInspectionWorkspaces, readStoredRunsForCompaction } from "./storage/compact.js";
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
@@ -27,6 +28,11 @@ async function main(argv: string[]): Promise<void> {
 
   if (cmd === "history") {
     await runHistoryCommand(rest);
+    return;
+  }
+
+  if (cmd === "storage") {
+    await runStorageCommand(rest);
     return;
   }
 
@@ -1031,6 +1037,54 @@ async function runHistoryCommand(args: string[]): Promise<void> {
   console.log(`[history] runs=${manifest.aggregate.totalRuns} materials=${manifest.aggregate.materialsTotal} findings=${manifest.aggregate.findingsTotal}`);
 }
 
+async function runStorageCommand(args: string[]): Promise<void> {
+  const [subcommand, ...rest] = args;
+  if (subcommand === "help" || subcommand === "--help" || subcommand === "-h") {
+    printStorageHelp();
+    return;
+  }
+  if (subcommand !== "compact") {
+    throw new Error("Unknown storage command. Use: flounder storage compact [--apply] [--out <dir>]");
+  }
+  const out = resolveOut(rest);
+  const result = await compactHistoricalInspectionWorkspaces({
+    outputDir: out,
+    runs: readStoredRunsForCompaction(out),
+    apply: rest.includes("--apply"),
+  });
+  console.log(`[storage] mode=${result.apply ? "apply" : "dry-run"} terminal_runs=${result.terminalRunDirs} candidates=${result.candidateDirectories}`);
+  console.log(`[storage] reclaimable=${formatByteSize(result.reclaimableBytes)} removed=${formatByteSize(result.removedBytes)} (${result.removedDirectories} directories)`);
+  if (result.skippedRunningRunDirs > 0) console.log(`[storage] skipped_running=${result.skippedRunningRunDirs}`);
+  if (result.skippedUnsafeRunDirs > 0) console.log(`[storage] skipped_unsafe=${result.skippedUnsafeRunDirs}`);
+  if (result.missingRunDirs > 0) console.log(`[storage] missing_run_dirs=${result.missingRunDirs}`);
+  if (!result.apply && result.candidateDirectories > 0) {
+    console.log("[storage] No files removed. Review this preview, then re-run with --apply to remove only terminal per-command source views.");
+  }
+}
+
+function printStorageHelp(): void {
+  console.log(`flounder storage compact — reclaim historical per-command inspection copies.
+
+Usage:
+  flounder storage compact [--out <dir>]          preview reclaimable space (default)
+  flounder storage compact [--out <dir>] --apply  remove terminal-run inspection copies
+
+The command never touches running runs, report artifacts, transcripts, findings, or PoC files.
+It only removes paired *-source-view-cmdN directories created as disposable read-only input
+for one inspection command. Paths outside the configured output root and symlinks are skipped.`);
+}
+
+function formatByteSize(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = Math.max(0, bytes);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) {
+    value /= 1024;
+    unit += 1;
+  }
+  return `${value.toFixed(unit === 0 ? 0 : 2)} ${units[unit]}`;
+}
+
 // Read/write views over the control-plane server state. These are product resources, not
 // database commands: project inventory, global run history, global findings, daemon registry,
 // and daemon connection tokens.
@@ -1264,6 +1318,7 @@ Usage:
   flounder continue --project <uuid|name>                                         finish the stored project pipeline round (same as the UI Continue button)
   flounder group create|start|status|pause|cancel|retry|report                    durable evaluation, replay, and multi-target work groups
   flounder history import-run --target <name> --run <dir>
+  flounder storage compact [--apply]                                             preview or remove terminal per-command inspection copies
   flounder server project list                                                   list tracked projects
   flounder server run list [--project <name>]                                    list run history globally or for one project
   flounder server finding list [--project <name>] [--status <s>] [--tracking <s>] list findings globally or for one project
