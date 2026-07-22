@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { readFile, readdir } from "node:fs/promises";
 import path from "node:path";
 import type { AuditorConfig } from "../config.js";
-import { listWorkspaceFiles, normalizeRelativePath, prepareSandboxWorkspace, writeSandboxFiles, type SandboxWorkspace } from "../security/sandbox.js";
+import { compactSandboxWorkspace, listWorkspaceFiles, normalizeRelativePath, prepareSandboxWorkspace, writeSandboxFiles, type SandboxWorkspace } from "../security/sandbox.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { writeLastRunPointer } from "../trace/last-run.js";
 import { RunLogger } from "../trace/logger.js";
@@ -320,9 +320,28 @@ export async function runConfirm(
     })),
     path.join(logger.runDir, "confirm_report.md"),
   );
+  await compactCompletedConfirmWorkspace(workspace, session, logger);
   recorder.finish(options.signal?.aborted ? "killed" : "done");
 
   return { runDir: logger.runDir, decisionRows: rows.length };
+}
+
+async function compactCompletedConfirmWorkspace(
+  workspace: SandboxWorkspace,
+  session: Pick<AgentSession, "baselineFiles" | "scratchFiles">,
+  logger: RunLogger,
+): Promise<void> {
+  if (!session.baselineFiles) return;
+  await logger.event("audit_workspace_compaction_start", { phase: "confirm" });
+  try {
+    const result = await compactSandboxWorkspace(workspace.absolute, session.baselineFiles, session.scratchFiles);
+    await logger.event("audit_workspace_compacted", { phase: "confirm", ...result });
+  } catch (error) {
+    await logger.event("audit_workspace_compaction_failed", {
+      phase: "confirm",
+      errorCode: (error as NodeJS.ErrnoException).code ?? "unknown",
+    });
+  }
 }
 
 // --- freeze / provenance -----------------------------------------------------

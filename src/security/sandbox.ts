@@ -1,9 +1,9 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
-import { copyFile, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { copyFile, lstat, mkdir, open, readdir, realpath, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { analyzeReproductionCommandSafety } from "./policy.js";
+import { analyzeReproductionCommandSafety, isAgentBuildCommand, isAgentConfirmCommand } from "./policy.js";
 import type { ReproductionCommand, ReproductionCommandResult, ReproductionFile } from "../types.js";
 
 // Shared, security-critical local sandbox primitives. Both the reproduction
@@ -25,6 +25,7 @@ export const SANDBOX_BACKENDS = ["auto", "oci", "apple-container", "host"] as co
 export type SandboxBackend = typeof SANDBOX_BACKENDS[number];
 export type SandboxNetworkMode = "none" | "enabled";
 export const DEFAULT_SANDBOX_IMAGE = "flounder-sandbox:latest";
+export const DEFAULT_SANDBOX_BUILD_MIN_FREE_DISK_MB = 2048;
 const APPLE_CONTAINER_SEALED_NETWORK = "flounder-sealed";
 const APPLE_CONTAINER_NETWORK_DNS = ["1.1.1.1", "8.8.8.8"] as const;
 const CACHE_TEMP_PREFIX = ".flounder-cache-";
@@ -36,6 +37,7 @@ export interface SandboxExecutionOptions {
   network?: SandboxNetworkMode;
   memoryMb?: number;
   cpus?: number;
+  minFreeDiskMb?: number;
 }
 
 export interface SandboxReadiness {
@@ -60,6 +62,7 @@ export interface SandboxImageBuildResult {
 interface SandboxProcessOptions extends Required<Pick<SandboxExecutionOptions, "backend" | "image" | "allowHostFallback" | "network">> {
   memoryMb?: number;
   cpus?: number;
+  minFreeDiskMb?: number;
 }
 
 interface ProcessRunInput {
@@ -204,6 +207,20 @@ export async function runSandboxCommand(
   const tmpDir = path.join(workspaceAbsolute, ".tmp");
   const options = normalizeSandboxExecutionOptions(executionOptions);
   const executionCommand = hardenNetworkEnabledCommand(command, options.network);
+  const minFreeDiskMb = sandboxMinFreeDiskMb(executionCommand, options.minFreeDiskMb);
+  const diskBlocker = await sandboxDiskSpaceBlocker(workspaceAbsolute, minFreeDiskMb);
+  if (diskBlocker) {
+    const redactionScope = [workspaceAbsolute, tmpDir, ...redactPaths, ...machineRedactionPaths()];
+    return {
+      command: executionCommand,
+      exitCode: 126,
+      expectedExitCode: executionCommand.expectedExitCode ?? 0,
+      timedOut: false,
+      durationMs: Date.now() - started,
+      stdout: "",
+      stderr: redactMachineStrings(redactLocalPaths(diskBlocker, redactionScope)),
+    };
+  }
   await mkdir(tmpDir, { recursive: true });
   // A persistent, host-isolated package cache (CARGO_HOME etc.) when provided, so
   // dependency builds are downloaded once and reused across runs. HOME stays the
@@ -292,7 +309,30 @@ function normalizeSandboxExecutionOptions(input: SandboxExecutionOptions): Sandb
     network: input.network ?? "none",
     ...(input.memoryMb !== undefined ? { memoryMb: input.memoryMb } : {}),
     ...(input.cpus !== undefined ? { cpus: input.cpus } : {}),
+    ...(input.minFreeDiskMb !== undefined ? { minFreeDiskMb: input.minFreeDiskMb } : {}),
   };
+}
+
+export function sandboxMinFreeDiskMb(command: ReproductionCommand, override?: number): number | undefined {
+  if (override !== undefined) return override;
+  return isAgentBuildCommand(command) || isAgentConfirmCommand(command)
+    ? DEFAULT_SANDBOX_BUILD_MIN_FREE_DISK_MB
+    : undefined;
+}
+
+async function sandboxDiskSpaceBlocker(workspaceAbsolute: string, minFreeDiskMb?: number): Promise<string | undefined> {
+  if (minFreeDiskMb === undefined || !Number.isFinite(minFreeDiskMb) || minFreeDiskMb <= 0) return undefined;
+  const requiredMb = Math.max(1, Math.ceil(minFreeDiskMb));
+  try {
+    const info = await statfs(workspaceAbsolute, { bigint: true });
+    const availableBytes = info.bavail * info.bsize;
+    const availableMb = Number(availableBytes / (1024n * 1024n));
+    if (availableMb >= requiredMb) return undefined;
+    return `Sandbox command was not started because the workspace volume has insufficient free disk space (${availableMb} MiB available; ${requiredMb} MiB required). Free disk space or move the daemon workspace to a larger volume before retrying.`;
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return `Sandbox command was not started because free disk space for the workspace volume could not be verified: ${message}`;
+  }
 }
 
 export function isDefaultSandboxImage(image: string): boolean {
