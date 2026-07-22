@@ -243,6 +243,9 @@ test("open-world egress is granted per command instead of per phase", () => {
     cmd("git", "clone", "https://github.com/example/project"),
     cmd("gh", "api", "repos/example/project"),
     cmd("gh", "issue", "view", "123"),
+    cmd("solana", "program", "show", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com"),
+    cmd("solana", "program", "dump", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "scratch/program.so", "--url", "https://api.mainnet-beta.solana.com"),
+    cmd("solana-test-validator", "--clone-upgradeable-program", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com", "--ledger", "scratch/validator-ledger", "--reset"),
   ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), true, `${c.program} should receive read-only egress`);
 
   for (const c of [
@@ -280,6 +283,11 @@ test("open-world egress is granted per command instead of per phase", () => {
     cmd("gh", "release", "create", "list", "--notes", "mutation"),
     cmd("gh", "issue", "create", "--title", "list", "--body", "mutation"),
     cmd("forge", "test", "--fork-url", "https://mainnet.example", "--ffi=true"),
+    cmd("solana", "program", "deploy", "poc/program.so", "--url", "https://api.mainnet-beta.solana.com"),
+    cmd("solana", "program", "close", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com"),
+    cmd("solana", "transfer", "recipient", "1", "--url", "https://api.mainnet-beta.solana.com"),
+    cmd("solana-test-validator", "--url", "https://api.mainnet-beta.solana.com", "--ledger", "scratch/validator-ledger"),
+    cmd("solana-test-validator", "--clone-upgradeable-program", "not-a-public-key", "--url", "https://api.mainnet-beta.solana.com", "--ledger", "scratch/validator-ledger"),
   ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), false, `${c.program} must remain network-sealed`);
 
   assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "install"), "build"), true);
@@ -299,11 +307,25 @@ test("open-world egress permits structurally read-only JSON-RPC POST requests", 
   ]) assert.equal(openWorldCommandNeedsNetwork(c, "build"), true, `${c.args.join(" ")} should receive read-only RPC egress`);
 
   for (const c of [
+    cmd("curl", "-fsS", "https://api.mainnet-beta.solana.com", "-H", "Content-Type: application/json", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", { encoding: "base64" }])),
+    cmd("curl", "-sS", "-o", "poc/programdata.json", "https://api.mainnet-beta.solana.com", "-H", "Content-Type: application/json", "-d", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", { encoding: "base64" }])),
+    cmd("curl", "--output=scratch/programdata.json", "https://api.mainnet-beta.solana.com", "-H", "Content-Type: application/json", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", { encoding: "base64" }])),
+    cmd("curl", "-fsS", "-X", "POST", "https://api.mainnet-beta.solana.com", "--data-raw", read("getProgramAccounts", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
+    cmd("curl", "-s", "https://api.mainnet-beta.solana.com", "--data-binary", read("getGenesisHash")),
+    cmd("curl", "-s", "https://api.mainnet-beta.solana.com", "--data-binary", read("getSlot", [{ commitment: "finalized" }])),
+  ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), true, `${c.args.join(" ")} should receive read-only Solana RPC egress`);
+
+  for (const c of [
     cmd("curl", "-X", "POST", "https://rpc.example", "--data", read("eth_sendRawTransaction", ["0xdead"])),
     cmd("curl", "-X", "POST", "https://rpc.example", "--data", read("personal_unlockAccount", ["0xabc"])),
     cmd("curl", "-X", "POST", "https://rpc.example", "--data", "@request.json"),
     cmd("curl", "--resolve", "rpc.example:443:127.0.0.1", "-X", "POST", "https://rpc.example", "--data", read("eth_blockNumber")),
     cmd("curl", "-X", "POST", "https://rpc.example", "-H", "Authorization: Bearer secret", "--data", read("eth_blockNumber")),
+    cmd("curl", "-X", "POST", "https://api.mainnet-beta.solana.com", "--data", read("sendTransaction", ["signed-transaction"])),
+    cmd("curl", "-X", "POST", "https://api.mainnet-beta.solana.com", "--data", read("requestAirdrop", ["recipient", 1])),
+    cmd("curl", "-o", "programs/target.json", "https://api.mainnet-beta.solana.com", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
+    cmd("curl", "--output=../programdata.json", "https://api.mainnet-beta.solana.com", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
+    cmd("curl", "-o", "poc/one.json", "--output", "poc/two.json", "https://api.mainnet-beta.solana.com", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
   ]) assert.equal(openWorldCommandNeedsNetwork(c, "build"), false, `${c.args.join(" ")} must remain network-sealed`);
 });
 

@@ -237,6 +237,8 @@ export function openWorldCommandNeedsNetwork(command: StructuredReproductionComm
   if (program === "cast") return isReadOnlyCastCommand(args);
   if (program === "forge") return isReadOnlyForgeForkCommand(args);
   if (program === "anvil") return hasRemoteForkTarget(args) && !args.some((arg) => /broadcast|transaction/i.test(arg));
+  if (program === "solana") return isReadOnlySolanaCommand(args);
+  if (program === "solana-test-validator") return isReadOnlySolanaValidatorForkCommand(args);
   return false;
 }
 
@@ -283,10 +285,67 @@ const READ_ONLY_JSON_RPC_METHODS = new Set([
   "web3_clientVersion",
 ]);
 
+// Solana's HTTP API exposes read-only queries and live-state mutations through
+// the same JSON-RPC transport. Keep egress method-scoped so an audit can inspect
+// deployed programs without granting sendTransaction/requestAirdrop access.
+const READ_ONLY_SOLANA_JSON_RPC_METHODS = new Set([
+  "getAccountInfo",
+  "getBalance",
+  "getBlock",
+  "getBlockCommitment",
+  "getBlockHeight",
+  "getBlockProduction",
+  "getBlocks",
+  "getBlocksWithLimit",
+  "getBlockTime",
+  "getClusterNodes",
+  "getEpochInfo",
+  "getEpochSchedule",
+  "getFeeForMessage",
+  "getFirstAvailableBlock",
+  "getGenesisHash",
+  "getHealth",
+  "getHighestSnapshotSlot",
+  "getIdentity",
+  "getInflationGovernor",
+  "getInflationRate",
+  "getInflationReward",
+  "getLargestAccounts",
+  "getLatestBlockhash",
+  "getLeaderSchedule",
+  "getMaxRetransmitSlot",
+  "getMaxShredInsertSlot",
+  "getMinimumBalanceForRentExemption",
+  "getMultipleAccounts",
+  "getProgramAccounts",
+  "getRecentPerformanceSamples",
+  "getRecentPrioritizationFees",
+  "getSignaturesForAddress",
+  "getSignatureStatuses",
+  "getSlot",
+  "getSlotLeader",
+  "getSlotLeaders",
+  "getStakeMinimumDelegation",
+  "getSupply",
+  "getTokenAccountBalance",
+  "getTokenAccountsByDelegate",
+  "getTokenAccountsByOwner",
+  "getTokenLargestAccounts",
+  "getTokenSupply",
+  "getTransaction",
+  "getTransactionCount",
+  "getVersion",
+  "getVoteAccounts",
+  "isBlockhashValid",
+  "minimumLedgerSlot",
+  "simulateTransaction",
+]);
+
 function isReadOnlyJsonRpcCurl(args: string[]): boolean {
   let method: string | undefined;
   let body: string | undefined;
   let rpcUrl: URL | undefined;
+  let outputPath: string | undefined;
   const resolveTargets: string[] = [];
   for (let idx = 0; idx < args.length; idx += 1) {
     const arg = args[idx] ?? "";
@@ -321,6 +380,18 @@ function isReadOnlyJsonRpcCurl(args: string[]): boolean {
       idx += 1;
       continue;
     }
+    if (arg === "-o" || arg === "--output") {
+      if (outputPath !== undefined || !isModelOwnedCurlOutputPath(args[idx + 1] ?? "")) return false;
+      outputPath = args[idx + 1];
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--output=")) {
+      if (outputPath !== undefined) return false;
+      outputPath = arg.slice("--output=".length);
+      if (!isModelOwnedCurlOutputPath(outputPath)) return false;
+      continue;
+    }
     if (/^https?:\/\//i.test(arg)) {
       if (rpcUrl) return false;
       try {
@@ -345,13 +416,22 @@ function isReadOnlyJsonRpcCurl(args: string[]): boolean {
   return requests.length > 0 && requests.every(isReadOnlyJsonRpcRequest);
 }
 
+function isModelOwnedCurlOutputPath(input: string): boolean {
+  if (!input || input.startsWith("-") || looksLikePathEscape(input)) return false;
+  const normalized = input.replace(/\\/g, "/").replace(/\/+/g, "/");
+  const slash = normalized.lastIndexOf("/");
+  return slash > 0 && isModelOwnedWorkspaceDirectory(normalized.slice(0, slash));
+}
+
 function isReadOnlyJsonRpcRequest(input: unknown): boolean {
   if (!input || typeof input !== "object" || Array.isArray(input)) return false;
   const request = input as Record<string, unknown>;
   if (Object.keys(request).some((key) => !new Set(["jsonrpc", "id", "method", "params"]).has(key))) return false;
   if (request.jsonrpc !== "2.0" || typeof request.method !== "string") return false;
   if (request.params !== undefined && !Array.isArray(request.params) && (typeof request.params !== "object" || request.params === null)) return false;
-  return READ_ONLY_JSON_RPC_METHODS.has(request.method) || /^eth_get[A-Z][A-Za-z0-9]*$/.test(request.method);
+  return READ_ONLY_JSON_RPC_METHODS.has(request.method)
+    || READ_ONLY_SOLANA_JSON_RPC_METHODS.has(request.method)
+    || /^eth_get[A-Z][A-Za-z0-9]*$/.test(request.method);
 }
 
 function isSafeCurlResolveTarget(input: string, rpcUrl: URL): boolean {
@@ -474,6 +554,99 @@ function isReadOnlyForgeForkCommand(args: string[]): boolean {
   return verb === "test"
     && hasRemoteForkTarget(args)
     && !args.some((arg) => arg === "--ffi" || arg.startsWith("--ffi=") || arg === "--broadcast" || /send-?raw-?transaction/i.test(arg));
+}
+
+function isReadOnlySolanaCommand(args: string[]): boolean {
+  if (args[0] !== "program" || (args[1] !== "show" && args[1] !== "dump")) return false;
+
+  const verb = args[1];
+  const positional: string[] = [];
+  let remoteUrl: string | undefined;
+  for (let idx = 2; idx < args.length; idx += 1) {
+    const arg = args[idx] ?? "";
+    if (arg === "--url" || arg === "-u") {
+      if (remoteUrl !== undefined) return false;
+      remoteUrl = args[idx + 1];
+      if (!remoteUrl) return false;
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--url=")) {
+      if (remoteUrl !== undefined) return false;
+      remoteUrl = arg.slice("--url=".length);
+      continue;
+    }
+    if (arg === "--commitment") {
+      if (!new Set(["processed", "confirmed", "finalized"]).has(args[idx + 1] ?? "")) return false;
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--commitment=")) {
+      if (!new Set(["processed", "confirmed", "finalized"]).has(arg.slice("--commitment=".length))) return false;
+      continue;
+    }
+    if (arg === "--output") {
+      if (!new Set(["json", "json-compact"]).has(args[idx + 1] ?? "")) return false;
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--output=")) {
+      if (!new Set(["json", "json-compact"]).has(arg.slice("--output=".length))) return false;
+      continue;
+    }
+    if (arg === "--verbose" && verb === "show") continue;
+    if (arg.startsWith("-")) return false;
+    positional.push(arg);
+  }
+
+  if (!remoteUrl || !firstNonLocalRemoteUrl(remoteUrl) || !hasOnlyHttpRemoteTargets([remoteUrl])) return false;
+  const address = positional[0] ?? "";
+  if (!isSolanaPublicKey(address)) return false;
+  if (verb === "show") return positional.length === 1;
+  return positional.length === 2
+    && !positional[1]?.startsWith("/")
+    && !looksLikePathEscape(positional[1] ?? "");
+}
+
+function isReadOnlySolanaValidatorForkCommand(args: string[]): boolean {
+  let remoteUrl: string | undefined;
+  let cloneCount = 0;
+  for (let idx = 0; idx < args.length; idx += 1) {
+    const arg = args[idx] ?? "";
+    if (arg === "--url" || arg === "-u") {
+      if (remoteUrl !== undefined) return false;
+      remoteUrl = args[idx + 1];
+      if (!remoteUrl) return false;
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--url=")) {
+      if (remoteUrl !== undefined) return false;
+      remoteUrl = arg.slice("--url=".length);
+      continue;
+    }
+    if (arg === "--clone" || arg === "--clone-upgradeable-program") {
+      if (!isSolanaPublicKey(args[idx + 1] ?? "")) return false;
+      cloneCount += 1;
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--clone=") || arg.startsWith("--clone-upgradeable-program=")) {
+      if (!isSolanaPublicKey(arg.slice(arg.indexOf("=") + 1))) return false;
+      cloneCount += 1;
+    }
+  }
+
+  if (cloneCount === 0 || !remoteUrl || !firstNonLocalRemoteUrl(remoteUrl)) return false;
+  for (const arg of args) {
+    const remote = firstNonLocalRemoteUrl(arg);
+    if (remote && remote !== remoteUrl && arg !== `--url=${remoteUrl}`) return false;
+  }
+  return hasOnlyHttpRemoteTargets([remoteUrl]);
+}
+
+function isSolanaPublicKey(input: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(input);
 }
 
 function hasRemoteForkTarget(args: string[]): boolean {
