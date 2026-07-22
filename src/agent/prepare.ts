@@ -61,7 +61,7 @@ export interface ToolVersionCheck {
   reason?: string;
 }
 
-export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorkspace; cfg: AuditorConfig; logger: RunLogger; cacheDir?: string; focusCommand?: ReproductionCommand; focusPaths?: string[]; streamId?: string }): Promise<PrepareReport> {
+export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorkspace; cfg: AuditorConfig; logger: RunLogger; cacheDir?: string; focusCommand?: ReproductionCommand; focusPaths?: string[]; streamId?: string; signal?: AbortSignal }): Promise<PrepareReport> {
   const streamMeta = input.streamId ? { streamId: input.streamId } : {};
   const artifactName = input.streamId ? `audit_prepare-${slug(input.streamId)}.json` : "audit_prepare.json";
   const allPlans = await detectToolchains(input.workspace.absolute);
@@ -105,6 +105,7 @@ export async function prepareWorkspaceToolchain(input: { workspace: SandboxWorks
         input.cfg.sourcePaths,
         input.cacheDir,
         sandboxExecutionOptions(input.cfg, input.cfg.sandboxPrepareNetwork),
+        input.signal,
       );
       const ok = run.exitCode === 0 && !run.timedOut;
       const record: PrepareCommandResult = {
@@ -175,7 +176,13 @@ export function prepareResourceRequests(report: PrepareReport, focusCommand?: Re
 }
 
 async function checkPinnedToolVersions(
-  input: { workspace: SandboxWorkspace; cfg: AuditorConfig; logger: RunLogger; cacheDir?: string },
+  input: {
+    workspace: SandboxWorkspace;
+    cfg: AuditorConfig;
+    logger: RunLogger;
+    cacheDir?: string;
+    signal?: AbortSignal;
+  },
   pins: PinnedToolVersion[],
 ): Promise<ToolVersionCheck[]> {
   const specs = pins.flatMap((pin) => versionCheckSpecs(pin));
@@ -195,6 +202,7 @@ async function checkPinnedToolVersions(
       input.cfg.sourcePaths,
       input.cacheDir,
       sandboxExecutionOptions(input.cfg, "none"),
+      input.signal,
     );
     const combined = `${run.stdout}\n${run.stderr}`.trim();
     const actual = firstVersionLine(combined);

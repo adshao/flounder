@@ -190,6 +190,8 @@ export async function runAuditSession(input: {
   if (!model) throw new Error(`audit session: unknown provider/model ${input.cfg.provider}/${input.cfg.auditModel}`);
   if (input.activityStreamId) input.ctx.activityStreamId = input.activityStreamId;
   else delete input.ctx.activityStreamId;
+  if (input.signal) input.ctx.signal = input.signal;
+  else delete input.ctx.signal;
 
   const steps: TranscriptStep[] = [];
   let stepNo = 0;

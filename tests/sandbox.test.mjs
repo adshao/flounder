@@ -540,6 +540,39 @@ test("sandbox Apple container backend force-deletes timed-out containers", async
   }
 });
 
+test("sandbox Apple container backend force-deletes containers when a run is stopped", async () => {
+  const workspace = await tempDir("flounder-sandbox-apple-abort-");
+  const logDir = await tempDir("flounder-sandbox-apple-abort-log-");
+  const logFile = path.join(logDir, "container.log");
+  const fakeBin = await fakeContainerCli({ logFile, runSleepSeconds: 30 });
+  const oldPath = process.env.PATH;
+  const controller = new AbortController();
+  try {
+    process.env.PATH = `${fakeBin}${path.delimiter}${oldPath ?? ""}`;
+    setTimeout(() => controller.abort(), 100);
+    const startedAt = Date.now();
+    const result = await runSandboxCommand(
+      { program: "node", args: ["--test"], timeoutMs: 2_000 },
+      workspace,
+      8000,
+      [],
+      undefined,
+      { backend: "apple-container", image: "flounder-sandbox:abort", network: "enabled" },
+      controller.signal,
+    );
+
+    assert.equal(result.timedOut, false);
+    assert.ok(Date.now() - startedAt < 5_000, "stop should not wait for the command timeout");
+    const cleanupLog = await waitForFileMatch(logFile, /DELETE:flounder-[^\n]+/);
+    assert.equal(cleanupLog.match(/DELETE:flounder-/g)?.length, 1);
+  } finally {
+    process.env.PATH = oldPath;
+    await rm(workspace, { recursive: true, force: true });
+    await rm(logDir, { recursive: true, force: true });
+    await rm(fakeBin, { recursive: true, force: true });
+  }
+});
+
 test("sandbox host backend is explicit and still uses isolated HOME and caches", async () => {
   const workspace = await tempDir("flounder-sandbox-host-");
   const cache = await tempDir("flounder-sandbox-cache-");

@@ -143,6 +143,8 @@ export interface ToolContext {
   logger: RunLogger;
   session: AgentSession;
   onCommandRun?: (record: CommandRunRecord) => void;
+  /** Cooperative run cancellation. Active sandbox commands stop with the agent session. */
+  signal?: AbortSignal;
   /** Identity of the concurrent map/dig/verify stream that owns this context. */
   activityStreamId?: string;
 }
@@ -405,6 +407,7 @@ const bashTool: AgentTool = {
       ctx.cfg.sourcePaths,
       ctx.session.buildCacheDir,
       sandboxExecutionOptions(ctx.cfg, commandNetwork),
+      ctx.signal,
     );
     const exitMatched = result.exitCode === result.expectedExitCode && !result.timedOut;
     const isConfirm = normalized.purpose === "confirm";
@@ -902,6 +905,7 @@ async function ensurePrepared(ctx: ToolContext, workspace: SandboxWorkspace, foc
     ...(ctx.session.buildCacheDir ? { cacheDir: ctx.session.buildCacheDir } : {}),
     ...(focusCommand ? { focusCommand } : {}),
     ...(ctx.activityStreamId ? { streamId: ctx.activityStreamId } : {}),
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
   });
   const resourceRequests = prepareResourceRequests(report, focusCommand);
   if (resourceRequests.length > 0) ctx.session.resourceRequests = mergeResourceRequests(ctx.session.resourceRequests ?? [], resourceRequests);
