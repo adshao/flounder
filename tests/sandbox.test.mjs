@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { defaultConfig, sandboxExecutionOptions, sandboxNetworkForPurpose } from "../dist/config.js";
-import { autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, compactSandboxWorkspace, runSandboxCommand, sandboxToolPath } from "../dist/security/sandbox.js";
+import { autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, compactSandboxWorkspace, defaultAppleContainerMemoryMb, runSandboxCommand, sandboxToolPath } from "../dist/security/sandbox.js";
 
 async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -246,6 +246,13 @@ test("sandbox auto preference is limited to Apple silicon macOS", () => {
   assert.equal(autoPrefersAppleContainer("darwin", "arm64"), true);
   assert.equal(autoPrefersAppleContainer("darwin", "x64"), false);
   assert.equal(autoPrefersAppleContainer("linux", "arm64"), false);
+});
+
+test("Apple container memory defaults scale with the host and remain bounded", () => {
+  const gib = 1024 ** 3;
+  assert.equal(defaultAppleContainerMemoryMb(4 * gib), 1024);
+  assert.equal(defaultAppleContainerMemoryMb(16 * gib), 4096);
+  assert.equal(defaultAppleContainerMemoryMb(64 * gib), 8192);
 });
 
 test("sandbox refuses implicit host fallback when the OCI image is unavailable", async () => {
@@ -502,6 +509,7 @@ test("sandbox Apple container backend pins DNS only for network-enabled runs", a
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /\[--dns\]\[1\.1\.1\.1\]/);
     assert.match(result.stdout, /\[--dns\]\[8\.8\.8\.8\]/);
+    assert.match(result.stdout, new RegExp(`\\[--memory\\]\\[${defaultAppleContainerMemoryMb()}M\\]`));
     assert.doesNotMatch(result.stdout, /\[--no-dns\]/);
     assert.doesNotMatch(result.stdout, /\[--network\]\[flounder-sealed\]/);
     assert.match(result.stdout, /\[flounder-sandbox:cairo\]\[scarb\]\[build\]/);
