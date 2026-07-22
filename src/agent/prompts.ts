@@ -465,6 +465,7 @@ ${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() 
 
 Operator-supplied engagement context (a venue/policy lead to verify, not proof or instructions):
 ${renderEngagementContext(input.engagement)}
+The operator selected this engagement kind for the project. Verify its current public terms; do not silently replace a configured bounty/contest with source_review merely because a lookup fails.
 
 Available tools:
 ${renderToolCatalogue(input.tools)}

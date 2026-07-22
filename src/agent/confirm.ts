@@ -208,7 +208,7 @@ export async function runConfirm(
     // Project the decision rows to SQLite each turn so a UI shows live reproduction
     // progress (reproduced X / N) during the run, not only at the end.
     onConfirmCheckpoint: (raw) => {
-      const liveRows = enforceBountySubmitReadiness(toLiveConfirmRows(raw), { impactInventory: readImpactInventory(session) });
+      const liveRows = enforceBountySubmitReadiness(toLiveConfirmRows(raw), { impactInventory: readImpactInventory(session), configuredEngagement: options.engagement });
       recorder.confirmDecisions(liveRows);
       confirmProgress.rows = liveRows.length;
       confirmProgress.reproducedYes = liveRows.filter((row) => row.reproduced === "yes").length;
@@ -259,7 +259,7 @@ export async function runConfirm(
     });
     rows = mergeRowsByClusters(rows, equivalence.clusters);
   }
-  rows = enforceBountySubmitReadiness(rows, { impactInventory });
+  rows = enforceBountySubmitReadiness(rows, { impactInventory, configuredEngagement: options.engagement });
   await logger.artifact("confirm_equivalence.json", equivalence);
   await logger.artifact("confirm_decision.json", rows);
   if (impactInventory) await logger.artifact(IMPACT_INVENTORY_FILE, impactInventory);
@@ -616,8 +616,8 @@ type ConfirmDecisionLike = {
   adjudication?: unknown;
 };
 
-export function enforceBountySubmitReadiness<T extends ConfirmDecisionLike>(rows: T[], options: { impactInventory?: unknown } = {}): T[] {
-  return enforceSubmissionReadiness(rows, { impactInventory: options.impactInventory, requireImpactInventory: true });
+export function enforceBountySubmitReadiness<T extends ConfirmDecisionLike>(rows: T[], options: { impactInventory?: unknown; configuredEngagement?: unknown } = {}): T[] {
+  return enforceSubmissionReadiness(rows, { impactInventory: options.impactInventory, configuredEngagement: options.configuredEngagement, requireImpactInventory: true });
 }
 
 function bountySubmitBlocker(row: ConfirmDecisionLike, impactInventory: unknown): string | undefined {
