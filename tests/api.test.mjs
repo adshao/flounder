@@ -3029,6 +3029,94 @@ test("api: confirm launch carries DB-backed seeds when prior run artifact is mis
   });
 });
 
+test("api: a focused retry can relaunch a reproduced finding whose Confirm phase is blocked", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "focused-reproduced-confirm-retry", sourcePaths: ["src"] }));
+    const auditRunDir = path.join(out, "focused-reproduced-confirm-audit");
+    let findingId;
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const auditRunId = store.startRun({ projectId: created.id, kind: "audit", runDir: auditRunDir });
+      store.upsertFindings(created.id, auditRunId, [{
+        findingKey: "kretryreproduced",
+        title: "Real-target evidence still needs one automated follow-up",
+        location: "src/Target.sol:19",
+        severity: "high",
+        status: "confirmed-executable",
+        confidence: 0.93,
+      }]);
+      store.finishRun(auditRunId, "done");
+      findingId = Number(store.listFindings(created.id)[0].id);
+
+      const confirmRunId = store.startRun({ projectId: created.id, kind: "confirm", runDir: path.join(out, "focused-reproduced-confirm-old") });
+      store.upsertConfirmDecisions(created.id, confirmRunId, [{
+        bug: "Reproduced but not submission-ready",
+        reproduced: "yes",
+        recommendation: "needs-human",
+        members: ["kretryreproduced"],
+        humanGates: "Deployment equivalence and local-fork impact remain to be checked.",
+      }]);
+      store.recordFindingPhaseAttempt(created.id, confirmRunId, {
+        subjectType: "finding",
+        subjectId: findingId,
+        phase: "confirm",
+        inputFingerprint: "sha256:old-confirm-input",
+        state: "blocked",
+        outcome: "yes",
+        blocker: "Deployment equivalence and local-fork impact remain to be checked.",
+      });
+      store.finishRun(confirmRunId, "done");
+      assert.equal(store.getFinding(findingId).confirm_status, "reproduced");
+    } finally {
+      store.close();
+    }
+
+    const retried = await json(await post(`/api/findings/${findingId}/retry`, { phase: "confirm" }));
+    assert.equal(retried.ok, true);
+
+    const launchedResponse = await post(`/api/projects/${created.uuid}/runs`, { verb: "confirm", findingIds: [findingId] });
+    assert.equal(launchedResponse.status, 200);
+    const launched = await json(launchedResponse);
+    assert.equal(launched.queued, true);
+    const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
+    const spec = JSON.parse(job.spec_json);
+    assert.ok(spec.confirmKeys.includes("kretryreproduced"));
+    assert.ok(spec.confirmKeys.includes(`origin:${findingId}:kretryreproduced`));
+    assert.equal(spec.confirmFindings[0].originId, findingId);
+    assert.equal(spec.fresh, true, "a focused retry must not reuse the old blocked decision as settled evidence");
+  });
+});
+
+test("api: queued project work explains that an earlier run is holding the project", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "explained-project-queue", sourcePaths: ["src"] }));
+    let activeJobId;
+    const store = MetadataStore.openForOutput(out);
+    try {
+      activeJobId = store.enqueueJob(created.name, { verb: "audit" });
+      const runId = store.startRun({ projectId: created.id, kind: "audit", runDir: path.join(out, "explained-project-queue-active") });
+      store.setJobRun(activeJobId, runId);
+    } finally {
+      store.close();
+    }
+
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "prepare", clue: "refresh public source" }));
+    assert.equal(launched.queued, true);
+    assert.equal(launched.queueReason, "project-run-active");
+    assert.equal(launched.blockingJobId, activeJobId);
+    assert.match(launched.message, /start automatically/i);
+
+    const active = await json(await fetch(base + "/api/active"));
+    const queued = active.active.find((row) => row.jobId === launched.jobId);
+    assert.equal(queued.blockedReason, "project-run-active");
+    assert.equal(queued.blockingJobId, activeJobId);
+  });
+});
+
 test("api: prepare summary normalizes verified deployment evidence", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

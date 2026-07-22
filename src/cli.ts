@@ -1337,7 +1337,7 @@ Shared options:
   --allow-host-execution  trusted-local opt-in only: let auto fall back to host execution when no sandbox backend is available
   --prepare-network <m>   none|enabled; dependency warm-up/build commands default to enabled
   --confirm-network <m>   none|enabled; open-world prepare/confirm bash commands default to enabled
-  --sandbox-memory-mb <n> memory limit for OCI sandbox commands
+  --sandbox-memory-mb <n> memory limit for container sandbox commands
   --sandbox-cpus <n>      CPU limit for OCI sandbox commands
   --no-refute / --no-appeal  skip the independent-refutation / one-appeal passes on confirmed findings
   --server <url>          control plane the CLI drives (default --server > FLOUNDER_SERVER > config 'server' > http://127.0.0.1:4500)

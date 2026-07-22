@@ -143,6 +143,8 @@ export interface ToolContext {
   logger: RunLogger;
   session: AgentSession;
   onCommandRun?: (record: CommandRunRecord) => void;
+  /** Cooperative run cancellation. Active sandbox commands stop with the agent session. */
+  signal?: AbortSignal;
   /** Identity of the concurrent map/dig/verify stream that owns this context. */
   activityStreamId?: string;
 }
@@ -358,7 +360,7 @@ const editTool: AgentTool = {
 const bashTool: AgentTool = {
   name: "bash",
   description:
-    'Run one local command in the copied sandbox workspace. args: {"cmd": string, "purpose"?: "inspect"|"build"|"confirm" (default inspect), "cwd"?: relative, "expected_exit_code"?: int, "success_patterns"?: [string], "timeout_ms"?: int}. Shell control operators, remote networks, destructive commands, and paths outside the workspace are blocked. purpose=inspect is for exploration (ls/find/rg/cat/sed/jq), tool availability checks (which nargo/scarb/blueprint/tact), and local JSON reads (jq . file or jq length file); it never confirms anything. purpose=build is for dependency resolution and compilation (cargo build/fetch, cmake -S/-B/--build, ninja, make, npm install, go mod download, forge build, scarb fetch/build/check/metadata, blueprint build --all, func-js/tolk-js/tact, pip install, …) to make the workspace buildable; it has side effects but is NOT confirmation-eligible. For CMake, prefer generator-neutral `cmake -S <src> -B <build>` then `cmake --build <build> --parallel 2` on large targets; pass `-G Ninja` only after `ninja --version` succeeds, and keep parallelism bounded. purpose=confirm must be a real local test runner (cargo test, ctest, forge test, scarb test, snforge test, blueprint test, go test, node --test, pytest, …) with success_patterns; only a confirm command that exits as expected, observes every success_pattern, and executes a test linked to pristine target source becomes confirmation-eligible and citable as command_id for confirmed-executable.',
+    'Run one command in the copied sandbox workspace. args: {"cmd": string, "purpose"?: "inspect"|"build"|"confirm" (default inspect), "cwd"?: relative, "expected_exit_code"?: int, "success_patterns"?: [string], "timeout_ms"?: int}. Shell control operators, destructive commands, and paths outside the workspace are blocked. Sealed audit phases block remote networks; Prepare and Confirm grant egress only to explicit read/fork/fetch commands, while arbitrary model-selected code stays network-sealed. purpose=inspect is for exploration (ls/find/rg/cat/sed/jq), tool availability checks (which nargo/scarb/blueprint/tact), and local JSON reads (jq . file or jq length file); it never confirms anything. purpose=build is for dependency resolution and compilation (cargo build/fetch, cmake -S/-B/--build, ninja, make, npm install, go mod download, forge build, scarb fetch/build/check/metadata, blueprint build --all, func-js/tolk-js/tact, pip install, …) to make the workspace buildable; it has side effects but is NOT confirmation-eligible. For CMake, prefer generator-neutral `cmake -S <src> -B <build>` then `cmake --build <build> --parallel 2` on large targets; pass `-G Ninja` only after `ninja --version` succeeds, and keep parallelism bounded. purpose=confirm must be a real local test runner (cargo test, ctest, forge test, scarb test, snforge test, blueprint test, go test, node --test, pytest, …) with success_patterns; only a confirm command that exits as expected, observes every success_pattern, and executes a test linked to pristine target source becomes confirmation-eligible and citable as command_id for confirmed-executable.',
   async run(args, ctx) {
     const normalized = normalizeBashCommand(args, ctx.cfg);
     if ("error" in normalized) return { observation: normalized.error };
@@ -405,6 +407,7 @@ const bashTool: AgentTool = {
       ctx.cfg.sourcePaths,
       ctx.session.buildCacheDir,
       sandboxExecutionOptions(ctx.cfg, commandNetwork),
+      ctx.signal,
     );
     const exitMatched = result.exitCode === result.expectedExitCode && !result.timedOut;
     const isConfirm = normalized.purpose === "confirm";
@@ -902,6 +905,7 @@ async function ensurePrepared(ctx: ToolContext, workspace: SandboxWorkspace, foc
     ...(ctx.session.buildCacheDir ? { cacheDir: ctx.session.buildCacheDir } : {}),
     ...(focusCommand ? { focusCommand } : {}),
     ...(ctx.activityStreamId ? { streamId: ctx.activityStreamId } : {}),
+    ...(ctx.signal ? { signal: ctx.signal } : {}),
   });
   const resourceRequests = prepareResourceRequests(report, focusCommand);
   if (resourceRequests.length > 0) ctx.session.resourceRequests = mergeResourceRequests(ctx.session.resourceRequests ?? [], resourceRequests);

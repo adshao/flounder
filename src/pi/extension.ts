@@ -176,7 +176,7 @@ const sharedParams = {
   sandboxAllowHostFallback: Type.Optional(Type.Boolean({ description: "Trusted-local opt-in for host fallback when OCI is unavailable." })),
   sandboxPrepareNetwork: Type.Optional(Type.String({ description: "none|enabled for prepare/build warm-up commands." })),
   sandboxConfirmNetwork: Type.Optional(Type.String({ description: "none|enabled for open-world confirm commands." })),
-  sandboxMemoryMb: Type.Optional(Type.Number({ description: "Memory limit for OCI sandbox commands." })),
+  sandboxMemoryMb: Type.Optional(Type.Number({ description: "Memory limit for container sandbox commands." })),
   sandboxCpus: Type.Optional(Type.Number({ description: "CPU limit for OCI sandbox commands." })),
 };
 

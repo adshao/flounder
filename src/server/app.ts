@@ -307,7 +307,7 @@ const ROUTES: Route[] = [
       maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", mapSamples: "number? — independent Map inventories to union without dropping singleton scopes", digSteps: "number? — one-off per-scope dig turn cap",
       maxSteps: "number? — one-off global turn cap", digSamples: "number? — minimum independent samples per scope", digMaxSamples: "number? — adaptive per-scope sample ceiling", adaptiveDig: "boolean? — add bounded samples only for incomplete/uncertain outcomes", eagerPrepare: "boolean? — warm the build before Dig and surface repairable resource blockers", digConcurrency: "number? — one-off parallel scopes", verifyConcurrency: "number? — one-off parallel Verify findings (isolated workspaces)",
       findingId: "number? — confirm/report: reproduce or report one selected finding",
-      findingIds: "number[]? — confirm/report: reproduce selected pending audit-confirmed findings, or generate/regenerate formal reports for selected reproduced findings. Report without selection only generates missing reports.",
+      findingIds: "number[]? — confirm/report: reproduce selected pending or explicitly reopened audit-confirmed findings, or generate/regenerate formal reports for selected reproduced findings. Report without selection only generates missing reports.",
       inputRunDir: "string? — confirm: the finished run dir to reproduce",
       clue: "string? — prepare: the tx / address / project / link to acquire from",
       posture: "string? — prepare: 'blind' | 'informed'", matchDeployed: "boolean? — prepare: prove staged source matches the live deployment (default true)", endpoint: "string? — prepare: read-only access hint (e.g. RPC URL)",
@@ -2553,7 +2553,14 @@ async function runLaunch(c: Ctx): Promise<void> {
   if (spec.verb === "confirm" && !spec.inputRunDir && !(spec.inputRunDirs && spec.inputRunDirs.length > 0)) {
     const findingIds = selectedFindingIds(body);
     if (findingIds.length > 0) {
-      const selected = findingIds.map((id) => ({ id, row: c.store.getConfirmable(Number(project.id), id) }));
+      const retryContext = new Map(c.store.confirmableContext(Number(project.id)).map((row) => [Number(row.id), row]));
+      const selected = findingIds.map((id) => {
+        const pending = c.store.getConfirmable(Number(project.id), id);
+        const reopened = !pending && c.store.hasFindingPhaseRetry(Number(project.id), "finding", id, "confirm")
+          ? retryContext.get(id)
+          : undefined;
+        return { id, row: pending ?? reopened, reopened: Boolean(reopened) };
+      });
       const trackingBlocked = selected
         .filter((entry) => findingTrackingBlocksProgress(c.store.getFinding(entry.id)))
         .map((entry) => entry.id);
@@ -2567,7 +2574,7 @@ async function runLaunch(c: Ctx): Promise<void> {
         return sendJson(c.res, 400, { error: `finding ${reviewBlocked.join(", ")} did not pass independent review` });
       }
       const missing = selected.filter((entry) => !entry.row || !confirmableRunDir(entry.row as unknown as Record<string, unknown>)).map((entry) => entry.id);
-      if (missing.length > 0) return sendJson(c.res, 400, { error: `finding ${missing.join(", ")} is not pending confirm for this project, or has no source run dir` });
+      if (missing.length > 0) return sendJson(c.res, 400, { error: `finding ${missing.join(", ")} is not pending or explicitly reopened for Confirm in this project, or has no source run dir` });
       const stale = selected.filter((entry) => entry.row && !rowBelongsToCurrentMaterial(entry.row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary)).map((entry) => entry.id);
       if (stale.length > 0 && body.allowMaterialDrift !== true) {
         return sendJson(c.res, 409, {
@@ -2582,6 +2589,9 @@ async function runLaunch(c: Ctx): Promise<void> {
       spec.inputRunDir = spec.inputRunDirs[0];
       spec.confirmKeys = rows.flatMap((row) => confirmSelectorsForFinding(row as unknown as { id?: unknown; finding_key?: unknown }));
       spec.confirmFindings = confirmFindingSeeds(c.store, Number(project.id), rows);
+      // A focused retry is an explicit request to replace the old blocked decision. Without
+      // fresh mode runConfirm may load that decision from a prior artifact and treat it as settled.
+      if (selected.some((entry) => entry.reopened)) spec.fresh = true;
     } else {
       const currentDecisions = currentConfirmDecisions(c.store.listConfirmDecisions(Number(project.id)).filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary)));
       const pending = confirmWorkRows(c.store, Number(project.id), currentResultRunIds, materialBoundary, currentDecisions);
@@ -2618,9 +2628,21 @@ async function runLaunch(c: Ctx): Promise<void> {
     });
   }
   if (spec.verb === "prepare" || (spec.verb === "run" && spec.pipeline && spec.clue) || (isScopeInventoryVerb(spec.verb) && !scopeView.hasInventory)) await resetCurrentScopeProjection(c, project);
+  const blockingJob = activeProjectJob(c.store, spec.target);
   const jobId = c.store.enqueueJob(spec.target, spec, daemonId);
   c.plane.nudge();
-  sendJson(c.res, 200, { jobId, verb: spec.verb, queued: true, daemons: c.plane.daemonCount(daemonId), daemonId });
+  sendJson(c.res, 200, {
+    jobId,
+    verb: spec.verb,
+    queued: true,
+    daemons: c.plane.daemonCount(daemonId),
+    daemonId,
+    ...(blockingJob ? {
+      queueReason: "project-run-active",
+      blockingJobId: Number(blockingJob.id),
+      message: `Another run for this project is still in progress (job ${Number(blockingJob.id)}). This job will start automatically when it finishes.`,
+    } : {}),
+  });
 }
 
 function applyProjectPrepareDefaults(spec: LaunchSpec, project: Record<string, unknown>, runs: Array<Record<string, unknown>>): void {
@@ -3357,9 +3379,20 @@ async function launch(c: Ctx): Promise<void> {
   if (!c.store.getProject(target)) {
     c.store.upsertProject({ name: target, sourcePaths: spec.sourcePaths, ...(spec.buildRoot ? { buildRoot: spec.buildRoot } : {}), corpusPaths: spec.corpusPaths ?? [], config: launchDisplayConfig(spec) });
   }
+  const blockingJob = activeProjectJob(c.store, target);
   const jobId = c.store.enqueueJob(target, spec);
   c.plane.nudge();
-  sendJson(c.res, 200, { jobId, verb: spec.verb, queued: true, daemons: c.plane.daemonCount() });
+  sendJson(c.res, 200, {
+    jobId,
+    verb: spec.verb,
+    queued: true,
+    daemons: c.plane.daemonCount(),
+    ...(blockingJob ? {
+      queueReason: "project-run-active",
+      blockingJobId: Number(blockingJob.id),
+      message: `Another run for this project is still in progress (job ${Number(blockingJob.id)}). This job will start automatically when it finishes.`,
+    } : {}),
+  });
 }
 
 // Coerce a /api/launch body into a clean LaunchSpec (drop non-finite/wrong-typed values; no
@@ -5357,11 +5390,17 @@ function daemonRecentlySeen(store: MetadataStore, daemonId: number): boolean {
 
 // In-flight jobs across all daemons, shaped for the dashboard's "active" list.
 function activeRuns(store: MetadataStore, plane?: ControlPlane): Array<Record<string, unknown>> {
-  return store.runningJobs().map((job) => {
+  const jobs = store.runningJobs();
+  const activeByProject = new Map<string, Record<string, unknown>>();
+  for (const job of jobs) {
+    if ((job.status === "dispatched" || job.status === "running") && typeof job.project === "string") activeByProject.set(job.project, job);
+  }
+  return jobs.map((job) => {
     const spec = safeParse(job.spec_json) as { verb?: string } | null;
     const daemonId = typeof job.daemon_id === "number" ? job.daemon_id : undefined;
     const onlineDaemons = daemonId !== undefined && plane ? (plane.hasDaemonSignal(daemonId) ? Math.max(1, plane.daemonCount(daemonId)) : 0) : undefined;
-    const blockedReason = daemonId !== undefined && onlineDaemons === 0 ? "selected-daemon-offline" : undefined;
+    const blockingJob = job.status === "queued" && typeof job.project === "string" ? activeByProject.get(job.project) : undefined;
+    const blockedReason = blockingJob ? "project-run-active" : daemonId !== undefined && onlineDaemons === 0 ? "selected-daemon-offline" : undefined;
     const lastActivityAt = typeof job.run_id === "number" ? latestRunActivityAt(store, plane, Number(job.run_id)) : undefined;
     const activity = runInactivity(lastActivityAt);
     const updatedAt = maxIsoTimestamp(String(job.updated_at ?? ""), lastActivityAt);
@@ -5378,8 +5417,13 @@ function activeRuns(store: MetadataStore, plane?: ControlPlane): Array<Record<st
       daemonId: daemonId ?? null,
       ...(onlineDaemons !== undefined ? { onlineDaemons } : {}),
       ...(blockedReason ? { blockedReason } : {}),
+      ...(blockingJob ? { blockingJobId: Number(blockingJob.id) } : {}),
     };
   });
+}
+
+function activeProjectJob(store: MetadataStore, project: string): Record<string, unknown> | undefined {
+  return store.runningJobs().find((job) => job.project === project && (job.status === "dispatched" || job.status === "running"));
 }
 
 function latestRunActivityAt(store: MetadataStore, plane: ControlPlane | undefined, runId: number): string | undefined {
@@ -5772,6 +5816,7 @@ function launchSpec(store: MetadataStore, project: Record<string, unknown>, body
     region: str(body.region),
     scope: str(body.scope),
     scopeNote: str(merged.scopeNote), // a project may store a default focus note in its config
+    engagement: objectValue(merged.engagement),
     ...(body.verifyFindings !== undefined ? { verifyFindings: normalizeProjectVerifyFindings(store, Number(project.id), body.verifyFindings) } : {}),
     inputRunDir: str(body.inputRunDir),
     clue: str(body.clue),

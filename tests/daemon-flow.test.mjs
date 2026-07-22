@@ -421,6 +421,11 @@ test("daemon: project run uses configured source before prepare clues", async ()
       config: {
         projectIntent: "Audit the configured source",
         prepareClue: "https://example.invalid/should-not-prepare",
+        engagement: {
+          kind: "bug-bounty",
+          venue: "Example venue",
+          contestUrl: "https://example.invalid/bug-bounty/acme/information/",
+        },
       },
     }));
     const sourceLaunch = await j(await ui(base, "POST", `/api/projects/${sourceProject.uuid}/runs`, { verb: "run", mockLlm: true }));
@@ -432,6 +437,11 @@ test("daemon: project run uses configured source before prepare clues", async ()
     assert.equal(sourceClaim.job.spec.clue, undefined);
     assert.deepEqual(sourceClaim.job.spec.sourcePaths, ["./src"]);
     assert.equal(sourceClaim.job.spec.scopeNote, "Audit the configured source");
+    assert.deepEqual(sourceClaim.job.spec.engagement, {
+      kind: "bug-bounty",
+      venue: "Example venue",
+      contestUrl: "https://example.invalid/bug-bounty/acme/information/",
+    });
 
     const clueProject = await j(await ui(base, "POST", "/api/projects", {
       name: "clue-only",
