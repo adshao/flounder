@@ -10,7 +10,7 @@ import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest, splitCommandLineForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
-import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, runAudit, verifyBatchStoppedReason } from "../dist/agent/audit.js";
+import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, resolveSatisfiedVerifyResourceRequests, runAudit, verifyBatchStoppedReason } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
@@ -669,6 +669,47 @@ test("run health distinguishes blocked, shallow, and coverage-incomplete runs", 
   assert.equal(buildRunHealth({ ...base, infraErrors: 1 }).status, "infra-failed");
   assert.equal(verifyBatchStoppedReason("error", 7, 7), "finished");
   assert.equal(verifyBatchStoppedReason("error", 6, 7), "error");
+});
+
+test("Verify resolves repaired framework prepare requests after an execution verdict", () => {
+  const prepareRequest = {
+    id: "prepare-foundry-sources-aqua-forge-build",
+    status: "open",
+    kind: "toolchain",
+    needed: "Working foundry prepare environment",
+    reason: "forge build failed before the worker created its isolated harness",
+  };
+  const externalRequest = {
+    id: "rpc-archive-node",
+    status: "open",
+    kind: "network",
+    needed: "Archive node",
+    reason: "A real-target fork still needs an endpoint",
+  };
+  const confirmed = {
+    id: "f1",
+    title: "Executable claim",
+    location: "src/Target.sol:1",
+    severity: "high",
+    description: "",
+    evidence: "",
+    exploitSketch: "",
+    fix: "",
+    confidence: 1,
+    confirmationStatus: "confirmed-differential",
+    commandRunId: "cmd14",
+  };
+
+  assert.deepEqual(
+    resolveSatisfiedVerifyResourceRequests([prepareRequest, externalRequest], [confirmed]).map((row) => row.status),
+    ["resolved", "open"],
+  );
+  assert.equal(resolveSatisfiedVerifyResourceRequests([prepareRequest], [
+    { ...confirmed, confirmationStatus: "suspected", commandRunId: undefined },
+  ])[0].status, "open");
+  assert.equal(resolveSatisfiedVerifyResourceRequests([prepareRequest], [
+    { ...confirmed, title: "REFUTED: Executable claim", confirmationStatus: "suspected" },
+  ])[0].status, "resolved");
 });
 
 test("audit sessions settle post-handoff transport errors only after phase-required artifacts exist", () => {

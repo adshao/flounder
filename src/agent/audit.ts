@@ -861,6 +861,9 @@ export async function runAudit(
     }),
   ]);
   let resourceRequests: ResourceRequest[] = mergeResourceRequests(discoveryArtifacts.resourceRequests, session.resourceRequests ?? []);
+  if (auditMode === "verify") {
+    resourceRequests = resolveSatisfiedVerifyResourceRequests(resourceRequests, session.findings);
+  }
   let followupScopes: AuditScope[] = discoveryArtifacts.followupScopes;
   if (followupScopes.length > 0) {
     const merged = mergeFollowupScopes(scopeInventory, followupScopes);
@@ -1424,6 +1427,25 @@ function isConfirmed(status: ConfirmationStatus): boolean {
  * passed command attached to `REFUTED:` proves the mitigation, not the bug. */
 export function isExecutionConfirmedFinding(finding: AgentFinding): boolean {
   return !isRefutedFindingTitle(finding.title) && isConfirmed(finding.confirmationStatus);
+}
+
+/** A failed framework warm-up is a blocker only until the same Verify worker
+ * settles its claim by execution. Keep the failed diagnostic as resolved
+ * provenance, but do not leave the run or project waiting for setup that the
+ * worker already repaired with an isolated harness. Model-authored external
+ * resource requests remain open. */
+export function resolveSatisfiedVerifyResourceRequests(
+  requests: ResourceRequest[],
+  findings: AgentFinding[],
+): ResourceRequest[] {
+  const allClaimsSettledByExecution = findings.length > 0 && findings.every((finding) =>
+    isExecutionConfirmedFinding(finding)
+    || (isRefutedFindingTitle(finding.title) && Boolean(finding.commandRunId)),
+  );
+  if (!allClaimsSettledByExecution) return requests;
+  return requests.map((request) => request.status === "open" && request.id.startsWith("prepare-")
+    ? { ...request, status: "resolved" }
+    : request);
 }
 
 /** Collapse same-claim duplicates from one Verify worker and reject contradictory
