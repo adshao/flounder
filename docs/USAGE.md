@@ -114,6 +114,8 @@ For live model runs, configure provider credentials on each daemon machine. Subs
 
 Model-generated commands run in a copied workspace through `src/security/sandbox.ts`. The default backend is `auto`: on Apple silicon macOS it first uses Apple's `container` runtime when the selected image and sealed network are ready; otherwise it uses Docker-backed OCI when the image is available. If no sandbox engine is ready, it refuses execution with a policy error instead of silently falling back to the host.
 
+Build and confirmation commands require at least 2 GiB of free space on the workspace volume immediately before they start. If that headroom is unavailable, Flounder returns a resource error without launching the command, so a compiler cannot fill the daemon's host volume and prevent later containers from starting. Move the daemon workspace to a larger volume or free disk space before retrying. Completed Confirm workspaces discard rebuildable output such as `target/`, `node_modules/`, and compiler caches while retaining source, reports, and model-authored PoC files.
+
 For the Docker-backed path, install and start Docker, or a Docker-compatible runtime that provides the `docker` CLI, before running real execution-confirming audits. Build the default Docker image with:
 
 ```bash

@@ -4,7 +4,7 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { defaultConfig, sandboxExecutionOptions, sandboxNetworkForPurpose } from "../dist/config.js";
-import { autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, compactSandboxWorkspace, defaultAppleContainerMemoryMb, runSandboxCommand, sandboxToolPath } from "../dist/security/sandbox.js";
+import { autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, compactSandboxWorkspace, DEFAULT_SANDBOX_BUILD_MIN_FREE_DISK_MB, defaultAppleContainerMemoryMb, runSandboxCommand, sandboxMinFreeDiskMb, sandboxToolPath } from "../dist/security/sandbox.js";
 
 async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
@@ -336,6 +336,44 @@ test("sandbox capped logs preserve early diagnostics and late context", async ()
   }
 });
 
+test("sandbox refuses to start a command when the workspace volume lacks reserved disk headroom", async () => {
+  const workspace = await tempDir("flounder-sandbox-disk-headroom-");
+  const marker = path.join(workspace, "command-ran");
+  try {
+    const result = await runSandboxCommand(
+      {
+        program: process.execPath,
+        args: ["-e", "require('node:fs').writeFileSync('command-ran', 'unexpected')"],
+        timeoutMs: 10_000,
+      },
+      workspace,
+      4000,
+      [],
+      undefined,
+      {
+        backend: "host",
+        allowHostFallback: true,
+        network: "none",
+        minFreeDiskMb: 1_000_000_000,
+      },
+    );
+
+    assert.equal(result.exitCode, 126);
+    assert.match(result.stderr, /disk space/i);
+    assert.match(result.stderr, /command was not started/i);
+    await assert.rejects(readFile(marker), /ENOENT/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("sandbox reserves disk headroom automatically for build and confirm commands", () => {
+  assert.equal(sandboxMinFreeDiskMb({ program: "cargo", args: ["build"] }), DEFAULT_SANDBOX_BUILD_MIN_FREE_DISK_MB);
+  assert.equal(sandboxMinFreeDiskMb({ program: "node", args: ["--test", "poc.test.mjs"] }), DEFAULT_SANDBOX_BUILD_MIN_FREE_DISK_MB);
+  assert.equal(sandboxMinFreeDiskMb({ program: "rg", args: ["needle", "."] }), undefined);
+  assert.equal(sandboxMinFreeDiskMb({ program: "cargo", args: ["test"] }, 512), 512);
+});
+
 test("sandbox readiness reports missing Apple container image without host fallback", async () => {
   const fakeBin = await fakeContainerCli({ imageInspectExit: 1 });
   const oldPath = process.env.PATH;
@@ -399,7 +437,7 @@ test("sandbox auto prefers Apple container on Apple silicon when the backend is 
         8000,
         [],
         undefined,
-        { backend: "auto", image, network: "none" },
+        { backend: "auto", image, network: "none", minFreeDiskMb: 1 },
       );
       assert.equal(result.exitCode, 0);
       assert.match(result.stdout, /^ARGS:/);
@@ -434,7 +472,7 @@ test("sandbox auto falls back to Docker on Apple silicon when Apple sealed netwo
         8000,
         [],
         undefined,
-        { backend: "auto", image, network: "none" },
+        { backend: "auto", image, network: "none", minFreeDiskMb: 1 },
       );
       assert.equal(result.exitCode, 0);
       assert.match(result.stdout, /^DOCKER_ARGS:/);
@@ -464,7 +502,7 @@ test("sandbox Apple container backend maps Flounder isolation options to contain
       8000,
       [cache],
       cache,
-      { backend: "apple-container", image: "flounder-sandbox:latest", network: "none", memoryMb: 256, cpus: 1.25 },
+      { backend: "apple-container", image: "flounder-sandbox:latest", network: "none", memoryMb: 256, cpus: 1.25, minFreeDiskMb: 1 },
     );
 
     assert.equal(result.exitCode, 0);
@@ -503,7 +541,7 @@ test("sandbox Apple container backend pins DNS only for network-enabled runs", a
       8000,
       [],
       undefined,
-      { backend: "apple-container", image: "flounder-sandbox:cairo", network: "enabled" },
+      { backend: "apple-container", image: "flounder-sandbox:cairo", network: "enabled", minFreeDiskMb: 1 },
     );
 
     assert.equal(result.exitCode, 0);
@@ -534,7 +572,7 @@ test("sandbox Apple container backend force-deletes timed-out containers", async
       8000,
       [],
       undefined,
-      { backend: "apple-container", image: "flounder-sandbox:timeout", network: "enabled" },
+      { backend: "apple-container", image: "flounder-sandbox:timeout", network: "enabled", minFreeDiskMb: 1 },
     );
 
     assert.equal(result.timedOut, true);
