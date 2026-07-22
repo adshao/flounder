@@ -308,6 +308,8 @@ test("open-world egress permits structurally read-only JSON-RPC POST requests", 
 
   for (const c of [
     cmd("curl", "-fsS", "https://api.mainnet-beta.solana.com", "-H", "Content-Type: application/json", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", { encoding: "base64" }])),
+    cmd("curl", "-sS", "-o", "poc/programdata.json", "https://api.mainnet-beta.solana.com", "-H", "Content-Type: application/json", "-d", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", { encoding: "base64" }])),
+    cmd("curl", "--output=scratch/programdata.json", "https://api.mainnet-beta.solana.com", "-H", "Content-Type: application/json", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", { encoding: "base64" }])),
     cmd("curl", "-fsS", "-X", "POST", "https://api.mainnet-beta.solana.com", "--data-raw", read("getProgramAccounts", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
     cmd("curl", "-s", "https://api.mainnet-beta.solana.com", "--data-binary", read("getGenesisHash")),
     cmd("curl", "-s", "https://api.mainnet-beta.solana.com", "--data-binary", read("getSlot", [{ commitment: "finalized" }])),
@@ -321,6 +323,9 @@ test("open-world egress permits structurally read-only JSON-RPC POST requests", 
     cmd("curl", "-X", "POST", "https://rpc.example", "-H", "Authorization: Bearer secret", "--data", read("eth_blockNumber")),
     cmd("curl", "-X", "POST", "https://api.mainnet-beta.solana.com", "--data", read("sendTransaction", ["signed-transaction"])),
     cmd("curl", "-X", "POST", "https://api.mainnet-beta.solana.com", "--data", read("requestAirdrop", ["recipient", 1])),
+    cmd("curl", "-o", "programs/target.json", "https://api.mainnet-beta.solana.com", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
+    cmd("curl", "--output=../programdata.json", "https://api.mainnet-beta.solana.com", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
+    cmd("curl", "-o", "poc/one.json", "--output", "poc/two.json", "https://api.mainnet-beta.solana.com", "--data", read("getAccountInfo", ["4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh"])),
   ]) assert.equal(openWorldCommandNeedsNetwork(c, "build"), false, `${c.args.join(" ")} must remain network-sealed`);
 });
 

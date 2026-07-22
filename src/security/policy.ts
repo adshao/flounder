@@ -345,6 +345,7 @@ function isReadOnlyJsonRpcCurl(args: string[]): boolean {
   let method: string | undefined;
   let body: string | undefined;
   let rpcUrl: URL | undefined;
+  let outputPath: string | undefined;
   const resolveTargets: string[] = [];
   for (let idx = 0; idx < args.length; idx += 1) {
     const arg = args[idx] ?? "";
@@ -379,6 +380,18 @@ function isReadOnlyJsonRpcCurl(args: string[]): boolean {
       idx += 1;
       continue;
     }
+    if (arg === "-o" || arg === "--output") {
+      if (outputPath !== undefined || !isModelOwnedCurlOutputPath(args[idx + 1] ?? "")) return false;
+      outputPath = args[idx + 1];
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--output=")) {
+      if (outputPath !== undefined) return false;
+      outputPath = arg.slice("--output=".length);
+      if (!isModelOwnedCurlOutputPath(outputPath)) return false;
+      continue;
+    }
     if (/^https?:\/\//i.test(arg)) {
       if (rpcUrl) return false;
       try {
@@ -401,6 +414,13 @@ function isReadOnlyJsonRpcCurl(args: string[]): boolean {
   }
   const requests = Array.isArray(payload) ? payload : [payload];
   return requests.length > 0 && requests.every(isReadOnlyJsonRpcRequest);
+}
+
+function isModelOwnedCurlOutputPath(input: string): boolean {
+  if (!input || input.startsWith("-") || looksLikePathEscape(input)) return false;
+  const normalized = input.replace(/\\/g, "/").replace(/\/+/g, "/");
+  const slash = normalized.lastIndexOf("/");
+  return slash > 0 && isModelOwnedWorkspaceDirectory(normalized.slice(0, slash));
 }
 
 function isReadOnlyJsonRpcRequest(input: unknown): boolean {
