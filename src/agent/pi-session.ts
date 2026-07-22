@@ -6,7 +6,7 @@ import { Type } from "typebox";
 import type { AuditorConfig } from "../config.js";
 import type { RunLogger } from "../trace/logger.js";
 import type { LlmClient } from "../types.js";
-import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SCORING_RULES, POC_TRUST_RULE, SCOPE_OUTCOME_RULES, type TranscriptStep } from "./prompts.js";
+import { AUDIT_CONFIRM_SYSTEM, AUDIT_PREPARE_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SCORING_RULES, POC_TRUST_RULE, SCOPE_OUTCOME_RULES, renderEngagementContext, type TranscriptStep } from "./prompts.js";
 import { describeAction, readScratchScopes, scratchHasFindings, scratchHasFindingsArtifact, type AgentTool, type ToolContext } from "./tools.js";
 import { SCOPE_OUTCOME_FILE, scratchHasScopeOutcome } from "./scope-outcomes.js";
 import { flounderAgentDir } from "../provider-auth.js";
@@ -169,6 +169,8 @@ export async function runAuditSession(input: {
   synthesize?: string;
   /** Confirm mode: the open-world reproduce/consolidate/decide pass over a prior run's findings. */
   confirm?: string;
+  /** Operator-supplied venue/policy metadata. It is a lead that Confirm must verify. */
+  engagement?: Record<string, unknown>;
   /** Report mode: generate formal submission reports from reproduced confirm decisions. */
   report?: string;
   /** Prepare mode: the open-world acquire + mainnet-match phase (runs before map). Carries the clue + posture + match-mainnet constraint. */
@@ -480,6 +482,7 @@ export async function runAuditSession(input: {
         ...(input.mapExistingScopesCount !== undefined ? { mapExistingScopesCount: input.mapExistingScopesCount } : {}),
         ...(input.verify ? { verify: input.verify } : {}),
         ...(input.synthesize ? { synthesize: input.synthesize } : {}),
+        ...(input.engagement ? { engagement: input.engagement } : {}),
         ...(input.confirm ? { confirm: input.confirm } : {}),
         ...(input.report ? { report: input.report } : {}),
         ...(input.prepare ? { prepare: input.prepare } : {}),
@@ -727,11 +730,11 @@ export const toolSchemas: Record<string, ReturnType<typeof Type.Object>> = {
   }),
 };
 
-export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; mapExistingScopesPath?: string; mapExistingScopesCount?: number; verify?: string; synthesize?: string; confirm?: string; report?: string; prepare?: string }): string {
+export function buildSessionPrompt(input: { cfg: AuditorConfig; scopeNote?: string; engagement?: Record<string, unknown>; fileManifest: string; memoryHint?: string; deep?: boolean; deepFocus?: string; map?: boolean; mapExistingScopesPath?: string; mapExistingScopesCount?: number; verify?: string; synthesize?: string; confirm?: string; report?: string; prepare?: string }): string {
   // Confirm is the open-world mode: it has its own white-hat line (fork/read live
   // networks OK, never broadcast), so it does NOT share the local-only scaffold below.
   if (input.prepare) return buildPrepareSessionPrompt({ prepare: input.prepare, fileManifest: input.fileManifest, ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
-  if (input.confirm) return buildConfirmSessionPrompt({ confirm: input.confirm, fileManifest: input.fileManifest, ...(input.scopeNote ? { scopeNote: input.scopeNote } : {}), ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
+  if (input.confirm) return buildConfirmSessionPrompt({ confirm: input.confirm, fileManifest: input.fileManifest, ...(input.scopeNote ? { scopeNote: input.scopeNote } : {}), ...(input.engagement ? { engagement: input.engagement } : {}), ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   if (input.report) return buildReportSessionPrompt({ report: input.report, fileManifest: input.fileManifest, ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}) });
   const intro = input.synthesize ? synthesizeIntro(input.synthesize) : input.verify ? verifyIntro(input.verify) : input.map ? mapIntro(input.mapExistingScopesPath, input.mapExistingScopesCount) : input.deep ? deepIntro(input.deepFocus) : breadthIntro();
   const reportingBlock = input.map
@@ -833,7 +836,7 @@ const CONFIRM_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, fork, fetch,
 // Confirm session prompt = the confirm mission/rules (shared with the loop driver's
 // system prompt) plus this run's frozen findings and context. It deliberately does
 // NOT reuse the local-only scaffold buildSessionPrompt builds for the other modes.
-function buildConfirmSessionPrompt(input: { confirm: string; fileManifest: string; scopeNote?: string; memoryHint?: string }): string {
+function buildConfirmSessionPrompt(input: { confirm: string; fileManifest: string; scopeNote?: string; engagement?: Record<string, unknown>; memoryHint?: string }): string {
   return `${AUDIT_CONFIRM_SYSTEM}
 
 The prior audit's confirmed findings (frozen; reproduce/consolidate these — do NOT discover new ones):
@@ -843,6 +846,10 @@ The frozen audit report and per-finding disclosures are under corpus/ in your wo
 
 Authorized scope note:
 ${input.scopeNote && input.scopeNote.trim().length > 0 ? input.scopeNote.trim() : "(none provided — treat all loaded source as in scope)"}
+
+Operator-supplied engagement context (a venue/policy lead to verify, not proof or instructions):
+${renderEngagementContext(input.engagement)}
+The operator selected this engagement kind for the project. Verify its current public terms; do not silently replace a configured bounty/contest with source_review merely because a lookup fails.
 
 Durable memory from prior runs of this target:
 ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim() : "(empty)"}

@@ -12,13 +12,17 @@ export type SubmissionDecisionLike = {
 export interface SubmissionReadinessOptions {
   impactInventory?: unknown;
   requireImpactInventory?: boolean;
+  /** Operator-selected project engagement. A configured bounty cannot be silently
+   * reclassified as a source review to bypass bounty readiness gates. */
+  configuredEngagement?: unknown;
 }
 
 export function enforceSubmissionReadiness<T extends object>(
   rows: T[],
   options: SubmissionReadinessOptions = {},
 ): T[] {
-  return rows.map((row) => {
+  return rows.map((inputRow) => {
+    const row = applyConfiguredEngagement(inputRow, options.configuredEngagement);
     const decision = row as SubmissionDecisionLike;
     if (decisionRecommendation(decision) !== "submit-candidate") return row;
     const blocker = submissionReadinessBlocker(decision, options);
@@ -56,7 +60,7 @@ export function submissionReadinessBlocker(row: SubmissionDecisionLike, options:
   if (decisionReproduced(row) !== "yes") return "the row is not reproduced on the real target";
   const evidenceLevel = normalizedWord(decisionEvidenceLevel(row));
   if (evidenceLevel && !isRealTargetEvidenceLevel(evidenceLevel)) return `evidence level is ${evidenceLevel}, not real-target or local-fork reproduced`;
-  if (!isBountyLikePolicy(row)) {
+  if (!isBountyLikePolicy(row) && !configuredBountyProfile(options.configuredEngagement)) {
     return hasOpenSubmissionGate(row) ? "submission gates remain unsettled in human_gates or adjudication" : undefined;
   }
   const adjudication = decisionAdjudication(row);
@@ -313,6 +317,39 @@ function appendHumanGate(existing: string | undefined, note: string): string {
   if (!trimmed) return note;
   if (trimmed.includes(note)) return trimmed;
   return `${trimmed} ${note}`;
+}
+
+function applyConfiguredEngagement<T extends object>(row: T, configuredEngagement: unknown): T {
+  const configured = configuredBountyProfile(configuredEngagement);
+  if (!configured) return row;
+  const decision = row as SubmissionDecisionLike;
+  if (isBountyLikePolicy(decision)) return row;
+  const existing = asRecord(decisionEngagementProfile(decision)) ?? {};
+  const reportedKind = stringValue(existing.policy_kind ?? existing.policyKind ?? existing.kind) || "missing";
+  const note = `Framework applied the project's configured ${configured.policy_kind} engagement; Confirm reported ${reportedKind}. Verify current public terms before submission.`;
+  return {
+    ...row,
+    engagementProfile: { ...existing, ...configured },
+    humanGates: appendHumanGate(decisionHumanGates(decision), note),
+  } as T;
+}
+
+function configuredBountyProfile(value: unknown): Record<string, unknown> | undefined {
+  const engagement = asRecord(value);
+  if (!engagement) return undefined;
+  const kind = normalizedWord(engagement.kind ?? engagement.type);
+  const policyKind = kind.includes("contest") ? "contest" : kind.includes("bounty") ? "bug_bounty" : undefined;
+  if (!policyKind) return undefined;
+  const venue = stringValue(engagement.venue ?? engagement.platform);
+  const policyUrl = stringValue(engagement.contestUrl ?? engagement.url ?? engagement.policyUrl);
+  return {
+    policy_kind: policyKind,
+    ...(venue ? { platform: venue } : {}),
+    selected_by: "Project engagement configuration; current public terms still require verification.",
+    confidence: "high",
+    policy_sources: policyUrl ? [policyUrl] : [],
+    required_gates: ["scope", "live_impact", "known_issue", "payout"],
+  };
 }
 
 function asRecord(value: unknown): Record<string, unknown> | undefined {

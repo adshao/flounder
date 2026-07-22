@@ -109,7 +109,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       } else if (spec.verb === "confirm") {
         if (!spec.inputRunDir) throw new Error("confirm requires inputRunDir");
         await requireSandboxReady(cfg, "confirm", { makeTracker, flushTracker, onActivity: sink.push });
-        await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.inputRunDirs ? { inputRunDirs: spec.inputRunDirs } : {}), ...(spec.confirmKeys ? { confirmKeys: spec.confirmKeys } : {}), ...(spec.confirmFindings ? { inlineFindings: spec.confirmFindings } : {}), ...(spec.confirmSettledRows ? { settledDecisions: spec.confirmSettledRows } : {}), ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
+        await runConfirm(cfg, { inputRunDir: spec.inputRunDir, signal: abort.signal, makeTracker, onActivity: sink.push, ...(spec.engagement ? { engagement: spec.engagement } : {}), ...(spec.inputRunDirs ? { inputRunDirs: spec.inputRunDirs } : {}), ...(spec.confirmKeys ? { confirmKeys: spec.confirmKeys } : {}), ...(spec.confirmFindings ? { inlineFindings: spec.confirmFindings } : {}), ...(spec.confirmSettledRows ? { settledDecisions: spec.confirmSettledRows } : {}), ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}), ...(spec.fresh ? { fresh: true } : {}) });
       } else if (spec.verb === "prepare") {
         if (!spec.clue) throw new Error("prepare requires a clue (tx / address / project / link)");
         await runPrepare(cfg, {
@@ -322,6 +322,7 @@ async function runPipelineJob(
         signal: ctx.signal,
         makeTracker: ctx.makeTracker,
         onActivity: ctx.onActivity,
+        ...(confirmSpec.engagement ? { engagement: confirmSpec.engagement } : {}),
         ...(confirmSpec.inputRunDirs ? { inputRunDirs: confirmSpec.inputRunDirs } : {}),
         ...(confirmSpec.confirmKeys ? { confirmKeys: confirmSpec.confirmKeys } : {}),
         ...(confirmSpec.confirmFindings ? { inlineFindings: confirmSpec.confirmFindings } : {}),

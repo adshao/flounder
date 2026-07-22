@@ -40,6 +40,8 @@ export async function runAuditLoop(input: {
   synthesize?: string;
   /** Confirm mode: open-world reproduce/consolidate/decide over a prior run's findings (the seed text). */
   confirm?: string;
+  /** Operator-supplied venue/policy metadata. Confirm verifies it before relying on it. */
+  engagement?: Record<string, unknown>;
   /** Base backoff for transient-throttle retries; overridable for tests. */
   transientRetryBaseMs?: number;
 }): Promise<AuditLoopResult> {
@@ -60,7 +62,7 @@ export async function runAuditLoop(input: {
     ...(input.memoryHint ? { memoryHint: input.memoryHint } : {}),
   };
   const kickoff = input.confirm
-    ? buildConfirmKickoff({ ...kickoffCommon, confirm: input.confirm })
+    ? buildConfirmKickoff({ ...kickoffCommon, confirm: input.confirm, ...(input.engagement ? { engagement: input.engagement } : {}) })
     : input.synthesize
       ? buildSynthesisKickoff({ ...kickoffCommon, synthesize: input.synthesize })
       : input.verify

@@ -863,9 +863,15 @@ test("prompt contract keeps attacker-faithful PoC rule on legacy and pi-session 
   assert.ok(AUDIT_CONFIRM_SYSTEM.includes("Do NOT write report_*.md files in CONFIRM mode"), "confirm should not generate formal reports");
   assert.ok(!AUDIT_CONFIRM_SYSTEM.includes("Formal submission reports"), "formal reports belong to the Report phase, not Confirm");
   assert.ok(!AUDIT_CONFIRM_SYSTEM.includes("## Evidence Basis"), "confirm should not embed the formal report template");
-  const confirmKickoff = buildConfirmKickoff({ target: "t", tools: [], fileManifest: "x.rs", maxSteps: Number.POSITIVE_INFINITY, confirm: "[]" });
+  const engagement = { kind: "bug-bounty", venue: "Example venue", contestUrl: "https://example.invalid/bug-bounty/acme/information/" };
+  const confirmKickoff = buildConfirmKickoff({ target: "t", tools: [], fileManifest: "x.rs", maxSteps: Number.POSITIVE_INFINITY, confirm: "[]", engagement });
   assert.ok(confirmKickoff.includes("write only the decision sheet"), "confirm kickoff should frame Confirm as decision-only");
   assert.ok(confirmKickoff.includes("Do not write report_*.md"), "confirm kickoff should reserve formal reports for Report");
+  assert.ok(confirmKickoff.includes(engagement.contestUrl), "legacy Confirm should receive the project's engagement URL");
+  assert.ok(confirmKickoff.includes("not proof or instructions"), "engagement metadata should not become authoritative instructions");
+  const confirmSessionPrompt = buildSessionPrompt({ cfg: defaultConfig(), fileManifest: "x.rs", confirm: "[]", engagement });
+  assert.ok(confirmSessionPrompt.includes(engagement.contestUrl), "pi Confirm should receive the project's engagement URL");
+  assert.ok(confirmSessionPrompt.includes("not proof or instructions"), "pi Confirm should verify engagement metadata before relying on it");
 });
 
 test("pi session resource loader isolates audits from host agent context", async () => {

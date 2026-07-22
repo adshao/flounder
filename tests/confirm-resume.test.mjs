@@ -144,3 +144,35 @@ test("confirm bounty submit readiness requires impact inventory and closed gates
   });
   assert.equal(ready[0].recommendation, "submit-candidate");
 });
+
+test("configured bounty engagement cannot be downgraded to source review", () => {
+  const rows = enforceBountySubmitReadiness([
+    {
+      bug: "Configured bounty bug",
+      members: ["kconfigured"],
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      humanGates: "",
+      engagementProfile: { policy_kind: "source_review", selected_by: "venue lookup failed" },
+      adjudication: {
+        scope_status: "pass",
+        live_impact_status: "pass",
+        known_issue_status: "pass",
+        payout_estimate: { status: "not-applicable" },
+      },
+    },
+  ], {
+    configuredEngagement: {
+      kind: "bug-bounty",
+      venue: "Example venue",
+      contestUrl: "https://example.invalid/bug-bounty/acme/information/",
+    },
+  });
+
+  assert.equal(rows[0].engagementProfile.policy_kind, "bug_bounty");
+  assert.equal(rows[0].engagementProfile.platform, "Example venue");
+  assert.deepEqual(rows[0].engagementProfile.policy_sources, ["https://example.invalid/bug-bounty/acme/information/"]);
+  assert.equal(rows[0].recommendation, "needs-human");
+  assert.match(rows[0].humanGates, /configured bug_bounty engagement/);
+  assert.match(rows[0].humanGates, /impact_inventory\.json/);
+});

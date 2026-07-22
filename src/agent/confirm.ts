@@ -43,7 +43,7 @@ export const IMPACT_INVENTORY_FILE = "impact_inventory.json";
 
 export async function runConfirm(
   cfg: AuditorConfig,
-  options: { inputRunDir: string; inputRunDirs?: string[]; confirmKeys?: string[]; inlineFindings?: Array<Record<string, unknown>>; settledDecisions?: ConfirmDecisionRow[]; maxSteps?: number; fresh?: boolean; streamEvents?: boolean; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory },
+  options: { inputRunDir: string; inputRunDirs?: string[]; confirmKeys?: string[]; inlineFindings?: Array<Record<string, unknown>>; settledDecisions?: ConfirmDecisionRow[]; engagement?: Record<string, unknown>; maxSteps?: number; fresh?: boolean; streamEvents?: boolean; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory },
 ): Promise<ConfirmRunResult> {
   // Confirm needs a real agent that can fork a live network and run real nodes; the
   // mock/CLI fallbacks cannot, so this mode requires a pi-session provider.
@@ -204,10 +204,11 @@ export async function runConfirm(
     cwd: workspace.absolute,
     fileManifest: renderConfirmFileManifest(baselineFiles, corpusManifest),
     confirm: seed,
+    ...(options.engagement ? { engagement: options.engagement } : {}),
     // Project the decision rows to SQLite each turn so a UI shows live reproduction
     // progress (reproduced X / N) during the run, not only at the end.
     onConfirmCheckpoint: (raw) => {
-      const liveRows = enforceBountySubmitReadiness(toLiveConfirmRows(raw), { impactInventory: readImpactInventory(session) });
+      const liveRows = enforceBountySubmitReadiness(toLiveConfirmRows(raw), { impactInventory: readImpactInventory(session), configuredEngagement: options.engagement });
       recorder.confirmDecisions(liveRows);
       confirmProgress.rows = liveRows.length;
       confirmProgress.reproducedYes = liveRows.filter((row) => row.reproduced === "yes").length;
@@ -258,7 +259,7 @@ export async function runConfirm(
     });
     rows = mergeRowsByClusters(rows, equivalence.clusters);
   }
-  rows = enforceBountySubmitReadiness(rows, { impactInventory });
+  rows = enforceBountySubmitReadiness(rows, { impactInventory, configuredEngagement: options.engagement });
   await logger.artifact("confirm_equivalence.json", equivalence);
   await logger.artifact("confirm_decision.json", rows);
   if (impactInventory) await logger.artifact(IMPACT_INVENTORY_FILE, impactInventory);
@@ -615,8 +616,8 @@ type ConfirmDecisionLike = {
   adjudication?: unknown;
 };
 
-export function enforceBountySubmitReadiness<T extends ConfirmDecisionLike>(rows: T[], options: { impactInventory?: unknown } = {}): T[] {
-  return enforceSubmissionReadiness(rows, { impactInventory: options.impactInventory, requireImpactInventory: true });
+export function enforceBountySubmitReadiness<T extends ConfirmDecisionLike>(rows: T[], options: { impactInventory?: unknown; configuredEngagement?: unknown } = {}): T[] {
+  return enforceSubmissionReadiness(rows, { impactInventory: options.impactInventory, configuredEngagement: options.configuredEngagement, requireImpactInventory: true });
 }
 
 function bountySubmitBlocker(row: ConfirmDecisionLike, impactInventory: unknown): string | undefined {

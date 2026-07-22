@@ -75,6 +75,9 @@ export interface LaunchSpec {
   confirmKeys?: string[] | undefined; // confirm: restrict the work list to these finding content keys (project defaults pass the full current confirmed-finding context)
   confirmFindings?: Array<Record<string, unknown>> | undefined; // confirm: DB-backed seed findings when prior run artifacts are missing/incomplete
   confirmSettledRows?: ConfirmSettledRow[] | undefined; // confirm: prior reproduced/not-reproduced decisions to carry forward across batches
+  /** Operator-supplied venue/policy metadata. Confirm treats this as a lead to verify,
+   * never as proof of scope, impact, novelty, or payout eligibility. */
+  engagement?: Record<string, unknown> | undefined;
   reportFindings?: ReportFindingSpec[] | undefined; // report: confirmed/reproduced bugs to package as formal Markdown reports
   pipeline?: boolean | undefined; // run: project/CLI clue pipeline (prepare if needed -> map/dig -> verify -> confirm -> report)
   pipelineStart?: "audit" | "settle" | undefined; // settle skips an empty map/dig when only verify/confirm/report work remains
