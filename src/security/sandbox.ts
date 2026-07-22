@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
 import { copyFile, lstat, mkdir, open, readdir, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
+import { totalmem } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { analyzeReproductionCommandSafety } from "./policy.js";
@@ -28,6 +29,8 @@ export const DEFAULT_SANDBOX_IMAGE = "flounder-sandbox:latest";
 const APPLE_CONTAINER_SEALED_NETWORK = "flounder-sealed";
 const APPLE_CONTAINER_NETWORK_DNS = ["1.1.1.1", "8.8.8.8"] as const;
 const CACHE_TEMP_PREFIX = ".flounder-cache-";
+const APPLE_CONTAINER_DEFAULT_MEMORY_CAP_MB = 8192;
+const APPLE_CONTAINER_DEFAULT_MEMORY_FLOOR_MB = 1024;
 
 export interface SandboxExecutionOptions {
   backend?: SandboxBackend;
@@ -310,6 +313,20 @@ export function autoPrefersAppleContainer(platform = process.platform, arch = pr
   return platform === "darwin" && arch === "arm64";
 }
 
+/**
+ * Apple container otherwise defaults each Linux VM to 1 GiB, which is too small
+ * to link many real Rust/Solana test targets. Reserve one quarter of host memory
+ * for a command, bounded so concurrent audit streams remain practical.
+ */
+export function defaultAppleContainerMemoryMb(hostMemoryBytes = totalmem()): number {
+  const hostMemoryMb = Math.floor(hostMemoryBytes / (1024 * 1024));
+  if (!Number.isFinite(hostMemoryMb) || hostMemoryMb <= 0) return APPLE_CONTAINER_DEFAULT_MEMORY_FLOOR_MB;
+  return Math.max(
+    APPLE_CONTAINER_DEFAULT_MEMORY_FLOOR_MB,
+    Math.min(APPLE_CONTAINER_DEFAULT_MEMORY_CAP_MB, Math.floor(hostMemoryMb / 4)),
+  );
+}
+
 export async function checkSandboxReadiness(input: SandboxExecutionOptions = {}): Promise<SandboxReadiness> {
   const options = normalizeSandboxExecutionOptions(input);
   if (options.backend === "host") {
@@ -559,7 +576,8 @@ async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<
   if (typeof process.getuid === "function" && typeof process.getgid === "function") {
     containerArgs.push("--user", `${process.getuid()}:${process.getgid()}`);
   }
-  if (input.options.memoryMb !== undefined) containerArgs.push("--memory", `${Math.max(64, Math.floor(input.options.memoryMb))}M`);
+  const memoryMb = input.options.memoryMb ?? defaultAppleContainerMemoryMb();
+  containerArgs.push("--memory", `${Math.max(64, Math.floor(memoryMb))}M`);
   if (input.options.cpus !== undefined) containerArgs.push("--cpus", String(Math.max(0.1, input.options.cpus)));
   for (const [key, value] of Object.entries(sandboxEnv("/workspace", "/workspace/.tmp", input.cacheDir ? "/cache" : undefined, input.command, input.options.network))) {
     if (value !== undefined) containerArgs.push("--env", `${key}=${value}`);
