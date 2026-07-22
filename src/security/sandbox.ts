@@ -70,6 +70,7 @@ interface ProcessRunInput {
   cacheDir?: string;
   maxLogBytes: number;
   options: SandboxProcessOptions;
+  signal?: AbortSignal;
 }
 
 /**
@@ -198,6 +199,7 @@ export async function runSandboxCommand(
   redactPaths: string[],
   cacheDir?: string,
   executionOptions: SandboxExecutionOptions = {},
+  signal?: AbortSignal,
 ): Promise<ReproductionCommandResult> {
   const cwd = command.cwd ? await resolveWorkspacePathForRead(workspaceAbsolute, command.cwd) : workspaceAbsolute;
   const started = Date.now();
@@ -218,6 +220,7 @@ export async function runSandboxCommand(
     ...(cacheDir ? { cacheDir } : {}),
     maxLogBytes,
     options,
+    ...(signal ? { signal } : {}),
   });
   await persistSandboxToolCaches(workspaceAbsolute, cacheDir);
 
@@ -460,6 +463,7 @@ async function runHostSandboxProcess(input: ProcessRunInput): Promise<{ stdout: 
     env: sandboxEnv(input.workspaceAbsolute, input.tmpDir, input.cacheDir, input.command, input.options.network),
     timeoutMs: input.command.timeoutMs ?? 120_000,
     maxLogBytes: input.maxLogBytes,
+    ...(input.signal ? { signal: input.signal } : {}),
   });
 }
 
@@ -515,7 +519,9 @@ async function runOciSandboxProcess(input: ProcessRunInput): Promise<{ stdout: s
     timeoutMs: input.command.timeoutMs ?? 120_000,
     maxLogBytes: input.maxLogBytes,
     onTimeout: cleanupTimedOutContainer,
+    onAbort: cleanupTimedOutContainer,
     timeoutKillDelayMs: 250,
+    ...(input.signal ? { signal: input.signal } : {}),
   });
   if (result.timedOut) cleanupTimedOutContainer();
   return result;
@@ -566,8 +572,9 @@ async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<
     env: containerClientEnv(),
     timeoutMs: input.command.timeoutMs ?? 120_000,
     maxLogBytes: input.maxLogBytes,
+    ...(input.signal ? { signal: input.signal } : {}),
   });
-  if (result.timedOut) {
+  if (result.timedOut || result.aborted) {
     // The Apple CLI may still be unwinding its `container run` XPC session when
     // the timeout fires. Deleting concurrently races that session and can leave
     // the per-container VM running indefinitely, so wait for the client process
@@ -584,19 +591,23 @@ async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<
   return result;
 }
 
-async function runSpawnedProcess(input: { program: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxLogBytes: number; onTimeout?: () => void; timeoutKillDelayMs?: number }): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+async function runSpawnedProcess(input: { program: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxLogBytes: number; onTimeout?: () => void; onAbort?: () => void; timeoutKillDelayMs?: number; signal?: AbortSignal }): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; aborted: boolean }> {
   let stdout = "";
   let stderr = "";
   let timedOut = false;
+  let aborted = false;
   let exitCode: number | null = null;
   let terminateTimer: ReturnType<typeof setTimeout> | undefined;
   let killTimer: ReturnType<typeof setTimeout> | undefined;
+  let terminationStarted = false;
   const child = spawn(input.program, input.args, {
     cwd: input.cwd,
     shell: false,
     env: input.env,
   });
   const terminateChild = (): void => {
+    if (terminationStarted) return;
+    terminationStarted = true;
     child.kill("SIGTERM");
     killTimer = setTimeout(() => {
       if (exitCode === null) child.kill("SIGKILL");
@@ -613,6 +624,18 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
     if (delay > 0) terminateTimer = setTimeout(terminateChild, delay);
     else terminateChild();
   }, input.timeoutMs);
+  const abortChild = (): void => {
+    if (exitCode !== null || aborted) return;
+    aborted = true;
+    try {
+      input.onAbort?.();
+    } catch (error) {
+      stderr = appendLimited(stderr, error instanceof Error ? error.message : String(error), input.maxLogBytes);
+    }
+    terminateChild();
+  };
+  if (input.signal?.aborted) abortChild();
+  else input.signal?.addEventListener("abort", abortChild, { once: true });
 
   child.stdout?.on("data", (chunk) => {
     stdout = appendLimited(stdout, String(chunk), input.maxLogBytes);
@@ -632,9 +655,10 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
     });
   });
   clearTimeout(timer);
+  input.signal?.removeEventListener("abort", abortChild);
   if (terminateTimer) clearTimeout(terminateTimer);
   if (killTimer) clearTimeout(killTimer);
-  return { stdout, stderr, exitCode, timedOut };
+  return { stdout, stderr, exitCode, timedOut, aborted };
 }
 
 /** Case-insensitive literal success-pattern match against combined command output. */
