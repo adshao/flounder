@@ -3500,6 +3500,11 @@ test("buildRoot: the sandbox copies the buildable root, while the model reads on
     const inspect = await tool("bash").run({ cmd: "find crate -type f -print", purpose: "inspect" }, toolCtx);
     assert.match(inspect.observation, /crate\/src\/lib\.rs/);
     assert.doesNotMatch(inspect.observation, /AuditFindings|KNOWN ANSWER/);
+    await assert.rejects(
+      stat(path.join(logger.runDir, "audit", "workspace-source-view-cmd1")),
+      /ENOENT/,
+      "the per-command source view must be removed after the inspection result is captured",
+    );
   } finally {
     await rm(dir, { recursive: true, force: true });
   }

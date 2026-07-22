@@ -1,4 +1,4 @@
-import { mkdir, readFile } from "node:fs/promises";
+import { mkdir, readFile, rm } from "node:fs/promises";
 import path from "node:path";
 import { sandboxExecutionOptions, sandboxNetworkForPurpose, type AuditorConfig } from "../config.js";
 import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, isAgentWorkspaceSetupCommand, openWorldCommandNeedsNetwork } from "../security/policy.js";
@@ -400,15 +400,30 @@ const bashTool: AgentTool = {
     const commandWorkspace = sourceReadBoundaryActive(ctx) && isAgentInspectionCommand(normalized.command)
       ? await prepareInspectionWorkspace(ctx, workspace, runId)
       : workspace;
-    const result = await runSandboxCommand(
-      normalized.command,
-      commandWorkspace.absolute,
-      ctx.cfg.reproductionMaxLogBytes,
-      ctx.cfg.sourcePaths,
-      ctx.session.buildCacheDir,
-      sandboxExecutionOptions(ctx.cfg, commandNetwork),
-      ctx.signal,
-    );
+    let result: ReproductionCommandResult;
+    try {
+      result = await runSandboxCommand(
+        normalized.command,
+        commandWorkspace.absolute,
+        ctx.cfg.reproductionMaxLogBytes,
+        ctx.cfg.sourcePaths,
+        ctx.session.buildCacheDir,
+        sandboxExecutionOptions(ctx.cfg, commandNetwork),
+        ctx.signal,
+      );
+    } finally {
+      if (commandWorkspace.absolute !== workspace.absolute) {
+        try {
+          await rm(commandWorkspace.absolute, { recursive: true, force: true });
+        } catch (error) {
+          await ctx.logger.event("audit_command_workspace_cleanup_failed", {
+            runId,
+            error: error instanceof Error ? error.message : String(error),
+            ...activityStreamMeta(ctx),
+          });
+        }
+      }
+    }
     const exitMatched = result.exitCode === result.expectedExitCode && !result.timedOut;
     const isConfirm = normalized.purpose === "confirm";
     const eligibleByType = isAgentConfirmCommand(normalized.command);
