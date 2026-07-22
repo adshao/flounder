@@ -9,6 +9,10 @@ export type SubmissionDecisionLike = {
   evidenceLevel?: string | null | undefined;
 };
 
+export type BountyGate = "scope" | "live_impact" | "known_issue" | "payout";
+const DEFAULT_BOUNTY_GATES: BountyGate[] = ["scope", "live_impact", "known_issue", "payout"];
+const SOURCE_ONLY_BOUNTY_GATES: BountyGate[] = ["scope", "known_issue", "payout"];
+
 export interface SubmissionReadinessOptions {
   impactInventory?: unknown;
   requireImpactInventory?: boolean;
@@ -58,20 +62,21 @@ export function isResumeSettledDecision(row: object): boolean {
 
 export function submissionReadinessBlocker(row: SubmissionDecisionLike, options: SubmissionReadinessOptions = {}): string | undefined {
   if (decisionReproduced(row) !== "yes") return "the row is not reproduced on the real target";
+  const requiredGates = requiredBountyGates(row);
   const evidenceLevel = normalizedWord(decisionEvidenceLevel(row));
-  if (evidenceLevel && !isRealTargetEvidenceLevel(evidenceLevel)) return `evidence level is ${evidenceLevel}, not real-target or local-fork reproduced`;
+  if (evidenceLevel && !isPermittedSubmissionEvidenceLevel(row, evidenceLevel)) return `evidence level is ${evidenceLevel}, not permitted by the engagement's evidence requirement`;
   if (!isBountyLikePolicy(row) && !configuredBountyProfile(options.configuredEngagement)) {
     return hasOpenSubmissionGate(row) ? "submission gates remain unsettled in human_gates or adjudication" : undefined;
   }
   const adjudication = decisionAdjudication(row);
-  if (options.requireImpactInventory !== false && !impactInventoryCoversRow(row, options.impactInventory)) {
+  if (options.requireImpactInventory !== false && requiredGates.includes("live_impact") && !impactInventoryCoversRow(row, options.impactInventory)) {
     return "impact_inventory.json has no entry covering this reproduced bounty-like row";
   }
-  for (const gate of ["scope", "live_impact", "known_issue", "payout"] as const) {
+  for (const gate of requiredGates) {
     const status = bountyGateStatus(adjudication, gate);
     if (!isPassingBountyGateStatus(status, gate)) return `${gate} gate is ${status ? JSON.stringify(status) : "missing"}`;
   }
-  if (hasOpenSubmissionGate(row)) return "submission gates remain unsettled in human_gates or adjudication";
+  if (hasUnsettledHumanGateText(decisionHumanGates(row))) return "submission gates remain unsettled in human_gates";
   return undefined;
 }
 
@@ -110,6 +115,44 @@ function decisionEvidenceLevel(row: SubmissionDecisionLike): string {
 
 function isRealTargetEvidenceLevel(value: string): boolean {
   return value === "real_target_reproduced" || value === "fork_reproduced" || value === "local_fork_reproduced";
+}
+
+function isSourceOnlyEvidenceLevel(value: string): boolean {
+  return value === "source_only_local_confirmed" || value === "source_confirmed";
+}
+
+export function isPermittedSubmissionEvidenceLevel(row: SubmissionDecisionLike, value: string): boolean {
+  const normalized = normalizedWord(value);
+  return isRealTargetEvidenceLevel(normalized)
+    || (allowsSourceOnlyEvidence(row, requiredBountyGates(row)) && isSourceOnlyEvidenceLevel(normalized));
+}
+
+function allowsSourceOnlyEvidence(row: SubmissionDecisionLike, requiredGates: BountyGate[]): boolean {
+  const profile = asRecord(decisionEngagementProfile(row));
+  const requirement = normalizedWord(profile?.evidence_requirement ?? profile?.evidenceRequirement);
+  return matchesStatus(requirement, ["source_only", "published_source", "pre_mainnet_source"])
+    && !requiredGates.includes("live_impact");
+}
+
+export function requiredBountyGates(row: SubmissionDecisionLike): BountyGate[] {
+  const profile = asRecord(decisionEngagementProfile(row));
+  const raw = profile?.required_gates ?? profile?.requiredGates;
+  const declared = Array.isArray(raw)
+    ? raw.map((value) => canonicalBountyGate(normalizedWord(value))).filter((value): value is BountyGate => Boolean(value))
+    : [];
+  const requirement = normalizedWord(profile?.evidence_requirement ?? profile?.evidenceRequirement);
+  const baseline = matchesStatus(requirement, ["source_only", "published_source", "pre_mainnet_source"])
+    ? SOURCE_ONLY_BOUNTY_GATES
+    : DEFAULT_BOUNTY_GATES;
+  return [...new Set([...baseline, ...declared])];
+}
+
+function canonicalBountyGate(value: string): BountyGate | undefined {
+  if (["scope", "asset", "eligibility"].includes(value)) return "scope";
+  if (["live_impact", "live_exposure", "funded_impact", "affected_deployment"].includes(value)) return "live_impact";
+  if (["known_issue", "novelty", "duplicate", "disclosure"].includes(value)) return "known_issue";
+  if (["payout", "reward", "collectible"].includes(value)) return "payout";
+  return undefined;
 }
 
 function decisionHumanGates(row: SubmissionDecisionLike): string {

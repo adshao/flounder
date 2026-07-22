@@ -14,7 +14,7 @@ import { createRequire } from "node:module";
 import { randomBytes, randomUUID } from "node:crypto";
 import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import path from "node:path";
-import { enforceSubmissionReadiness, isSubmissionReadyDecision, needsSubmissionReadinessWork } from "../util/submission-readiness.js";
+import { enforceSubmissionReadiness, isPermittedSubmissionEvidenceLevel, isSubmissionReadyDecision, needsSubmissionReadinessWork, requiredBountyGates } from "../util/submission-readiness.js";
 import { canonicalFindingKey } from "../util/finding-identity.js";
 import { phaseInputFingerprint } from "../util/material-fingerprint.js";
 import type {
@@ -157,10 +157,10 @@ export interface ConfirmDecisionAdjudicationInput {
   evidenceDecisionId?: number | undefined;
   submissionConfidence?: "low" | "medium" | "high" | undefined;
   gateEvidence?: {
-    scope: string;
-    liveImpact: string;
-    knownIssue: string;
-    payout: string;
+    scope?: string | undefined;
+    liveImpact?: string | undefined;
+    knownIssue?: string | undefined;
+    payout?: string | undefined;
   } | undefined;
 }
 
@@ -2928,9 +2928,17 @@ export class MetadataStore {
       if (target.reproduced !== "yes") {
         return { ok: false, error: "submit-candidate requires a reproduced confirm decision" };
       }
-      const gates = input.gateEvidence;
-      if (!gates || [gates.scope, gates.liveImpact, gates.knownIssue, gates.payout].some((value) => !value?.trim())) {
-        return { ok: false, error: "submit-candidate requires evidence for scope, liveImpact, knownIssue, and payout" };
+      const gates = input.gateEvidence ?? {};
+      const requiredGates = requiredBountyGates(target);
+      const gateEvidenceById = {
+        scope: gates.scope,
+        live_impact: gates.liveImpact,
+        known_issue: gates.knownIssue,
+        payout: gates.payout,
+      } as const;
+      const missingGates = requiredGates.filter((gate) => !gateEvidenceById[gate]?.trim());
+      if (missingGates.length > 0) {
+        return { ok: false, error: `submit-candidate requires evidence for ${missingGates.join(", ")}` };
       }
 
       const evidence = input.evidenceDecisionId == null ? target : this.getConfirmDecision(input.evidenceDecisionId);
@@ -2943,8 +2951,8 @@ export class MetadataStore {
       if (targetKeys.size === 0 || targetKeys.size !== evidenceKeys.size || ![...targetKeys].every((key) => evidenceKeys.has(key))) {
         return { ok: false, error: "evidence confirm decision does not cover the same canonical bug" };
       }
-      if (evidence.reproduced !== "yes" || !isRealTargetEvidenceLevel(String(evidence.evidence_level ?? ""))) {
-        return { ok: false, error: "evidence confirm decision is not real-target or local-fork reproduced" };
+      if (evidence.reproduced !== "yes" || !isPermittedSubmissionEvidenceLevel(target, String(evidence.evidence_level ?? ""))) {
+        return { ok: false, error: "evidence confirm decision is not permitted by the engagement's evidence requirement" };
       }
       if (!String(evidence.repro_evidence ?? "").trim() || !String(evidence.repro_command_id ?? "").trim()) {
         return { ok: false, error: "evidence confirm decision lacks executable reproduction provenance" };
@@ -2963,20 +2971,15 @@ export class MetadataStore {
         ? payout as Record<string, unknown>
         : {};
       const finalAdjudication = {
-        gates: [
-          { id: "scope", status: "pass", evidence: gates.scope.trim() },
-          { id: "live_impact", status: "pass", evidence: gates.liveImpact.trim() },
-          { id: "known_issue", status: "pass", evidence: gates.knownIssue.trim() },
-          { id: "payout", status: "pass", evidence: gates.payout.trim() },
-        ],
-        scope_status: "pass",
-        live_impact_status: "pass",
-        known_issue_status: "pass",
-        payout_status: "pass",
+        gates: requiredGates.map((gate) => ({ id: gate, status: "pass", evidence: gateEvidenceById[gate]!.trim() })),
+        scope_status: requiredGates.includes("scope") ? "pass" : "not-required",
+        live_impact_status: requiredGates.includes("live_impact") ? "pass" : "not-required",
+        known_issue_status: requiredGates.includes("known_issue") ? "pass" : "not-required",
+        payout_status: requiredGates.includes("payout") ? "pass" : "not-required",
         payout_estimate: {
           ...payoutRecord,
-          status: "estimated",
-          basis: gates.payout.trim(),
+          status: requiredGates.includes("payout") ? "estimated" : "not-applicable",
+          basis: gates.payout?.trim() || "Payout is not a required engagement gate.",
         },
         operator_review: {
           reviewed_at: ts,
@@ -3002,7 +3005,7 @@ export class MetadataStore {
 
       operatorRecord.evidence_decision_id = Number(evidence.id);
       operatorRecord.material_fingerprint = targetMaterial;
-      operatorRecord.gate_evidence = gates;
+      operatorRecord.gate_evidence = gateEvidenceById;
       operatorRecord.applied = {
         recommendation: "submit-candidate",
         evidence_decision_id: Number(evidence.id),

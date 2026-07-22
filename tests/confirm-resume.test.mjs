@@ -145,6 +145,50 @@ test("confirm bounty submit readiness requires impact inventory and closed gates
   assert.equal(ready[0].recommendation, "submit-candidate");
 });
 
+test("pre-mainnet bounty can use the program's source-only submission gates", () => {
+  const rows = enforceBountySubmitReadiness([
+    {
+      bug: "Pre-mainnet source bug",
+      members: ["ksource"],
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      humanGates: "",
+      evidenceLevel: "source-only-local-confirmed",
+      engagementProfile: {
+        policy_kind: "bug_bounty",
+        evidence_requirement: "source_only",
+        required_gates: ["scope", "known_issue", "payout"],
+      },
+      adjudication: {
+        scope_status: "pass",
+        live_impact_status: "not_required",
+        known_issue_status: "novel",
+        payout_estimate: {
+          status: "estimated",
+          eligible_min_usd: 5_000,
+          eligible_max_usd: 20_000,
+          basis: "The program explicitly pays a base reward before mainnet.",
+        },
+      },
+    },
+  ]);
+
+  assert.equal(rows[0].recommendation, "submit-candidate");
+  assert.equal(rows[0].humanGates, "");
+
+  const missingPolicyProof = enforceBountySubmitReadiness([
+    {
+      ...rows[0],
+      engagementProfile: {
+        policy_kind: "bug_bounty",
+        required_gates: ["scope", "known_issue", "payout"],
+      },
+    },
+  ]);
+  assert.equal(missingPolicyProof[0].recommendation, "needs-human");
+  assert.match(missingPolicyProof[0].humanGates, /not permitted by the engagement's evidence requirement/);
+});
+
 test("configured bounty engagement cannot be downgraded to source review", () => {
   const rows = enforceBountySubmitReadiness([
     {

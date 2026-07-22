@@ -970,6 +970,62 @@ test("store: source-level confirm evidence is not promoted to real-target submis
   db.close();
 });
 
+test("store: operator adjudication honors a verified source-only bounty policy", async () => {
+  const db = await tempDb();
+  const projectId = db.upsertProject({ name: "pre-mainnet-bounty" });
+  const auditRun = db.startRun({ projectId, kind: "audit", runDir: "/runs/pre-mainnet-audit", materialFingerprint: "sha256:pre-mainnet" });
+  db.upsertFindings(projectId, auditRun, [{
+    findingKey: "kpre",
+    title: "Pre-mainnet source issue",
+    status: "confirmed-differential",
+  }]);
+  db.finishRun(auditRun, "done");
+  const confirmRun = db.startRun({ projectId, kind: "confirm", runDir: "/runs/pre-mainnet-confirm", materialFingerprint: "sha256:pre-mainnet" });
+  db.upsertConfirmDecisions(projectId, confirmRun, [{
+    bug: "Pre-mainnet source issue",
+    reproduced: "yes",
+    recommendation: "needs-human",
+    members: ["kpre"],
+    evidenceLevel: "source-only-local-confirmed",
+    reproEvidence: "cmd-source reproduced the balance change on the pinned official source.",
+    reproCommandId: "cmd-source",
+    humanGates: "Known-issue review remains pending.",
+    engagementProfile: {
+      policy_kind: "bug_bounty",
+      evidence_requirement: "source_only",
+      required_gates: ["scope", "known_issue", "payout"],
+    },
+    adjudication: {
+      scope_status: "pass",
+      live_impact_status: "not-required",
+      known_issue_status: "needs-human",
+      payout_estimate: { status: "estimated", basis: "Official pre-mainnet base reward." },
+    },
+  }]);
+  db.finishRun(confirmRun, "done");
+
+  const decisionId = Number(db.listConfirmDecisions(projectId)[0].id);
+  const adjudicated = db.adjudicateConfirmDecision(decisionId, {
+    recommendation: "submit-candidate",
+    rationale: "Official terms accept pinned pre-mainnet source findings and the remaining gates were reviewed.",
+    evidenceDecisionId: decisionId,
+    submissionConfidence: "low",
+    gateEvidence: {
+      scope: "The pinned source path is explicitly in scope.",
+      knownIssue: "Bounded public checks found no matching disclosure.",
+      payout: "Official terms publish a pre-mainnet base reward.",
+    },
+  });
+
+  assert.equal(adjudicated.ok, true);
+  assert.equal(adjudicated.decision.recommendation, "submit-candidate");
+  assert.equal(adjudicated.decision.evidence_level, "source-only-local-confirmed");
+  const finalAdjudication = JSON.parse(adjudicated.decision.adjudication_json);
+  assert.equal(finalAdjudication.live_impact_status, "not-required");
+  assert.deepEqual(finalAdjudication.gates.map((gate) => gate.id), ["scope", "known_issue", "payout"]);
+  db.close();
+});
+
 test("store: startup preserves operator-adjudicated fork evidence when safety notes rule out live writes", async () => {
   const { dir, dbPath } = await tempDbPath();
   try {

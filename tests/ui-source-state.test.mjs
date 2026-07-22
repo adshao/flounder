@@ -294,6 +294,31 @@ test("ui: real-target decisions rank by submit readiness, severity, and confiden
   ]);
 });
 
+test("ui: policy-authorized pre-mainnet source decisions are reportable", () => {
+  const sourceDecision = {
+    id: 7,
+    bug: "pre-mainnet source submit",
+    reproduced: "yes",
+    recommendation: "submit-candidate",
+    evidence_level: "source-only-local-confirmed",
+    human_gates: "",
+    engagement_profile: {
+      policy_kind: "bug_bounty",
+      evidence_requirement: "source_only",
+      required_gates: ["scope", "known_issue", "payout"],
+    },
+    adjudication: {
+      scope_status: "pass",
+      live_impact_status: "not_required",
+      known_issue_status: "novel",
+      payout_status: "pass",
+    },
+  };
+
+  assert.deepEqual(reportableDecisions([sourceDecision]).map((decision) => decision.id), [7]);
+  assert.deepEqual(reportableDecisions([{ ...sourceDecision, engagement_profile: undefined }]), []);
+});
+
 test("ui: confirm phase surfaces latest confirm run errors", () => {
   const detail = {
     runs: [
