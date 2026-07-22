@@ -25,6 +25,7 @@ import { type LaunchSpec, ActivityBus, type Activity, type ReportFindingSpec, ty
 import { THINKING_LEVELS } from "../config.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { positiveIntegerId } from "../util/ids.js";
+import { DAEMON_PROTOCOL_VERSION } from "./protocol.js";
 import { loadScopeInventory, saveScopeInventory } from "../agent/scope-store.js";
 import { deriveScopeNote } from "../scope-note.js";
 import { confirmSelectorsForFinding } from "../util/confirm-selector.js";
@@ -4939,9 +4940,15 @@ function authorizedDaemonOwnedRun(c: Ctx, daemon: Record<string, unknown>, runId
 async function daemonRegister(c: Ctx): Promise<void> {
   const daemon = daemonAuth(c);
   if (!daemon) return;
-  const body = (await readBody(c.req)) as { name?: string; capabilities?: unknown; workspace?: string };
+  const body = (await readBody(c.req)) as { name?: string; protocolVersion?: unknown; capabilities?: unknown; workspace?: string };
+  if (body.protocolVersion !== DAEMON_PROTOCOL_VERSION) {
+    return sendJson(c.res, 409, {
+      error: `daemon protocol mismatch: server requires ${DAEMON_PROTOCOL_VERSION}, daemon reported ${String(body.protocolVersion ?? "missing")}`,
+      protocolVersion: DAEMON_PROTOCOL_VERSION,
+    });
+  }
   c.store.touchDaemon(Number(daemon.id), body.capabilities, body.workspace);
-  sendJson(c.res, 200, { ok: true, daemonId: Number(daemon.id), name: daemon.name });
+  sendJson(c.res, 200, { ok: true, daemonId: Number(daemon.id), name: daemon.name, protocolVersion: DAEMON_PROTOCOL_VERSION });
 }
 
 async function daemonHeartbeat(c: Ctx): Promise<void> {

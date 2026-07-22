@@ -5,6 +5,7 @@ import os from "node:os";
 import path from "node:path";
 import { startUiServer } from "../dist/server/app.js";
 import { MetadataStore } from "../dist/db/store.js";
+import { DAEMON_PROTOCOL_VERSION } from "../dist/server/protocol.js";
 
 async function withServer(fn) {
   const out = await mkdtemp(path.join(os.tmpdir(), "flounder-run-groups-"));
@@ -22,7 +23,7 @@ const json = (response) => response.json();
 const request = (base, method, route, body, token) => fetch(base + route, {
   method,
   headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-  ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  ...(body !== undefined ? { body: JSON.stringify(route === "/api/daemon/register" ? { ...body, protocolVersion: DAEMON_PROTOCOL_VERSION } : body) } : {}),
 });
 
 function item(itemKey, expectedOutcome, target) {
