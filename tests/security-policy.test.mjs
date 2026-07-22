@@ -245,6 +245,7 @@ test("open-world egress is granted per command instead of per phase", () => {
     cmd("gh", "issue", "view", "123"),
     cmd("solana", "program", "show", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com"),
     cmd("solana", "program", "dump", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "scratch/program.so", "--url", "https://api.mainnet-beta.solana.com"),
+    cmd("solana-test-validator", "--clone-upgradeable-program", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com", "--ledger", "scratch/validator-ledger", "--reset"),
   ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), true, `${c.program} should receive read-only egress`);
 
   for (const c of [
@@ -285,6 +286,8 @@ test("open-world egress is granted per command instead of per phase", () => {
     cmd("solana", "program", "deploy", "poc/program.so", "--url", "https://api.mainnet-beta.solana.com"),
     cmd("solana", "program", "close", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com"),
     cmd("solana", "transfer", "recipient", "1", "--url", "https://api.mainnet-beta.solana.com"),
+    cmd("solana-test-validator", "--url", "https://api.mainnet-beta.solana.com", "--ledger", "scratch/validator-ledger"),
+    cmd("solana-test-validator", "--clone-upgradeable-program", "not-a-public-key", "--url", "https://api.mainnet-beta.solana.com", "--ledger", "scratch/validator-ledger"),
   ]) assert.equal(openWorldCommandNeedsNetwork(c, "inspect"), false, `${c.program} must remain network-sealed`);
 
   assert.equal(openWorldCommandNeedsNetwork(cmd("npm", "install"), "build"), true);

@@ -238,6 +238,7 @@ export function openWorldCommandNeedsNetwork(command: StructuredReproductionComm
   if (program === "forge") return isReadOnlyForgeForkCommand(args);
   if (program === "anvil") return hasRemoteForkTarget(args) && !args.some((arg) => /broadcast|transaction/i.test(arg));
   if (program === "solana") return isReadOnlySolanaCommand(args);
+  if (program === "solana-test-validator") return isReadOnlySolanaValidatorForkCommand(args);
   return false;
 }
 
@@ -580,11 +581,52 @@ function isReadOnlySolanaCommand(args: string[]): boolean {
 
   if (!remoteUrl || !firstNonLocalRemoteUrl(remoteUrl) || !hasOnlyHttpRemoteTargets([remoteUrl])) return false;
   const address = positional[0] ?? "";
-  if (!/^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(address)) return false;
+  if (!isSolanaPublicKey(address)) return false;
   if (verb === "show") return positional.length === 1;
   return positional.length === 2
     && !positional[1]?.startsWith("/")
     && !looksLikePathEscape(positional[1] ?? "");
+}
+
+function isReadOnlySolanaValidatorForkCommand(args: string[]): boolean {
+  let remoteUrl: string | undefined;
+  let cloneCount = 0;
+  for (let idx = 0; idx < args.length; idx += 1) {
+    const arg = args[idx] ?? "";
+    if (arg === "--url" || arg === "-u") {
+      if (remoteUrl !== undefined) return false;
+      remoteUrl = args[idx + 1];
+      if (!remoteUrl) return false;
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--url=")) {
+      if (remoteUrl !== undefined) return false;
+      remoteUrl = arg.slice("--url=".length);
+      continue;
+    }
+    if (arg === "--clone" || arg === "--clone-upgradeable-program") {
+      if (!isSolanaPublicKey(args[idx + 1] ?? "")) return false;
+      cloneCount += 1;
+      idx += 1;
+      continue;
+    }
+    if (arg.startsWith("--clone=") || arg.startsWith("--clone-upgradeable-program=")) {
+      if (!isSolanaPublicKey(arg.slice(arg.indexOf("=") + 1))) return false;
+      cloneCount += 1;
+    }
+  }
+
+  if (cloneCount === 0 || !remoteUrl || !firstNonLocalRemoteUrl(remoteUrl)) return false;
+  for (const arg of args) {
+    const remote = firstNonLocalRemoteUrl(arg);
+    if (remote && remote !== remoteUrl && arg !== `--url=${remoteUrl}`) return false;
+  }
+  return hasOnlyHttpRemoteTargets([remoteUrl]);
+}
+
+function isSolanaPublicKey(input: string): boolean {
+  return /^[1-9A-HJ-NP-Za-km-z]{32,44}$/.test(input);
 }
 
 function hasRemoteForkTarget(args: string[]): boolean {
