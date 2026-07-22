@@ -23,6 +23,10 @@ import {
   type RunRow,
   type RunHealth,
   type ScopeRow,
+  type DiskStorageStatus,
+  type ProjectStorageCleanupResult,
+  type ProjectStorageUsage,
+  type StorageOverview,
 } from "./api";
 import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge, useDialogFocus } from "./components";
 import { EvaluationsWorkspace } from "./EvaluationsView";
@@ -84,7 +88,7 @@ import { Icon, type IconName } from "./icons";
 const DEFAULT_OPENAI_CODEX_MODEL = "gpt-5.6-sol";
 
 type View = "projects" | "evaluations" | "findings" | "settings";
-type SettingsPane = "providers" | "daemons" | "archived";
+type SettingsPane = "providers" | "daemons" | "storage" | "archived";
 type ProjectTab = "overview" | "next-actions" | "decisions" | "findings" | "scopes" | "runs" | "activity" | "setup";
 type ModalName = "new-project" | "run" | "edit-project" | "report" | "decision-report" | "run-log" | "artifact" | null;
 type ArtifactPreview = { title: string; runId: number; name: string };
@@ -184,6 +188,7 @@ function readRoute(): RouteState {
   if (pathname === "/evaluations" || pathname.startsWith("/evaluations/")) return { view: "evaluations", settingsPane: "providers" };
   if (pathname === "/findings" || pathname.startsWith("/findings/")) return { view: "findings", settingsPane: "providers" };
   if (pathname === "/settings/archived" || pathname.startsWith("/settings/archived/")) return { view: "settings", settingsPane: "archived" };
+  if (pathname === "/settings/storage" || pathname.startsWith("/settings/storage/")) return { view: "settings", settingsPane: "storage" };
   if (pathname === "/settings/daemons" || pathname.startsWith("/settings/daemons/")) return { view: "settings", settingsPane: "daemons" };
   if (pathname === "/settings" || pathname.startsWith("/settings/")) return { view: "settings", settingsPane: "providers" };
 
@@ -200,6 +205,10 @@ function readRoute(): RouteState {
   if (hash.startsWith("settings/archived")) {
     window.history.replaceState(null, "", "/settings/archived");
     return { view: "settings", settingsPane: "archived" };
+  }
+  if (hash.startsWith("settings/storage")) {
+    window.history.replaceState(null, "", "/settings/storage");
+    return { view: "settings", settingsPane: "storage" };
   }
   if (hash.startsWith("settings")) {
     window.history.replaceState(null, "", "/settings");
@@ -2164,6 +2173,7 @@ export function App() {
         onMenu={() => setMobileMenuOpen(true)}
         theme={theme}
       />
+      <StorageWarningBanner />
       {mobileMenuOpen ? <MobileMenu route={route} running={latestRunning} theme={theme} onClose={() => setMobileMenuOpen(false)} onTheme={() => {
         localStorage.setItem("flounder-theme-explicit", "1");
         setTheme(theme === "dark" ? "light" : "dark");
@@ -5290,6 +5300,179 @@ function FindingTable({
   );
 }
 
+function StorageWarningBanner() {
+  const [disk, setDisk] = useState<DiskStorageStatus | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    const load = async () => {
+      try {
+        const result = await api.storageDisk();
+        if (!cancelled) setDisk(result.disk);
+      } catch {
+        // Storage visibility is helpful but must not make the audit dashboard unusable.
+      }
+    };
+    void load();
+    const interval = window.setInterval(() => void load(), 60_000);
+    return () => { cancelled = true; window.clearInterval(interval); };
+  }, []);
+  if (!disk || disk.pressure === "healthy") return null;
+  return (
+    <button className={`storage-warning ${disk.pressure}`} onClick={() => go("/settings/storage")}>
+      <strong>{disk.pressure === "critical" ? "Storage critically low" : "Storage running low"}</strong>
+      <span>{storageSize(disk.freeBytes)} free · Review project usage</span>
+    </button>
+  );
+}
+
+function StoragePane() {
+  const [overview, setOverview] = useState<StorageOverview | null>(null);
+  const [disk, setDisk] = useState<DiskStorageStatus | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [busy, setBusy] = useState(false);
+  const [error, setError] = useState("");
+  const [pending, setPending] = useState<ProjectStorageCleanupResult | null>(null);
+
+  async function load() {
+    setLoading(true);
+    setError("");
+    try {
+      const result = await api.storage();
+      setOverview(result);
+      setDisk(result.disk);
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err));
+    } finally {
+      setLoading(false);
+    }
+  }
+
+  useEffect(() => {
+    void api.storageDisk().then((result) => setDisk(result.disk)).catch(() => undefined);
+    void load();
+  }, []);
+
+  async function preview(project: ProjectStorageUsage) {
+    setError("");
+    try {
+      setPending(await api.cleanupProjectStorage(project.projectUuid, false));
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err));
+    }
+  }
+
+  async function applyCleanup() {
+    if (!pending) return;
+    setBusy(true);
+    setError("");
+    try {
+      await api.cleanupProjectStorage(pending.projectUuid, true);
+      setPending(null);
+      await load();
+    } catch (err) {
+      setError(String(err instanceof Error ? err.message : err));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  return (
+    <>
+      <Card>
+        <div className="pane-head">
+          <div>
+            <h1>Storage</h1>
+            <p>See which local projects consume disk and remove completed project files without deleting database history.</p>
+          </div>
+          <div className="pane-actions">
+            <Button icon="sync" onClick={() => void load()} disabled={loading}>{loading ? "Scanning..." : "Refresh"}</Button>
+          </div>
+        </div>
+        {error ? <div className="inline-error">{error}</div> : null}
+        {disk ? (
+          <div className={`storage-pressure-card ${disk.pressure}`}>
+            <div>
+              <strong>{storageSize(disk.freeBytes)} free</strong>
+              <span>{disk.usedPercent}% of {storageSize(disk.totalBytes)} used</span>
+            </div>
+            <div className="storage-meter" aria-label={`${disk.usedPercent}% disk used`}>
+              <span style={{ width: `${Math.min(100, disk.usedPercent)}%` }} />
+            </div>
+          </div>
+        ) : null}
+        {loading && !overview ? <EmptyInline>Scanning run, history, and workspace directories. Large audit homes can take a few minutes.</EmptyInline> : null}
+        {overview ? (
+          <>
+            <div className="storage-totals">
+              <span><strong>{storageSize(overview.outputBytes)}</strong><small>Flounder output</small></span>
+              <span><strong>{storageSize(overview.managedProjectBytes)}</strong><small>Project-owned</small></span>
+              <span><strong>{storageSize(overview.unattributedBytes)}</strong><small>Shared / unattributed</small></span>
+            </div>
+            <div className="resource-list storage-project-list">
+              {overview.projects.map((project) => (
+                <div className="resource-card storage-project-card" key={project.projectUuid}>
+                  <span className="grow">
+                    <strong>{project.projectName}</strong>
+                    <small>
+                      Runs {storageSize(project.runBytes)} · History {storageSize(project.historyBytes)} · Workspace {storageSize(project.workspaceBytes)}
+                    </small>
+                    <small>
+                      {project.artifactDirectories} directories
+                      {project.orphanRunDirectories ? ` · ${project.orphanRunDirectories} orphaned runs found` : ""}
+                      {project.missingRunDirectories ? ` · ${project.missingRunDirectories} database paths already removed` : ""}
+                    </small>
+                  </span>
+                  <span className="storage-project-size">
+                    <strong>{storageSize(project.totalBytes)}</strong>
+                    <small>{project.active ? "Active - protected" : project.metadataOnly ? "Metadata only" : "Reclaimable"}</small>
+                  </span>
+                  <Button
+                    size="sm"
+                    variant="danger"
+                    icon="trash"
+                    disabled={project.active || project.reclaimableBytes <= 0}
+                    onClick={() => void preview(project)}
+                  >Keep metadata only</Button>
+                </div>
+              ))}
+            </div>
+            <p className="storage-footnote">The database is never deleted by storage cleanup. Remote-daemon files are shown only when their paths are mounted on this control-plane machine.</p>
+          </>
+        ) : null}
+      </Card>
+      {pending ? (
+        <Modal
+          title="Keep database records only?"
+          onClose={() => { if (!busy) setPending(null); }}
+          footer={(
+            <>
+              <Button onClick={() => setPending(null)} disabled={busy}>Cancel</Button>
+              <Button variant="danger" icon="trash" onClick={() => void applyCleanup()} disabled={busy}>
+                {busy ? "Removing files..." : `Release ${storageSize(pending.reclaimableBytes)}`}
+              </Button>
+            </>
+          )}
+        >
+          <div className="confirm-copy">
+            <strong>{pending.projectName} has {pending.candidateDirectories} local directories using {storageSize(pending.reclaimableBytes)}.</strong>
+            <p>This removes run artifacts, build history, and the configured project workspace. Project, run, scope, finding, and decision records remain in Flounder's database.</p>
+            <p>Artifact files and local reproduction workspaces will no longer open. A future audit must stage or acquire the source again.</p>
+          </div>
+        </Modal>
+      ) : null}
+    </>
+  );
+}
+
+function storageSize(bytes: number): string {
+  const units = ["B", "KiB", "MiB", "GiB", "TiB"];
+  let value = Math.max(0, Number.isFinite(bytes) ? bytes : 0);
+  let unit = 0;
+  while (value >= 1024 && unit < units.length - 1) { value /= 1024; unit += 1; }
+  const digits = unit === 0 || value >= 100 ? 0 : value >= 10 ? 1 : 2;
+  return `${value.toFixed(digits)} ${units[unit]}`;
+}
+
 function SettingsView({
   pane,
   providers,
@@ -5319,11 +5502,13 @@ function SettingsView({
         <h1>Settings</h1>
         <button className={pane === "providers" ? "sel" : ""} onClick={() => go("/settings")}>Providers</button>
         <button className={pane === "daemons" ? "sel" : ""} onClick={() => go("/settings/daemons")}>Daemons</button>
+        <button className={pane === "storage" ? "sel" : ""} onClick={() => go("/settings/storage")}>Storage</button>
         <button className={pane === "archived" ? "sel" : ""} onClick={() => go("/settings/archived")}>Archived Projects</button>
       </aside>
       <section className="settings-content">
         {pane === "providers" ? <ProvidersPane providers={providers} onRefresh={onRefresh} /> : null}
         {pane === "daemons" ? <DaemonsPane daemons={daemons} onRefresh={onRefresh} /> : null}
+        {pane === "storage" ? <StoragePane /> : null}
         {pane === "archived" ? (
           <ArchivedProjectsPane
             projects={archivedProjects}

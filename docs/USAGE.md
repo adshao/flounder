@@ -662,9 +662,23 @@ flounder server finding list --project <name>   # findings for one project
 flounder server daemon list                     # registered execution daemons
 flounder server daemon-token mint [name]        # create a connection token for a remote daemon
 flounder history import-run --target <name> --run <dir>   # import an existing run directory
+flounder storage report [--json]                          # disk pressure + per-project run/history/workspace usage
+flounder storage clean --project <uuid|name>              # dry-run metadata-only retention cleanup
+flounder storage clean --project <uuid|name> --apply      # remove local project files; keep every DB record
 ```
 
 This is the backend the dashboard reads from; it is written live by each run (not rebuilt from files).
+
+Storage cleanup is deliberately separate from project deletion. It refuses a
+project with queued or running work, identifies both database-linked run paths
+and strictly timestamped orphan run directories, skips symlinks and paths
+outside the configured output/workspace roots, and defaults to a preview. Apply
+removes local run artifacts, project history/build cache, and the configured
+workspace while preserving the project, runs, scopes, findings, decisions, and
+other metadata in `flounder.db`. The dashboard exposes the same flow under
+**Settings -> Storage** and shows a global low-disk warning. Files on a remote
+daemon are attributable/cleanable only when that daemon's paths are mounted on
+the control-plane host; otherwise run the storage command on that executor.
 
 ## Dashboard
 
@@ -680,7 +694,7 @@ Project creation starts with a task/clue composer so the operator can say what t
 
 A project's detail is the **prepare -> map -> dig -> synthesize -> verify -> confirm -> report** workflow: it shows the current phase, elapsed timing, coverage, run health, live activity, and the scope being dug. Dig proves claims during discovery; **Verify candidates** handles only unresolved, synthesized, or imported claims, with bounded isolated concurrency. Continue resumes interrupted Dig first, then starts directly at Verify/Confirm/Report when only evidence-tail work remains. Unchanged blocked work is not drained repeatedly; changed inputs reopen it automatically, and finding detail can request a focused retry. Next Actions remains the agent-owned queue for coverage, setup, and routing work.
 
-The cross-project **Findings** view defaults to real Project findings and their submission state. A row shows only the current workflow phase and blocker/next action, keeping the list compact; opening it reveals occurrences, independent-review state, every local/real-target/report attempt, and phase-specific retry. Its source filter can explicitly show Evaluation evidence or all sources; Evaluation rows link to their group and stay read-only for disclosure tracking. Project findings retain project, audit-status, and tracking filters. The default **Active findings** filter hides `ignored` rows, while the **Ignored** view can restore them to `open`. Settings holds provider profiles, daemon CRUD, and archived projects.
+The cross-project **Findings** view defaults to real Project findings and their submission state. A row shows only the current workflow phase and blocker/next action, keeping the list compact; opening it reveals occurrences, independent-review state, every local/real-target/report attempt, and phase-specific retry. Its source filter can explicitly show Evaluation evidence or all sources; Evaluation rows link to their group and stay read-only for disclosure tracking. Project findings retain project, audit-status, and tracking filters. The default **Active findings** filter hides `ignored` rows, while the **Ignored** view can restore them to `open`. Settings holds provider profiles, daemon CRUD, project-attributed storage cleanup, and archived projects.
 
 The top-level **Evaluations** view drives durable run groups for audit campaigns, benchmark cases, regression replays, and claim verification. Create a draft, add work items with an explicit target bundle, material policy, evidence contract, case/family/stack identity, and optional hidden-holdout flag, then start, pause, resume, or cancel the group. Each row keeps lifecycle state separate from its evidence verdict: a finished item is not shown as passing unless its persisted result satisfies the contract, while blocked and invalid work never enter the score. Expand an item to inspect source/corpus policy, confirmation requirements, result evidence, and every attempt; blocked failed or cancelled items can be retried without losing earlier attempts. Positive recall and safe-control pass rates appear for evaluation-oriented groups, and the Report action regenerates Markdown from stored evidence without rerunning model work. Only `flounder ui --maintainer` adds **Harness · Maintainer**, which a repository agent uses to mine finished baselines, refine bounded source proposals, attach isolated candidate groups, compare paired metrics and hidden holdouts, and prepare a reviewable PR without gaining merge or deploy authority.
 
@@ -702,6 +716,9 @@ curl "localhost:4500/api/projects/$PROJECT_UUID/backlog?status=open"  # next act
 curl "localhost:4500/api/projects/$PROJECT_UUID/findings?tracking=active"
 curl "localhost:4500/api/projects/$PROJECT_UUID/findings?status=confirmed-differential"
 curl "localhost:4500/api/projects/$PROJECT_UUID/confirm-decisions?reproduced=yes"  # the confirmed bugs
+curl localhost:4500/api/storage/disk                                # cheap free-space pressure check
+curl localhost:4500/api/storage                                     # full local project attribution scan
+curl -X POST localhost:4500/api/storage/projects/$PROJECT_UUID/cleanup -d '{"apply":false}'
 ```
 
 Resources: **project** (CRUD, including selected daemon, provider profile, task/clue, source/build/corpus paths, archive/pin/manual order; project URLs are UUID-only), **provider** (model strategy profiles), **daemon** (CRUD — mint/rename/revoke), **run** (`POST /api/projects/:uuid/runs` enqueues a job a daemon claims; `verb:"run"` is the automatic prepare-if-needed -> map/dig -> synthesize -> verify -> confirm -> report pipeline; `GET /api/runs/:id`; `POST /api/runs/:id/stop`; `GET /api/runs/:id/artifact?name=` reads an allowlisted report or discovery-health artifact), **run-group** / **work-item** (`POST /api/run-groups`, `POST /api/run-groups/:uuid/start`, pause/cancel/report, `GET /api/work-items/:id`, and `POST /api/work-items/:id/retry` for blocked attempts), and read-only **scope** / **finding** / **confirm-decision** (paginated + filterable). **Discovery-backlog** rows are project-scoped agent-owned Next Actions: `GET /api/projects/:uuid/backlog?kind=&status=` lists coverage gaps, resource requests, and follow-up scopes with `actionability` (`agent-runnable`, `agent-resource`, `agent-review`), `action_owner`, `recommended_action`, and `primary_action_label`; `PATCH /api/backlog/:id {"status":"resolved"|"ignored"|"stale"|"open"}` updates state without deleting provenance. Agents should try to resolve every open Next Action through the existing project workflow and narrow any truly external dependency to a concrete credential, authorization, or resource request. Operator actions: `PATCH …/scopes/:id {prioritize:true}` reorders the dig queue; `PATCH /api/findings/:id/tracking` advances a finding's submission state, including `ignored` for human-dismissed machine findings; a confirm `POST …/runs {verb:"confirm"}` reproduces all pending findings (or selected findings with `findingId`/`findingIds`); a report `POST …/runs {verb:"report", findingIds:[...]}` regenerates selected reports, `{"verb":"report","regenerateReports":true}` regenerates every current reportable finding, and an unselected report run writes only missing reports. `flounder continue --project <uuid|name>` drives the same Run/Continue project pipeline from the CLI. `flounder report --project <uuid|name>` drives the same project action from the CLI; add `--finding <id>` for selected regeneration or `--all` for full regeneration. `GET /api/bugs` powers the cross-project Findings view and supports `project=<uuid>`, `status=...`, `tracking=active/ignored/...`, `limit`, and `offset`. `GET /api/stream` is an SSE feed for live updates; `GET /api/runs/:id/log` streams a run's live token-level activity, fed by the executing daemon.

@@ -49,6 +49,54 @@ export interface ProjectSnapshot {
   material?: MaterialSummary;
 }
 
+export interface DiskStorageStatus {
+  totalBytes: number;
+  freeBytes: number;
+  usedBytes: number;
+  usedPercent: number;
+  pressure: "healthy" | "warning" | "critical";
+}
+
+export interface ProjectStorageUsage {
+  projectId: number;
+  projectUuid: string;
+  projectName: string;
+  totalBytes: number;
+  runBytes: number;
+  historyBytes: number;
+  workspaceBytes: number;
+  reclaimableBytes: number;
+  runCount: number;
+  artifactDirectories: number;
+  orphanRunDirectories: number;
+  missingRunDirectories: number;
+  unsafeDirectories: number;
+  active: boolean;
+  metadataOnly: boolean;
+}
+
+export interface StorageOverview {
+  disk: DiskStorageStatus;
+  outputBytes: number;
+  managedProjectBytes: number;
+  unattributedBytes: number;
+  inaccessibleEntries: number;
+  scannedAt: string;
+  scanDurationMs: number;
+  projects: ProjectStorageUsage[];
+}
+
+export interface ProjectStorageCleanupResult {
+  apply: boolean;
+  projectUuid: string;
+  projectName: string;
+  candidateDirectories: number;
+  reclaimableBytes: number;
+  removedDirectories: number;
+  removedBytes: number;
+  databasePreserved: true;
+}
+
 export type ProjectStatusFilter = "all" | "running" | "needs-work" | "done" | "failed" | "not-started";
 export type ProjectStatusCounts = Record<ProjectStatusFilter, number>;
 
@@ -833,6 +881,9 @@ function projectListPath(params: ProjectListParams = {}): string {
 
 export const api = {
   catalog: () => fetchJson<ApiCatalogResponse>("/api"),
+  storageDisk: () => fetchJson<{ disk: DiskStorageStatus }>("/api/storage/disk"),
+  storage: () => fetchJson<StorageOverview>("/api/storage"),
+  cleanupProjectStorage: (uuid: string, apply = false) => postJson<ProjectStorageCleanupResult>(`/api/storage/projects/${encodeURIComponent(uuid)}/cleanup`, { apply }),
   projects: (params?: ProjectListParams) => fetchJson<ProjectListResponse>(projectListPath(params)),
   archivedProjects: (params?: Omit<ProjectListParams, "archived">) => fetchJson<ProjectListResponse>(projectListPath({ ...params, archived: true })),
   project: (uuid: string) => fetchJson<ProjectDetail>(`/api/projects/${encodeURIComponent(uuid)}`),

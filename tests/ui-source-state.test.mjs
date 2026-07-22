@@ -72,6 +72,18 @@ test("ui: findings expose a compact lifecycle summary and focused blocked-phase 
   assert.match(appSource, /will run on the next Continue/);
 });
 
+test("ui: storage pressure is visible and project cleanup keeps database records", () => {
+  assert.match(appSource, /function StorageWarningBanner/);
+  assert.match(appSource, /Storage running low/);
+  assert.match(appSource, /function StoragePane/);
+  assert.match(appSource, /api\.storageDisk\(\)\.then/);
+  assert.match(appSource, /Keep metadata only/);
+  assert.match(appSource, /Project, run, scope, finding, and decision records remain/);
+  assert.match(appSource, /api\.cleanupProjectStorage/);
+  assert.match(stylesSource, /\.storage-warning/);
+  assert.match(stylesSource, /\.storage-project-card/);
+});
+
 test("ui: unresolved local and real-target evidence conflicts require review and are not reportable", () => {
   const finding = {
     id: 7,

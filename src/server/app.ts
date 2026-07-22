@@ -17,7 +17,7 @@ import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, rea
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { DEFAULT_AUDIT_MODEL, defaultOutputDir } from "../config.js";
+import { DEFAULT_AUDIT_MODEL, defaultOutputDir, defaultWorkspaceDir } from "../config.js";
 import { MetadataStore, type RunKind, type Coverage, type DiscoveryBacklogFilter, type DiscoveryBacklogKind, type DiscoveryBacklogStatus, type ProviderInput, type ProviderProfile, type ProjectInput, type ProjectListOptions, type ProviderRoles, type RoleOverride } from "../db/store.js";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getProviders, getModels } from "@earendil-works/pi-ai/compat";
@@ -34,6 +34,7 @@ import { reconcileLegacyPreparedMaterialFingerprints } from "../util/prepared-ma
 import { isResumeSettledDecision, isSubmissionReadyDecision, needsSubmissionReadinessWork } from "../util/submission-readiness.js";
 import { isSandboxBackend, type SandboxBackend } from "../security/sandbox.js";
 import { normalizeRunGroupManifest, normalizeWorkItemInput } from "../evaluation/contracts.js";
+import { cleanupLocalProjectStorage, inspectLocalProjectStorage, localDiskStorageStatus, type StorageProjectRecord } from "../storage/projects.js";
 import { buildWorkItemLaunchSpec, evaluationTrackingProjectName, renderRunGroupReport, settleWorkItem } from "../evaluation/run-groups.js";
 import {
   buildHarnessCandidateProposal,
@@ -77,6 +78,7 @@ function loadUiHtml(): string {
 
 export interface UiServerOptions {
   out?: string;
+  workspace?: string;
   port?: number;
   host?: string;
   operatorToken?: string;
@@ -180,6 +182,7 @@ interface Ctx {
   store: MetadataStore;
   plane: ControlPlane;
   out: string;
+  workspace: string;
   maintainerMode: boolean;
 }
 
@@ -215,6 +218,24 @@ function route(def: Omit<Route, "regex" | "paramNames">): Route {
 const ROUTES: Route[] = [
   route({ method: "GET", path: "/", summary: "The web dashboard (HTML).", hidden: true, handler: (c) => { c.res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); c.res.end(loadUiHtml()); } }),
   route({ method: "GET", path: "/api", summary: "This catalog: every enabled resource and operation, so an agent can self-learn and drive the workflow without the UI.", handler: (c) => sendJson(c.res, 200, apiCatalog(c.maintainerMode)) }),
+
+  route({
+    method: "GET", path: "/api/storage/disk",
+    summary: "Read the local Flounder output volume's free-space pressure without scanning project files.",
+    handler: async (c) => sendJson(c.res, 200, { disk: await localDiskStorageStatus(c.out) }),
+  }),
+  route({
+    method: "GET", path: "/api/storage",
+    summary: "Scan local Flounder output/history/workspace storage and attribute bytes to database projects, including orphaned timestamped run directories.",
+    handler: async (c) => sendJson(c.res, 200, await inspectLocalProjectStorage({ outputDir: c.out, workspaceDir: c.workspace, projects: storageProjectRecords(c.store) })),
+  }),
+  route({
+    method: "POST", path: "/api/storage/projects/:uuid/cleanup",
+    summary: "Preview or remove one terminal project's local run artifacts, history, and configured workspace while preserving every database record.",
+    params: { uuid: "project UUID" },
+    body: { apply: "boolean? — false/default previews; true performs metadata-only retention cleanup" },
+    handler: projectStorageCleanup,
+  }),
 
   route({
     method: "GET", path: "/api/projects",
@@ -735,7 +756,7 @@ export function apiCatalog(maintainerMode = false): {
       ? "REST API for white-hat audits, durable evaluations, and explicitly enabled Flounder-maintainer experiments."
       : "REST API for tracking and driving white-hat audits and durable evaluation groups. Maintainer-only source-improvement surfaces are disabled.",
     maintainerMode,
-    resources: ["project", "provider", "daemon", "run", "run-group", "work-item", ...(maintainerMode ? ["harness-experiment"] : []), "scope", "discovery-backlog", "finding", "confirm-decision"],
+    resources: ["project", "provider", "daemon", "run", "run-group", "work-item", ...(maintainerMode ? ["harness-experiment"] : []), "scope", "discovery-backlog", "finding", "confirm-decision", "storage"],
     endpoints: ROUTES.filter((r) => !r.hidden && (!r.maintainerOnly || maintainerMode)).map((r) => ({
       method: r.method,
       path: r.path,
@@ -749,6 +770,7 @@ export function apiCatalog(maintainerMode = false): {
 
 export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof createServer> {
   const out = options.out ?? defaultOutputDir();
+  const workspace = options.workspace ?? defaultWorkspaceDir();
   const port = options.port ?? 4500;
   const host = options.host ?? "127.0.0.1"; // localhost by default; exposing the control plane requires operator auth
   const loopback = isLoopbackHost(host);
@@ -810,7 +832,7 @@ export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof 
       // rejection we can turn into a 500 — never an uncaught exception that kills the server.
       Promise.resolve()
         .then(() => materialFingerprintMigration)
-        .then(() => r.handler({ req, res, params, url, store, plane, out, maintainerMode }))
+        .then(() => r.handler({ req, res, params, url, store, plane, out, workspace, maintainerMode }))
         .catch((error) => {
           if (!res.headersSent) sendJson(res, 500, { error: String(error instanceof Error ? error.message : error) });
           else res.end();
@@ -1009,6 +1031,39 @@ async function withProjectAsync(c: Ctx, fn: (projectId: number, project: Record<
     return;
   }
   await fn(Number(project.id), project);
+}
+
+function storageProjectRecords(store: MetadataStore): StorageProjectRecord[] {
+  return store.listProjects({ archived: "all", origin: "all" }).map((project) => storageProjectRecord(store, project));
+}
+
+function storageProjectRecord(store: MetadataStore, project: Record<string, unknown>): StorageProjectRecord {
+  const name = String(project.name ?? "");
+  return {
+    id: Number(project.id),
+    uuid: String(project.uuid ?? ""),
+    name,
+    dir: project.dir,
+    runs: store.listRuns(Number(project.id)),
+    activeJobs: store.runningJobs().filter((job) => String(job.project ?? "") === name).length,
+  };
+}
+
+async function projectStorageCleanup(c: Ctx): Promise<void> {
+  const project = c.store.getProjectByRef(c.params.uuid ?? "");
+  if (!project) return sendJson(c.res, 404, { error: `no project with uuid ${c.params.uuid ?? ""}` });
+  const body = (await readBody(c.req)) as { apply?: unknown };
+  if (body.apply !== undefined && typeof body.apply !== "boolean") return sendJson(c.res, 400, { error: "apply must be a boolean" });
+  const record = storageProjectRecord(c.store, project);
+  const active = Number(record.activeJobs ?? 0) > 0 || record.runs.some((run) => run.status === "running");
+  if (active) return sendJson(c.res, 409, { error: "storage cleanup is blocked while the project has queued or running work" });
+  const result = await cleanupLocalProjectStorage({
+    outputDir: c.out,
+    workspaceDir: c.workspace,
+    project: record,
+    apply: body.apply === true,
+  });
+  sendJson(c.res, 200, result);
 }
 
 async function reconcileAllStaleAuditingScopes(c: Ctx): Promise<void> {

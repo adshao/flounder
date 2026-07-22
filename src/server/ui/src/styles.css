@@ -3578,6 +3578,94 @@ small {
   border-color: var(--border);
 }
 
+.storage-warning {
+  width: 100%;
+  border: 0;
+  border-bottom: 1px solid color-mix(in srgb, var(--warning) 42%, var(--border));
+  background: color-mix(in srgb, var(--warning) 12%, var(--canvas));
+  color: var(--fg);
+  padding: 8px 20px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  gap: 12px;
+  cursor: pointer;
+}
+
+.storage-warning.critical {
+  border-color: color-mix(in srgb, var(--danger) 48%, var(--border));
+  background: color-mix(in srgb, var(--danger) 12%, var(--canvas));
+}
+
+.storage-warning span { color: var(--fg-muted); }
+
+.storage-pressure-card {
+  margin: 18px 0;
+  padding: 16px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  background: var(--canvas-subtle);
+}
+
+.storage-pressure-card > div:first-child {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+}
+
+.storage-pressure-card span { color: var(--fg-muted); }
+
+.storage-meter {
+  height: 8px;
+  margin-top: 12px;
+  overflow: hidden;
+  border-radius: 999px;
+  background: var(--border);
+}
+
+.storage-meter span {
+  display: block;
+  height: 100%;
+  border-radius: inherit;
+  background: var(--accent);
+}
+
+.storage-pressure-card.warning .storage-meter span { background: var(--warning); }
+.storage-pressure-card.critical .storage-meter span { background: var(--danger); }
+
+.storage-totals {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 12px;
+  margin-bottom: 18px;
+}
+
+.storage-totals > span {
+  padding: 12px;
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  display: flex;
+  flex-direction: column;
+  gap: 3px;
+}
+
+.storage-totals small,
+.storage-project-size small,
+.storage-footnote { color: var(--fg-muted); }
+
+.storage-project-card { align-items: center; }
+.storage-project-card .grow { display: flex; flex-direction: column; gap: 3px; }
+.storage-project-size { min-width: 110px; text-align: right; display: flex; flex-direction: column; }
+.storage-footnote { margin: 14px 0 0; font-size: 12px; }
+
+@media (max-width: 760px) {
+  .storage-warning { align-items: flex-start; flex-direction: column; gap: 2px; }
+  .storage-totals { grid-template-columns: 1fr; }
+  .storage-project-card { align-items: stretch; flex-direction: column; }
+  .storage-project-size { min-width: 0; text-align: left; }
+}
+
 .composer-foot {
   display: flex;
   align-items: center;

@@ -18,6 +18,7 @@ import { isSandboxBackend } from "./security/sandbox.js";
 import { knownRuntimeProviders, loginProvider, printProviderCheck, providerAuthStatus } from "./provider-auth.js";
 import { absolutizeRunGroupManifest, normalizeRunGroupManifest } from "./evaluation/contracts.js";
 import { compactHistoricalInspectionWorkspaces, readStoredRunsForCompaction } from "./storage/compact.js";
+import { cleanupLocalProjectStorage, inspectLocalProjectStorage, readStorageProjectRecords } from "./storage/projects.js";
 
 async function main(argv: string[]): Promise<void> {
   const [cmd, ...rest] = argv;
@@ -69,7 +70,7 @@ async function main(argv: string[]): Promise<void> {
     const host = readFlag(rest, "--host") ?? "127.0.0.1";
     const out = resolveOut(rest);
     const workspace = readFlag(rest, "--workspace") ?? defaultWorkspaceDir(); // where the co-located daemon finds project dirs
-    const server = startUiServer({ out, port, host, maintainerMode: rest.includes("--maintainer") });
+    const server = startUiServer({ out, workspace, port, host, maintainerMode: rest.includes("--maintainer") });
     if (rest.includes("--no-daemon")) {
       console.log("[flounder ui] --no-daemon: no executor started. Connect one with `flounder daemon start --server <url> --token <token>`.");
     } else {
@@ -1043,8 +1044,42 @@ async function runStorageCommand(args: string[]): Promise<void> {
     printStorageHelp();
     return;
   }
+  if (subcommand === "report" || subcommand === "list") {
+    const out = resolveOut(rest);
+    const workspace = readFlag(rest, "--workspace") ?? defaultWorkspaceDir();
+    const projects = readStorageProjectRecords(out);
+    const overview = await inspectLocalProjectStorage({ outputDir: out, workspaceDir: workspace, projects });
+    if (rest.includes("--json")) {
+      console.log(JSON.stringify(overview, null, 2));
+      return;
+    }
+    console.log(`[storage] output=${formatByteSize(overview.outputBytes)} free=${formatByteSize(overview.disk.freeBytes)} pressure=${overview.disk.pressure} scanned=${overview.scanDurationMs}ms`);
+    console.log(`[storage] project_owned=${formatByteSize(overview.managedProjectBytes)} unattributed=${formatByteSize(overview.unattributedBytes)}`);
+    for (const project of overview.projects) {
+      if (project.totalBytes === 0 && !project.metadataOnly) continue;
+      const state = project.active ? "active" : project.metadataOnly ? "metadata-only" : "terminal";
+      console.log(`  ${formatByteSize(project.totalBytes).padStart(10)}  ${state.padEnd(13)}  ${project.projectName}  runs=${project.artifactDirectories} orphan=${project.orphanRunDirectories}`);
+    }
+    return;
+  }
+  if (subcommand === "clean") {
+    const ref = readFlag(rest, "--project");
+    if (!ref) throw new Error("flounder storage clean needs --project <uuid|name>");
+    const out = resolveOut(rest);
+    const workspace = readFlag(rest, "--workspace") ?? defaultWorkspaceDir();
+    const projects = readStorageProjectRecords(out);
+    const project = projects.find((candidate) => candidate.uuid === ref || candidate.name === ref);
+    if (!project) throw new Error(`no project named or identified by ${ref}`);
+    const result = await cleanupLocalProjectStorage({ outputDir: out, workspaceDir: workspace, project, apply: rest.includes("--apply") });
+    console.log(`[storage] project=${result.projectName} mode=${result.apply ? "apply" : "dry-run"} directories=${result.candidateDirectories}`);
+    console.log(`[storage] reclaimable=${formatByteSize(result.reclaimableBytes)} removed=${formatByteSize(result.removedBytes)} database=preserved`);
+    if (!result.apply && result.candidateDirectories > 0) {
+      console.log("[storage] No files removed. Re-run with --apply to remove this project's local artifacts, history, and configured workspace while preserving its database records.");
+    }
+    return;
+  }
   if (subcommand !== "compact") {
-    throw new Error("Unknown storage command. Use: flounder storage compact [--apply] [--out <dir>]");
+    throw new Error("Unknown storage command. Use: flounder storage report | clean --project <uuid|name> | compact");
   }
   const out = resolveOut(rest);
   const result = await compactHistoricalInspectionWorkspaces({
@@ -1063,15 +1098,22 @@ async function runStorageCommand(args: string[]): Promise<void> {
 }
 
 function printStorageHelp(): void {
-  console.log(`flounder storage compact — reclaim historical per-command inspection copies.
+  console.log(`flounder storage — attribute and safely reclaim local Flounder disk usage.
 
 Usage:
+  flounder storage report [--out <dir>] [--workspace <dir>] [--json]
+  flounder storage clean --project <uuid|name> [--out <dir>] [--workspace <dir>]
+  flounder storage clean --project <uuid|name> [--out <dir>] [--workspace <dir>] --apply
   flounder storage compact [--out <dir>]          preview reclaimable space (default)
   flounder storage compact [--out <dir>] --apply  remove terminal-run inspection copies
 
-The command never touches running runs, report artifacts, transcripts, findings, or PoC files.
-It only removes paired *-source-view-cmdN directories created as disposable read-only input
-for one inspection command. Paths outside the configured output root and symlinks are skipped.`);
+report attributes run, history, and configured workspace usage to each database project and
+shows disk pressure. clean is a metadata-only retention action: it refuses active projects,
+defaults to a dry-run, removes only project-owned local directories with --apply, and preserves
+the project, runs, scopes, findings, and decisions in flounder.db. compact only removes paired
+*-source-view-cmdN directories created as disposable read-only input for one inspection command.
+compact never touches running runs, report artifacts, transcripts, findings, or PoC files.
+Paths outside the configured roots and symlinks are always skipped.`);
 }
 
 function formatByteSize(bytes: number): string {
@@ -1318,6 +1360,8 @@ Usage:
   flounder continue --project <uuid|name>                                         finish the stored project pipeline round (same as the UI Continue button)
   flounder group create|start|status|pause|cancel|retry|report                    durable evaluation, replay, and multi-target work groups
   flounder history import-run --target <name> --run <dir>
+  flounder storage report                                                       show disk pressure and per-project local usage
+  flounder storage clean --project <uuid|name> [--apply]                         preview or remove one terminal project's disk data, preserving DB records
   flounder storage compact [--apply]                                             preview or remove terminal per-command inspection copies
   flounder server project list                                                   list tracked projects
   flounder server run list [--project <name>]                                    list run history globally or for one project

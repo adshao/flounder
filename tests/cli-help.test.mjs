@@ -44,6 +44,9 @@ test("cli continue has command-specific help", async () => {
 
 test("cli storage compaction is dry-run first and documents its evidence boundary", async () => {
   const { stdout } = await execFileAsync(process.execPath, [path.join(root, "dist/cli.js"), "storage", "--help"], { cwd: root });
+  assert.match(stdout, /storage report/);
+  assert.match(stdout, /storage clean --project/);
+  assert.match(stdout, /metadata-only retention action/);
   assert.match(stdout, /storage compact.*preview reclaimable space/);
   assert.match(stdout, /--apply.*remove terminal-run inspection copies/);
   assert.match(stdout, /never touches running runs, report artifacts, transcripts, findings, or PoC files/);

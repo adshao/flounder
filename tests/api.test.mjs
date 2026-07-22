@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { mkdir, mkdtemp, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { startUiServer } from "../dist/server/app.js";
@@ -14,7 +14,7 @@ import { DAEMON_PROTOCOL_VERSION } from "../dist/server/protocol.js";
 
 async function withServer(fn) {
   const out = await mkdtemp(path.join(os.tmpdir(), "flounder-api-"));
-  const server = startUiServer({ port: 0, out, host: "127.0.0.1" });
+  const server = startUiServer({ port: 0, out, workspace: path.join(out, "workspace"), host: "127.0.0.1" });
   if (!server.listening) await new Promise((resolve) => server.once("listening", resolve));
   const base = `http://127.0.0.1:${server.address().port}`;
   try {
@@ -28,10 +28,11 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
   await withServer(async (base) => {
     const cat = await (await fetch(base + "/api")).json();
     assert.equal(cat.maintainerMode, false);
-    assert.deepEqual(cat.resources, ["project", "provider", "daemon", "run", "run-group", "work-item", "scope", "discovery-backlog", "finding", "confirm-decision"]);
+    assert.deepEqual(cat.resources, ["project", "provider", "daemon", "run", "run-group", "work-item", "scope", "discovery-backlog", "finding", "confirm-decision", "storage"]);
     const sigs = cat.endpoints.map((e) => e.method + " " + e.path);
     for (const expected of [
       "GET /api/projects", "PATCH /api/projects/order", "POST /api/projects", "GET /api/projects/:uuid",
+      "GET /api/storage/disk", "GET /api/storage", "POST /api/storage/projects/:uuid/cleanup",
       "PATCH /api/projects/:uuid", "DELETE /api/projects/:uuid",
       "POST /api/projects/:uuid/runs", "GET /api/projects/:uuid/findings",
       "GET /api/findings/:id/lifecycle", "POST /api/findings/:id/retry",
@@ -113,6 +114,55 @@ test("api: GET /api is a self-describing catalog of every resource + operation",
     assert.match(runPatch.body.coverageTarget, /until 30/);
     const runArtifact = cat.endpoints.find((e) => e.method === "GET" && e.path === "/api/runs/:id/artifact");
     assert.match(runArtifact.query.name, /impact_inventory\.json/);
+  });
+});
+
+test("api: project storage cleanup previews bytes and preserves database records", async () => {
+  await withServer(async (base, out) => {
+    const created = await (await fetch(base + "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "storage-target", dir: "storage-target-src", sourcePaths: ["./src"] }),
+    })).json();
+    const runDir = path.join(out, "storage-target-20260722T120914020Z");
+    const historyDir = path.join(out, "history", "storage-target");
+    const workspaceDir = path.join(out, "workspace", "storage-target-src");
+    for (const dir of [runDir, historyDir, workspaceDir]) {
+      await mkdir(dir, { recursive: true });
+      await writeFile(path.join(dir, "data.bin"), Buffer.alloc(8 * 1024, 1));
+    }
+    const store = MetadataStore.openForOutput(out);
+    const runId = store.startRun({ projectId: created.id, kind: "run", runDir, provider: "mock", model: "mock" });
+    store.finishRun(runId, "done");
+    store.close();
+
+    const disk = await (await fetch(base + "/api/storage/disk")).json();
+    assert.ok(disk.disk.totalBytes > 0);
+    const overview = await (await fetch(base + "/api/storage")).json();
+    const usage = overview.projects.find((project) => project.projectUuid === created.uuid);
+    assert.ok(usage.totalBytes > 0);
+    assert.equal(usage.artifactDirectories, 3);
+
+    const preview = await (await fetch(base + `/api/storage/projects/${created.uuid}/cleanup`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ apply: false }),
+    })).json();
+    assert.equal(preview.databasePreserved, true);
+    assert.equal(preview.removedDirectories, 0);
+    assert.ok((await stat(runDir)).isDirectory());
+
+    const applied = await (await fetch(base + `/api/storage/projects/${created.uuid}/cleanup`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ apply: true }),
+    })).json();
+    assert.equal(applied.removedDirectories, 3);
+    await assert.rejects(stat(runDir), /ENOENT/);
+    const detail = await (await fetch(base + `/api/projects/${created.uuid}`)).json();
+    assert.equal(detail.runsTotal, 1);
+    const after = await (await fetch(base + "/api/storage")).json();
+    assert.equal(after.projects.find((project) => project.projectUuid === created.uuid).metadataOnly, true);
   });
 });
 
