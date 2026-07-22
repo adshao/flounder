@@ -43,7 +43,7 @@ export const IMPACT_INVENTORY_FILE = "impact_inventory.json";
 
 export async function runConfirm(
   cfg: AuditorConfig,
-  options: { inputRunDir: string; inputRunDirs?: string[]; confirmKeys?: string[]; inlineFindings?: Array<Record<string, unknown>>; settledDecisions?: ConfirmDecisionRow[]; maxSteps?: number; fresh?: boolean; streamEvents?: boolean; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory },
+  options: { inputRunDir: string; inputRunDirs?: string[]; confirmKeys?: string[]; inlineFindings?: Array<Record<string, unknown>>; settledDecisions?: ConfirmDecisionRow[]; engagement?: Record<string, unknown>; maxSteps?: number; fresh?: boolean; streamEvents?: boolean; signal?: AbortSignal; onRun?: (runId: number) => void; onActivity?: (event: { kind: string; delta?: string; tool?: string; step?: number }) => void; makeTracker?: RunTrackerFactory },
 ): Promise<ConfirmRunResult> {
   // Confirm needs a real agent that can fork a live network and run real nodes; the
   // mock/CLI fallbacks cannot, so this mode requires a pi-session provider.
@@ -204,6 +204,7 @@ export async function runConfirm(
     cwd: workspace.absolute,
     fileManifest: renderConfirmFileManifest(baselineFiles, corpusManifest),
     confirm: seed,
+    ...(options.engagement ? { engagement: options.engagement } : {}),
     // Project the decision rows to SQLite each turn so a UI shows live reproduction
     // progress (reproduced X / N) during the run, not only at the end.
     onConfirmCheckpoint: (raw) => {

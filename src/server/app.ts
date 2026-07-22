@@ -5772,6 +5772,7 @@ function launchSpec(store: MetadataStore, project: Record<string, unknown>, body
     region: str(body.region),
     scope: str(body.scope),
     scopeNote: str(merged.scopeNote), // a project may store a default focus note in its config
+    engagement: objectValue(merged.engagement),
     ...(body.verifyFindings !== undefined ? { verifyFindings: normalizeProjectVerifyFindings(store, Number(project.id), body.verifyFindings) } : {}),
     inputRunDir: str(body.inputRunDir),
     clue: str(body.clue),
