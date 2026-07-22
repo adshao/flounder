@@ -125,6 +125,9 @@ interface LaunchResult {
   verb?: string;
   queued?: boolean;
   daemons?: number;
+  queueReason?: string;
+  blockingJobId?: number;
+  message?: string;
 }
 
 const ONLINE_MS = 90_000;
@@ -1993,10 +1996,13 @@ export function App() {
         ...((action === "confirm" || action === "report") && selected ? { findingIds: selected.map((finding) => finding.id) } : {}),
       })) as LaunchResult;
       const waiting = (result.daemons ?? 0) === 0;
+      const waitingForProject = result.queueReason === "project-run-active";
       const label = action === "verify" ? "verify" : action === "map-expand" ? "expand map" : opensNextCoverage ? "run" : verb;
       setToast({
-        tone: waiting ? "warning" : "success",
-        message: waiting
+        tone: waiting || waitingForProject ? "warning" : "success",
+        message: waitingForProject
+          ? result.message ?? `${label} queued behind another run for this project and will start automatically when it finishes.`
+          : waiting
           ? `${label} queued, but no online daemon is connected. Start a daemon to claim the job.`
           : `${label} queued for ${plural(result.daemons ?? 0, "daemon")}.${runHint && (action === "run" || opensNextCoverage) ? ` ${runHint}` : ""}`,
       });
@@ -2303,9 +2309,12 @@ export function App() {
               try {
                 const result = (await api.launchRun(uuid, { verb: "run", pipeline: true })) as LaunchResult;
                 const waiting = (result.daemons ?? 0) === 0;
+                const waitingForProject = result.queueReason === "project-run-active";
                 setToast({
-                  tone: waiting ? "warning" : "success",
-                  message: waiting
+                  tone: waiting || waitingForProject ? "warning" : "success",
+                  message: waitingForProject
+                    ? result.message ?? "run queued behind another run for this project and will start automatically when it finishes."
+                    : waiting
                     ? "run queued, but no online daemon is connected. Start a daemon to claim the job."
                     : `run queued for ${plural(result.daemons ?? 0, "daemon")}.`,
                 });
