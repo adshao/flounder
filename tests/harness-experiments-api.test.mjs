@@ -4,12 +4,13 @@ import { mkdtemp } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import { startUiServer } from "../dist/server/app.js";
+import { DAEMON_PROTOCOL_VERSION } from "../dist/server/protocol.js";
 
 const json = (response) => response.json();
 const request = (base, method, route, body, token) => fetch(base + route, {
   method,
   headers: { "content-type": "application/json", ...(token ? { authorization: `Bearer ${token}` } : {}) },
-  ...(body !== undefined ? { body: JSON.stringify(body) } : {}),
+  ...(body !== undefined ? { body: JSON.stringify(route === "/api/daemon/register" ? { ...body, protocolVersion: DAEMON_PROTOCOL_VERSION } : body) } : {}),
 });
 
 function item(itemKey, expectedOutcome) {

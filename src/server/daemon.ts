@@ -24,6 +24,7 @@ import { assertProviderAuthenticated, knownRuntimeProviders, providerAuthStatus 
 import { buildDefaultSandboxImage, checkSandboxReadiness, DEFAULT_SANDBOX_IMAGE, isDefaultSandboxImage, sandboxToolPath, type SandboxImageBuildResult, type SandboxReadiness } from "../security/sandbox.js";
 import { RunLogger } from "../trace/logger.js";
 import { positiveIntegerId } from "../util/ids.js";
+import { DAEMON_PROTOCOL_VERSION } from "./protocol.js";
 
 export interface DaemonOptions {
   server: string;
@@ -53,8 +54,12 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     void post(base, headers, "/api/daemon/heartbeat", { instanceId, activeJobIds: [...inflight.keys()] });
   };
 
-  const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", capabilities: await daemonCapabilities(), workspace }) }).catch(() => null);
+  const reg = await fetch(base + "/api/daemon/register", { method: "POST", headers, body: JSON.stringify({ name: opts.name ?? "daemon", protocolVersion: DAEMON_PROTOCOL_VERSION, capabilities: await daemonCapabilities(), workspace }) }).catch(() => null);
   if (!reg || !reg.ok) throw new Error(`daemon: could not register with ${base} (status ${reg ? reg.status : "no response"}) — check --server and --token`);
+  const registration = (await reg.json().catch(() => ({}))) as { protocolVersion?: unknown };
+  if (registration.protocolVersion !== DAEMON_PROTOCOL_VERSION) {
+    throw new Error(`daemon: control-plane protocol mismatch (daemon=${DAEMON_PROTOCOL_VERSION}, server=${String(registration.protocolVersion ?? "missing")}) — update and restart both the server and daemon from the same Flounder release`);
+  }
   console.log(`[flounder daemon] connected to ${base}  (out=${out}, workspace=${workspace}, concurrency=${maxConcurrent})`);
   // Historical terminal artifacts live on the executor, not the control plane.
   // Replay them best-effort after registration; failures never block new work and

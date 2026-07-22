@@ -7,6 +7,7 @@ import { startUiServer } from "../dist/server/app.js";
 import { MetadataStore } from "../dist/db/store.js";
 import { loadScopeInventory, saveScopeInventory } from "../dist/agent/scope-store.js";
 import { projectHistoryDir } from "../dist/trace/history.js";
+import { DAEMON_PROTOCOL_VERSION } from "../dist/server/protocol.js";
 
 // The whole workflow is a REST API an agent can self-learn (GET /api) and drive without
 // the UI. This pins the catalog + a project CRUD round-trip over real HTTP.
@@ -5301,6 +5302,7 @@ test("api: daemon lists return provider-auth summaries by default", async () => 
       method: "POST",
       headers: { "content-type": "application/json", authorization: `Bearer ${created.token}` },
       body: JSON.stringify({
+        protocolVersion: DAEMON_PROTOCOL_VERSION,
         workspace: "/tmp/flounder-worker",
         capabilities: {
           providers: [

@@ -8,6 +8,7 @@ import { promisify } from "node:util";
 import { startUiServer } from "../dist/server/app.js";
 import { daemonJobTerminalState, ensureDaemonDirectories, loadVerifyArtifactReplay } from "../dist/server/daemon.js";
 import { MetadataStore } from "../dist/db/store.js";
+import { DAEMON_PROTOCOL_VERSION } from "../dist/server/protocol.js";
 
 const execFileAsync = promisify(execFile);
 const root = path.resolve(import.meta.dirname, "..");
@@ -48,8 +49,12 @@ async function withServer(out, fn) {
 
 const j = (r) => r.json();
 const ui = (base, method, p, body) => fetch(base + p, { method, ...(body ? { headers: { "content-type": "application/json" }, body: JSON.stringify(body) } : {}) });
-const asDaemon = (base, token, method, p, body) =>
-  fetch(base + p, { method, headers: { authorization: `Bearer ${token}`, ...(body ? { "content-type": "application/json" } : {}) }, ...(body ? { body: JSON.stringify(body) } : {}) });
+const asDaemon = (base, token, method, p, body) => {
+  const requestBody = p === "/api/daemon/register" && body
+    ? { ...body, protocolVersion: DAEMON_PROTOCOL_VERSION }
+    : body;
+  return fetch(base + p, { method, headers: { authorization: `Bearer ${token}`, ...(requestBody ? { "content-type": "application/json" } : {}) }, ...(requestBody ? { body: JSON.stringify(requestBody) } : {}) });
+};
 
 test("daemon: job terminal state reflects every persisted run phase", () => {
   assert.equal(daemonJobTerminalState(["done"]), "done");
@@ -307,6 +312,28 @@ test("daemon: register requires a valid bearer token", async () => {
     assert.equal((await j(ok)).ok, true);
     // claim/run/activity/status all reject an unknown token too
     assert.equal((await fetch(base + "/api/daemon/claim", { method: "POST" })).status, 401);
+  });
+});
+
+test("daemon: register rejects control-plane protocol drift", async () => {
+  await withServerAndToken(async ({ base, token }) => {
+    const register = (protocolVersion) => fetch(base + "/api/daemon/register", {
+      method: "POST",
+      headers: { authorization: `Bearer ${token}`, "content-type": "application/json" },
+      body: JSON.stringify({ name: "versioned", ...(protocolVersion === undefined ? {} : { protocolVersion }), capabilities: {} }),
+    });
+
+    const missing = await register(undefined);
+    assert.equal(missing.status, 409);
+    assert.match((await j(missing)).error, /reported missing/);
+
+    const stale = await register(DAEMON_PROTOCOL_VERSION - 1);
+    assert.equal(stale.status, 409);
+    assert.match((await j(stale)).error, /protocol mismatch/);
+
+    const current = await register(DAEMON_PROTOCOL_VERSION);
+    assert.equal(current.status, 200);
+    assert.equal((await j(current)).protocolVersion, DAEMON_PROTOCOL_VERSION);
   });
 });
 
