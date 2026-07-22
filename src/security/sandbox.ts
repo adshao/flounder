@@ -558,7 +558,7 @@ async function runOciSandboxProcess(input: ProcessRunInput): Promise<{ stdout: s
   }
   if (input.options.memoryMb !== undefined) dockerArgs.push("--memory", `${Math.max(64, Math.floor(input.options.memoryMb))}m`);
   if (input.options.cpus !== undefined) dockerArgs.push("--cpus", String(Math.max(0.1, input.options.cpus)));
-  for (const [key, value] of Object.entries(sandboxEnv("/workspace", "/workspace/.tmp", input.cacheDir ? "/cache" : undefined, input.command, input.options.network))) {
+  for (const [key, value] of Object.entries(containerSandboxEnv("/workspace", "/workspace/.tmp", input.cacheDir ? "/cache" : undefined, input.command, input.options.network))) {
     if (value !== undefined) dockerArgs.push("--env", `${key}=${value}`);
   }
   dockerArgs.push(input.options.image, input.command.program, ...input.command.args);
@@ -619,7 +619,7 @@ async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<
   const memoryMb = input.options.memoryMb ?? defaultAppleContainerMemoryMb();
   containerArgs.push("--memory", `${Math.max(64, Math.floor(memoryMb))}M`);
   if (input.options.cpus !== undefined) containerArgs.push("--cpus", String(Math.max(0.1, input.options.cpus)));
-  for (const [key, value] of Object.entries(sandboxEnv("/workspace", "/workspace/.tmp", input.cacheDir ? "/cache" : undefined, input.command, input.options.network))) {
+  for (const [key, value] of Object.entries(containerSandboxEnv("/workspace", "/workspace/.tmp", input.cacheDir ? "/cache" : undefined, input.command, input.options.network))) {
     if (value !== undefined) containerArgs.push("--env", `${key}=${value}`);
   }
   containerArgs.push(input.options.image, input.command.program, ...input.command.args);
@@ -1502,6 +1502,14 @@ function sandboxEnv(workspace: string, tmpDir: string, cacheDir?: string, comman
   }
   if (process.env.LANG !== undefined) out.LANG = process.env.LANG;
   if (process.env.LC_ALL !== undefined) out.LC_ALL = process.env.LC_ALL;
+  return out;
+}
+
+function containerSandboxEnv(workspace: string, tmpDir: string, cacheDir?: string, command?: ReproductionCommand, network: SandboxNetworkMode = "none"): NodeJS.ProcessEnv {
+  const out = sandboxEnv(workspace, tmpDir, cacheDir, command, network);
+  // Container images own their toolchain PATH. Injecting the daemon host's PATH
+  // can select unrelated distro binaries ahead of a pinned image toolchain.
+  delete out.PATH;
   return out;
 }
 

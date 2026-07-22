@@ -442,6 +442,7 @@ test("sandbox auto prefers Apple container on Apple silicon when the backend is 
       assert.equal(result.exitCode, 0);
       assert.match(result.stdout, /^ARGS:/);
       assert.match(result.stdout, /\[--network\]\[flounder-sealed\]\[--no-dns\]/);
+      assert.doesNotMatch(result.stdout, /\[--env\]\[PATH=/, "container runs must preserve the image-defined PATH");
       assert.match(result.stdout, /\[flounder-sandbox:auto-apple\]\[node\]\[--test\]/);
     });
   } finally {
@@ -477,6 +478,7 @@ test("sandbox auto falls back to Docker on Apple silicon when Apple sealed netwo
       assert.equal(result.exitCode, 0);
       assert.match(result.stdout, /^DOCKER_ARGS:/);
       assert.match(result.stdout, /\[--network\]\[none\]/);
+      assert.doesNotMatch(result.stdout, /\[--env\]\[PATH=/, "container runs must preserve the image-defined PATH");
       assert.match(result.stdout, /\[flounder-sandbox:auto-docker\]\[node\]\[--test\]/);
     });
   } finally {
@@ -520,6 +522,7 @@ test("sandbox Apple container backend maps Flounder isolation options to contain
     assert.match(result.stdout, /\[--env\]\[HOME=\/workspace\]/);
     assert.match(result.stdout, /\[--env\]\[SCARB_CACHE=\/cache\/scarb-cache\]/);
     assert.match(result.stdout, /\[--env\]\[YARN_GLOBAL_FOLDER=\/cache\/yarn-berry\]/);
+    assert.doesNotMatch(result.stdout, /\[--env\]\[PATH=/, "container runs must preserve the image-defined PATH");
     assert.match(result.stdout, /\[flounder-sandbox:latest\]\[node\]\[--test\]/);
   } finally {
     process.env.PATH = oldPath;
