@@ -404,9 +404,9 @@ const ROUTES: Route[] = [
     body: {
       recommendation: "'submit-candidate' | 'drop'",
       rationale: "string — required operator rationale",
-      evidenceDecisionId: "number? — corroborating Confirm row with real-target execution evidence",
+      evidenceDecisionId: "number? — corroborating Confirm row with execution evidence permitted by the verified engagement policy",
       submissionConfidence: "'low' | 'medium' | 'high'? (default medium)",
-      gateEvidence: "{ scope, liveImpact, knownIssue, payout } — non-empty evidence strings required for submit-candidate",
+      gateEvidence: "{ scope?, liveImpact?, knownIssue?, payout? } — non-empty evidence strings for every gate required by the decision's verified engagement policy",
     },
     handler: confirmDecisionAdjudicate,
   }),
@@ -3785,12 +3785,12 @@ async function confirmDecisionAdjudicate(c: Ctx): Promise<void> {
   const gates = body.gateEvidence && typeof body.gateEvidence === "object" && !Array.isArray(body.gateEvidence)
     ? body.gateEvidence as Record<string, unknown>
     : undefined;
-  const gateEvidence = gates && ["scope", "liveImpact", "knownIssue", "payout"].every((key) => typeof gates[key] === "string")
+  const gateEvidence = gates
     ? {
-      scope: String(gates.scope),
-      liveImpact: String(gates.liveImpact),
-      knownIssue: String(gates.knownIssue),
-      payout: String(gates.payout),
+      ...(typeof gates.scope === "string" ? { scope: String(gates.scope) } : {}),
+      ...(typeof gates.liveImpact === "string" ? { liveImpact: String(gates.liveImpact) } : {}),
+      ...(typeof gates.knownIssue === "string" ? { knownIssue: String(gates.knownIssue) } : {}),
+      ...(typeof gates.payout === "string" ? { payout: String(gates.payout) } : {}),
     }
     : undefined;
   const result = c.store.adjudicateConfirmDecision(Number(c.params.id), {

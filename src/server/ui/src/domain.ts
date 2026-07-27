@@ -302,6 +302,28 @@ function isPassingGateStatus(status: string): boolean {
   return ["pass", "passed", "satisfied", "confirmed", "established", "eligible", "ok", "yes", "in_scope", "funded", "live_funded", "novel", "estimated", "collectible", "not_duplicate", "not_disclosed"].some((token) => normalized === token || normalized.startsWith(`${token}_`));
 }
 
+type SubmissionGate = "scope" | "live_impact" | "known_issue" | "payout";
+const DEFAULT_SUBMISSION_GATES: SubmissionGate[] = ["scope", "live_impact", "known_issue", "payout"];
+const SOURCE_ONLY_SUBMISSION_GATES: SubmissionGate[] = ["scope", "known_issue", "payout"];
+
+function decisionRequiredGates(decision: ConfirmDecision): Set<SubmissionGate> {
+  const engagement = decisionObject(decision, "engagement_profile", "engagement_profile_json");
+  const raw = engagement?.required_gates ?? engagement?.requiredGates;
+  const declared = (Array.isArray(raw) ? raw : []).map((value) => {
+    const normalized = normalizedWord(value);
+    if (["scope", "asset", "eligibility"].includes(normalized)) return "scope";
+    if (["live_impact", "live_exposure", "funded_impact", "affected_deployment"].includes(normalized)) return "live_impact";
+    if (["known_issue", "novelty", "duplicate", "disclosure"].includes(normalized)) return "known_issue";
+    if (["payout", "reward", "collectible"].includes(normalized)) return "payout";
+    return undefined;
+  }).filter((value): value is SubmissionGate => Boolean(value));
+  const requirement = normalizedWord(engagement?.evidence_requirement ?? engagement?.evidenceRequirement);
+  const baseline = ["source_only", "published_source", "pre_mainnet_source"].includes(requirement)
+    ? SOURCE_ONLY_SUBMISSION_GATES
+    : DEFAULT_SUBMISSION_GATES;
+  return new Set([...baseline, ...declared]);
+}
+
 function decisionHasOpenSubmissionGate(decision: ConfirmDecision): boolean {
   const text = (decision.human_gates ?? "").trim().toLowerCase();
   if (text && !/^(?:none|n\/a|not applicable|no remaining gates?|no human gates?)\.?$/.test(text)) {
@@ -310,18 +332,24 @@ function decisionHasOpenSubmissionGate(decision: ConfirmDecision): boolean {
     }
   }
   const adjudication = decisionObject(decision, "adjudication", "adjudication_json");
+  const required = decisionRequiredGates(decision);
   const directStatuses = [
-    gateStatus(adjudication, ["scope", "venue", "eligib", "asset"], ["scope_status", "scopeStatus"]),
-    gateStatus(adjudication, ["live", "impact", "fund", "exposure", "deployment"], ["live_impact_status", "liveImpactStatus", "funds_status", "fundsStatus"]),
-    gateStatus(adjudication, ["known", "novel", "duplicate", "disclos"], ["known_issue_status", "knownIssueStatus", "novelty_status", "noveltyStatus"]),
-    gateStatus(adjudication, ["payout", "reward", "collectible", "bounty"], ["payout_status", "payoutStatus", "reward_status", "rewardStatus"]),
-  ].filter(Boolean);
+    ["scope", gateStatus(adjudication, ["scope", "venue", "eligib", "asset"], ["scope_status", "scopeStatus"])],
+    ["live_impact", gateStatus(adjudication, ["live", "impact", "fund", "exposure", "deployment"], ["live_impact_status", "liveImpactStatus", "funds_status", "fundsStatus"])],
+    ["known_issue", gateStatus(adjudication, ["known", "novel", "duplicate", "disclos"], ["known_issue_status", "knownIssueStatus", "novelty_status", "noveltyStatus"])],
+    ["payout", gateStatus(adjudication, ["payout", "reward", "collectible", "bounty"], ["payout_status", "payoutStatus", "reward_status", "rewardStatus"])],
+  ].filter(([gate, status]) => required.has(gate as SubmissionGate) && Boolean(status)).map(([, status]) => status as string);
   return directStatuses.some((status) => !isPassingGateStatus(status));
 }
 
 function hasRealTargetEvidence(decision: ConfirmDecision): boolean {
   const normalized = normalizedWord(decision.evidence_level);
-  return normalized === "real_target_reproduced" || normalized === "fork_reproduced" || normalized === "local_fork_reproduced";
+  if (normalized === "real_target_reproduced" || normalized === "fork_reproduced" || normalized === "local_fork_reproduced") return true;
+  const engagement = decisionObject(decision, "engagement_profile", "engagement_profile_json");
+  const requirement = normalizedWord(engagement?.evidence_requirement ?? engagement?.evidenceRequirement);
+  const sourceOnlyEvidence = normalized === "source_only_local_confirmed" || normalized === "source_confirmed";
+  return sourceOnlyEvidence && ["source_only", "published_source", "pre_mainnet_source"].includes(requirement)
+    && !decisionRequiredGates(decision).has("live_impact");
 }
 
 export function isSubmissionReadyDecision(decision: ConfirmDecision): boolean {

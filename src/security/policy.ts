@@ -471,10 +471,14 @@ function isReadOnlyGitNetworkCommand(args: string[]): boolean {
 function isSafeGitReadOption(arg: string): boolean {
   return arg === "-q"
     || arg === "-v"
+    || arg === "-b"
     || arg === "--quiet"
     || arg === "--verbose"
     || arg === "--progress"
     || arg === "--no-progress"
+    || arg === "--branch"
+    || /^-b[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(arg)
+    || /^--branch=[A-Za-z0-9][A-Za-z0-9._/-]*$/.test(arg)
     || arg === "--depth"
     || /^--depth=[1-9][0-9]*$/.test(arg)
     || arg === "--single-branch"

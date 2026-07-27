@@ -241,6 +241,7 @@ test("open-world egress is granted per command instead of per phase", () => {
     cmd("curl", "-fsSL", "https://example.com/spec.json"),
     cmd("wget", "-q", "https://example.com/spec.json"),
     cmd("git", "clone", "https://github.com/example/project"),
+    cmd("git", "clone", "--branch", "main", "--single-branch", "https://github.com/example/project", "sources/project"),
     cmd("gh", "api", "repos/example/project"),
     cmd("gh", "issue", "view", "123"),
     cmd("solana", "program", "show", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com"),

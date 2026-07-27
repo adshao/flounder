@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { enforceBountySubmitReadiness, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
+import { assertCompleteConfirmDecisionCoverage, enforceBountySubmitReadiness, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
 import { publicPath } from "../dist/util/paths.js";
 
 // `flounder confirm` auto-resumes a prior interrupted confirm of the same input run: it finds
@@ -95,6 +95,26 @@ test("confirm resume: aggregate input carries settled rows from prior subset con
   assert.deepEqual(settled.map((r) => r.bug).sort(), ["Bug A newer", "Bug B"]);
 });
 
+test("confirm completion rejects a decision sheet that omits selected finding ids", () => {
+  const findings = [
+    { id: "finding-a" },
+    { id: "finding-b" },
+    { id: "finding-c" },
+  ];
+
+  assert.doesNotThrow(() => assertCompleteConfirmDecisionCoverage(findings, [
+    { members: ["finding-a", "finding-b"] },
+    { members: ["finding-c"] },
+  ]));
+
+  assert.throws(
+    () => assertCompleteConfirmDecisionCoverage(findings, [
+      { members: ["finding-a", "finding-b"] },
+    ]),
+    /decision sheet omitted 1 selected finding id.*finding-c/,
+  );
+});
+
 test("confirm bounty submit readiness requires impact inventory and closed gates", () => {
   const base = {
     bug: "Pool drain",
@@ -143,6 +163,50 @@ test("confirm bounty submit readiness requires impact inventory and closed gates
     },
   });
   assert.equal(ready[0].recommendation, "submit-candidate");
+});
+
+test("pre-mainnet bounty can use the program's source-only submission gates", () => {
+  const rows = enforceBountySubmitReadiness([
+    {
+      bug: "Pre-mainnet source bug",
+      members: ["ksource"],
+      reproduced: "yes",
+      recommendation: "submit-candidate",
+      humanGates: "",
+      evidenceLevel: "source-only-local-confirmed",
+      engagementProfile: {
+        policy_kind: "bug_bounty",
+        evidence_requirement: "source_only",
+        required_gates: ["scope", "known_issue", "payout"],
+      },
+      adjudication: {
+        scope_status: "pass",
+        live_impact_status: "not_required",
+        known_issue_status: "novel",
+        payout_estimate: {
+          status: "estimated",
+          eligible_min_usd: 5_000,
+          eligible_max_usd: 20_000,
+          basis: "The program explicitly pays a base reward before mainnet.",
+        },
+      },
+    },
+  ]);
+
+  assert.equal(rows[0].recommendation, "submit-candidate");
+  assert.equal(rows[0].humanGates, "");
+
+  const missingPolicyProof = enforceBountySubmitReadiness([
+    {
+      ...rows[0],
+      engagementProfile: {
+        policy_kind: "bug_bounty",
+        required_gates: ["scope", "known_issue", "payout"],
+      },
+    },
+  ]);
+  assert.equal(missingPolicyProof[0].recommendation, "needs-human");
+  assert.match(missingPolicyProof[0].humanGates, /not permitted by the engagement's evidence requirement/);
 });
 
 test("configured bounty engagement cannot be downgraded to source review", () => {
