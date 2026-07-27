@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { enforceBountySubmitReadiness, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
+import { assertCompleteConfirmDecisionCoverage, enforceBountySubmitReadiness, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
 import { publicPath } from "../dist/util/paths.js";
 
 // `flounder confirm` auto-resumes a prior interrupted confirm of the same input run: it finds
@@ -93,6 +93,26 @@ test("confirm resume: aggregate input carries settled rows from prior subset con
 
   const settled = await loadSettledFromPriorConfirm(out, "tgt", inputA, path.join(out, "tgt-confirm-cur"), [inputA, inputB]);
   assert.deepEqual(settled.map((r) => r.bug).sort(), ["Bug A newer", "Bug B"]);
+});
+
+test("confirm completion rejects a decision sheet that omits selected finding ids", () => {
+  const findings = [
+    { id: "finding-a" },
+    { id: "finding-b" },
+    { id: "finding-c" },
+  ];
+
+  assert.doesNotThrow(() => assertCompleteConfirmDecisionCoverage(findings, [
+    { members: ["finding-a", "finding-b"] },
+    { members: ["finding-c"] },
+  ]));
+
+  assert.throws(
+    () => assertCompleteConfirmDecisionCoverage(findings, [
+      { members: ["finding-a", "finding-b"] },
+    ]),
+    /decision sheet omitted 1 selected finding id.*finding-c/,
+  );
 });
 
 test("confirm bounty submit readiness requires impact inventory and closed gates", () => {
