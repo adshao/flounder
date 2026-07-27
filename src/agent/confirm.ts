@@ -264,6 +264,29 @@ export async function runConfirm(
   await logger.artifact("confirm_decision.json", rows);
   if (impactInventory) await logger.artifact(IMPACT_INVENTORY_FILE, impactInventory);
   await logger.artifact("confirm_transcript.json", { stoppedReason: result.stoppedReason, steps: result.steps });
+  if (!options.signal?.aborted) {
+    try {
+      assertCompleteConfirmDecisionCoverage(priorFindings, rows);
+    } catch (error) {
+      const missing = missingConfirmDecisionFindingIds(priorFindings, rows);
+      await logger.event("audit_confirm_incomplete", {
+        findings: priorFindings.length,
+        covered: priorFindings.length - missing.length,
+        missing: missing.length,
+        missingFindingIds: missing.slice(0, 20),
+      });
+      recorder.confirmDecisions(rows, path.join(logger.runDir, "confirm_decision.json"));
+      recorder.stage("confirm", {
+        status: "error",
+        findings: priorFindings.length,
+        rows: rows.length,
+        missingFindingIds: missing.length,
+        at: new Date().toISOString(),
+      });
+      recorder.finish("error");
+      throw error;
+    }
+  }
   await logger.artifact(
     "confirm_report.md",
     renderConfirmReport({
@@ -569,6 +592,35 @@ export interface ConfirmDecisionRow {
   patchedSuccessPatterns?: string[];
   // Set by the framework when this row is the merge of several rows a single fix neutralized.
   mergedFrom?: string[];
+}
+
+export function assertCompleteConfirmDecisionCoverage(
+  findings: Array<{ id?: unknown }>,
+  rows: Array<{ members?: unknown }>,
+): void {
+  const missing = missingConfirmDecisionFindingIds(findings, rows);
+  if (missing.length === 0) return;
+  const preview = missing.slice(0, 10).join(", ");
+  const suffix = missing.length > 10 ? `, and ${missing.length - 10} more` : "";
+  throw new Error(
+    `flounder confirm: decision sheet omitted ${missing.length} selected finding id(s): ${preview}${suffix}; every selected finding must appear in a decision members array`,
+  );
+}
+
+function missingConfirmDecisionFindingIds(
+  findings: Array<{ id?: unknown }>,
+  rows: Array<{ members?: unknown }>,
+): string[] {
+  const covered = new Set(
+    rows.flatMap((row) => Array.isArray(row.members) ? row.members : [])
+      .filter((member): member is string => typeof member === "string")
+      .map((member) => member.trim().toLowerCase())
+      .filter(Boolean),
+  );
+  return findings
+    .map((finding) => typeof finding.id === "string" ? finding.id.trim() : "")
+    .filter(Boolean)
+    .filter((id) => !covered.has(id.toLowerCase()));
 }
 
 function mergeSettledRows(rows: ConfirmDecisionRow[]): ConfirmDecisionRow[] {
