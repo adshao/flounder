@@ -10,7 +10,7 @@ import { ProjectMemory } from "../dist/agent/memory.js";
 import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedupeFindings, readScratchScopes, isReportFile, scratchHasFindings, scratchHasFindingsArtifact, commandFileArgsForTest, confirmCommandTargetLinkForTest, splitCommandLineForTest } from "../dist/agent/tools.js";
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
-import { dedupeVerifyInputs, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, resolveSatisfiedVerifyResourceRequests, runAudit, verifyBatchStoppedReason } from "../dist/agent/audit.js";
+import { dedupeVerifyInputs, digBatchStoppedReason, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, resolveSatisfiedVerifyResourceRequests, runAudit, verifyBatchStoppedReason } from "../dist/agent/audit.js";
 import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
@@ -669,6 +669,9 @@ test("run health distinguishes blocked, shallow, and coverage-incomplete runs", 
   assert.equal(buildRunHealth({ ...base, infraErrors: 1 }).status, "infra-failed");
   assert.equal(verifyBatchStoppedReason("error", 7, 7), "finished");
   assert.equal(verifyBatchStoppedReason("error", 6, 7), "error");
+  assert.equal(digBatchStoppedReason("error", true), undefined);
+  assert.equal(digBatchStoppedReason("stalled", true), undefined);
+  assert.equal(digBatchStoppedReason("error", false), "error");
 });
 
 test("Verify resolves repaired framework prepare requests after an execution verdict", () => {
