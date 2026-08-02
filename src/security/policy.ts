@@ -485,6 +485,7 @@ function isSafeGitReadOption(arg: string): boolean {
     || arg === "--no-single-branch"
     || arg === "--no-tags"
     || arg === "--no-checkout"
+    || arg === "--filter=blob:none"
     || arg === "--heads"
     || arg === "--tags"
     || arg === "--refs"
