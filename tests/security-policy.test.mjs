@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, openWorldCommandNeedsNetwork } from "../dist/security/policy.js";
+import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, openWorldCommandNeedsNetwork } from "../dist/security/policy.js";
 
 const cmd = (program, ...args) => ({ program, args });
 
@@ -152,13 +152,19 @@ test("agent bash allows readonly tool discovery, version, and local JSON inspect
     cmd("tolk-js", "--version"),
     cmd("tact", "--version"),
     cmd("forge", "--version"),
+    cmd("cargo", "tree", "-i", "solana-program"),
+    cmd("cargo", "+1.86.0", "tree", "--duplicates", "--manifest-path", "sources/protocol/Cargo.toml"),
     cmd("jq", ".", "provenance/mainnet_rpc_state_20260614.json"),
     cmd("python3", "-m", "json.tool", "provenance/mainnet_rpc_state_20260614.json"),
   ]) {
     assert.equal(analyzeAgentBashCommandSafety(c).blocked, false, `${c.program} ${c.args.join(" ")} should be readonly inspection`);
+    assert.equal(isAgentInspectionCommand(c), true, `${c.program} ${c.args.join(" ")} should use the inspection workspace`);
     assert.equal(isAgentBuildCommand(c), false, `${c.program} ${c.args.join(" ")} should not be a build command`);
     assert.equal(isAgentConfirmCommand(c), false, `${c.program} ${c.args.join(" ")} should not confirm findings`);
   }
+
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "tree", "--manifest-path", "../outside/Cargo.toml")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "metadata")).blocked, true);
 });
 
 test("agent bash allows readonly file-existence inspection tests only", () => {

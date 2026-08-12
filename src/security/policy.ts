@@ -1054,6 +1054,12 @@ function isAllowedLocalInspectionCommand(program: string, args: string[]): boole
   if (name === "pwd") return args.length === 0;
   if (name === "which") return args.length > 0 && args.every(isPlainToolName);
   if (isAllowedVersionInspection(name, args)) return true;
+  // `cargo tree` only resolves and prints dependency metadata. Auditors use it
+  // to diagnose version skew in an already prepared Rust workspace, so keep it
+  // on the read-only inspection surface and ineligible for confirmation.
+  if (name === "cargo" && cargoSubcommand(args) === "tree") {
+    return args.every((arg) => isSafeInspectionArg(name, arg));
+  }
   if (name === "scarb" && scarbSubcommand(args) === "metadata") return args.every((arg) => isSafeInspectionArg(name, arg));
   if (isAllowedJsonToolInspection(name, args)) return true;
   if (name === "test" || name === "[") return isAllowedFileTestInspection(name, args);
