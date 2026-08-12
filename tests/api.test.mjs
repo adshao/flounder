@@ -3072,11 +3072,17 @@ test("api: confirm launch carries DB-backed seeds when prior run artifact is mis
     const explicit = await json(await post(`/api/projects/${created.uuid}/runs`, {
       verb: "confirm",
       findingIds: [readyId],
+      inputRunDir: missingRunDir,
       sandboxConfirmNetwork: "none",
     }));
     const explicitJob = (await json(await fetch(base + "/api/jobs/" + explicit.jobId))).job;
     const explicitSpec = JSON.parse(explicitJob.spec_json);
     assert.equal(explicitSpec.sandboxConfirmNetwork, "none");
+    assert.equal(explicitSpec.inputRunDir, missingRunDir);
+    assert.ok(explicitSpec.confirmKeys.includes("kdbseed"));
+    assert.ok(explicitSpec.confirmKeys.includes(`origin:${readyId}:kdbseed`));
+    assert.equal(explicitSpec.confirmFindings.length, 1);
+    assert.equal(explicitSpec.confirmFindings[0].originId, readyId);
   });
 });
 
