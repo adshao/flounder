@@ -14,7 +14,7 @@ import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
 import { findingContentKey } from "../util/finding-key.js";
 import { matchConfirmSelector, parseConfirmSelectors } from "../util/confirm-selector.js";
 import { ProjectMemory } from "./memory.js";
-import { isPiSessionProvider, runAuditSession } from "./pi-session.js";
+import { isPiSessionProvider, runAuditSession, type SessionDriverResult } from "./pi-session.js";
 import { buildTools, newSession, type AgentSession, type CommandRunRecord, type FixPatch, type ToolContext } from "./tools.js";
 
 // `flounder confirm` — the open-world counterpart to the network-sealed `flounder run`. It does
@@ -266,14 +266,17 @@ export async function runConfirm(
   await logger.artifact("confirm_transcript.json", { stoppedReason: result.stoppedReason, steps: result.steps });
   if (!options.signal?.aborted) {
     try {
-      assertCompleteConfirmDecisionCoverage(priorFindings, rows);
+      assertConfirmCompletion(result, priorFindings, rows);
     } catch (error) {
       const missing = missingConfirmDecisionFindingIds(priorFindings, rows);
-      await logger.event("audit_confirm_incomplete", {
+      const sessionFailed = result.stoppedReason === "error";
+      await logger.event(sessionFailed ? "audit_confirm_session_failed" : "audit_confirm_incomplete", {
         findings: priorFindings.length,
         covered: priorFindings.length - missing.length,
         missing: missing.length,
         missingFindingIds: missing.slice(0, 20),
+        stoppedReason: result.stoppedReason,
+        error: error instanceof Error ? error.message.slice(0, 500) : String(error).slice(0, 500),
       });
       recorder.confirmDecisions(rows, path.join(logger.runDir, "confirm_decision.json"));
       recorder.stage("confirm", {
@@ -281,6 +284,7 @@ export async function runConfirm(
         findings: priorFindings.length,
         rows: rows.length,
         missingFindingIds: missing.length,
+        stoppedReason: result.stoppedReason,
         at: new Date().toISOString(),
       });
       recorder.finish("error");
@@ -592,6 +596,19 @@ export interface ConfirmDecisionRow {
   patchedSuccessPatterns?: string[];
   // Set by the framework when this row is the merge of several rows a single fix neutralized.
   mergedFrom?: string[];
+}
+
+export function assertConfirmCompletion(
+  result: Pick<SessionDriverResult, "stoppedReason" | "steps">,
+  findings: Array<{ id?: unknown }>,
+  rows: Array<{ members?: unknown }>,
+): void {
+  if (result.stoppedReason === "error") {
+    const failure = [...result.steps].reverse().find((step) => step.tool === "(session-error)" || step.tool === "(model-error)");
+    const detail = typeof failure?.observation === "string" ? failure.observation.trim().slice(0, 500) : "";
+    throw new Error(`flounder confirm: model session failed before completion${detail ? `: ${detail}` : ""}`);
+  }
+  assertCompleteConfirmDecisionCoverage(findings, rows);
 }
 
 export function assertCompleteConfirmDecisionCoverage(
