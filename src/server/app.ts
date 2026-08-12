@@ -317,7 +317,7 @@ const ROUTES: Route[] = [
     summary: "Queue project work (Run/Continue pipeline, map, audit a region/scope, verify, confirm, report, or prepare). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's primary and More actions controls.",
     params: { uuid: "project UUID" },
     body: {
-      verb: "'run' | 'map' | 'audit' | 'confirm' | 'report' | 'prepare' (default 'run'; project run = prepare-if-needed→map/dig→synthesize→verify→confirm→report; source run = map→dig→synthesize→verify)",
+      verb: "'run' | 'map' | 'audit' | 'verify' | 'confirm' | 'report' | 'prepare' (default 'run'; verify is a project API alias for audit + verifyFindings; project run = prepare-if-needed→map/dig→synthesize→verify→confirm→report; source run = map→dig→synthesize→verify)",
       remap: "boolean? — re-enumerate scopes (restart)", appendMap: "boolean? — expand the existing scope inventory by appending novel scopes", appendMapSeedPaths: "string[]? — extra prior scope inventories used only as append-map covered-reference seed", fresh: "boolean? — confirm: ignore a prior interrupted confirm",
       quick: "boolean? — run: single breadth pass", mockLlm: "boolean? — offline mock model",
       verifyFromStart: "boolean? — run/continue pipeline: re-run Verify from the beginning instead of only pending candidates",
@@ -328,8 +328,8 @@ const ROUTES: Route[] = [
       scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run; standard means audit until the project has 30 audited scopes; pass continueCoverage:true to explicitly start another scope batch after verify/confirm/report are settled. Bug-bounty contest projects default to short custom batches unless overridden.",
       maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", mapSamples: "number? — independent Map inventories to union without dropping singleton scopes", digSteps: "number? — one-off per-scope dig turn cap",
       maxSteps: "number? — one-off global turn cap", digSamples: "number? — minimum independent samples per scope", digMaxSamples: "number? — adaptive per-scope sample ceiling", adaptiveDig: "boolean? — add bounded samples only for incomplete/uncertain outcomes", eagerPrepare: "boolean? — warm the build before Dig and surface repairable resource blockers", digConcurrency: "number? — one-off parallel scopes", verifyConcurrency: "number? — one-off parallel Verify findings (isolated workspaces)",
-      findingId: "number? — confirm/report: reproduce or report one selected finding",
-      findingIds: "number[]? — confirm/report: reproduce selected pending or explicitly reopened audit-confirmed findings, or generate/regenerate formal reports for selected reproduced findings. Report without selection only generates missing reports.",
+      findingId: "number? — verify/confirm/report: verify, reproduce, or report one selected finding",
+      findingIds: "number[]? — verify: resolve selected project findings into verifyFindings; confirm/report: reproduce selected pending or explicitly reopened audit-confirmed findings, or generate/regenerate formal reports for selected reproduced findings. Report without selection only generates missing reports.",
       inputRunDir: "string? — confirm: the finished run dir to reproduce",
       clue: "string? — prepare: the tx / address / project / link to acquire from",
       posture: "string? — prepare: 'blind' | 'informed'", matchDeployed: "boolean? — prepare: prove staged source matches the live deployment (default true)", endpoint: "string? — prepare: read-only access hint (e.g. RPC URL)",
@@ -2494,7 +2494,39 @@ async function runLaunch(c: Ctx): Promise<void> {
   const uuid = c.params.uuid ?? "";
   const project = c.store.getProjectByRef(uuid);
   if (!project) return sendJson(c.res, 404, { error: `no project with uuid ${uuid}` });
-  const body = (await readBody(c.req)) as Record<string, unknown>;
+  const body = { ...((await readBody(c.req)) as Record<string, unknown>) };
+  const requestedVerb = typeof body.verb === "string" && body.verb.trim() ? body.verb.trim() : "run";
+  if (!["run", "map", "audit", "verify", "confirm", "report", "prepare"].includes(requestedVerb)) {
+    return sendJson(c.res, 400, { error: "verb must be one of run | map | audit | verify | confirm | report | prepare" });
+  }
+  body.verb = requestedVerb;
+  const selectedIds = selectedFindingIds(body);
+  if (requestedVerb === "verify") {
+    if (body.verifyFindings === undefined) {
+      if (selectedIds.length === 0) {
+        return sendJson(c.res, 400, { error: "verify requires findingId/findingIds or verifyFindings" });
+      }
+      const missing = selectedIds.filter((id) => {
+        const finding = c.store.getFinding(id);
+        return !finding || Number(finding.project_id) !== Number(project.id);
+      });
+      if (missing.length > 0) {
+        return sendJson(c.res, 400, { error: `finding ${missing.join(", ")} is outside this project or no longer present` });
+      }
+      body.verifyFindings = selectedIds.map((id) => ({ id }));
+    }
+    // Verify remains the existing sealed audit verifier internally. Normalize the friendly API
+    // alias before coverage defaults are computed so it cannot fall through to a broad Dig run.
+    body.verb = "audit";
+  } else if (requestedVerb === "audit" && body.verifyFindings === undefined && selectedIds.length > 0) {
+    return sendJson(c.res, 400, {
+      error: "findingId/findingIds do not select an audit scope; use verb 'verify' or pass verifyFindings",
+    });
+  } else if (selectedIds.length > 0 && requestedVerb !== "confirm" && requestedVerb !== "report") {
+    return sendJson(c.res, 400, {
+      error: "findingId/findingIds are only valid with verify, confirm, or report",
+    });
+  }
   const profile = project.provider_id != null ? c.store.getProvider(Number(project.provider_id)) : undefined;
   const phaseProfiles = phaseProviderProfiles(project, c.store);
   const projectId = Number(project.id);

@@ -1569,6 +1569,46 @@ test("api: verify launch links project finding rows back to the original finding
     assert.equal(idSpec.verifyFindings[0].title, "Proof input is not bound");
     assert.equal(idSpec.verifyFindings[0].location, "src/Rollup.sol:44");
 
+    const launchedByAlias = await json(await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "verify",
+      findingIds: [finding.id],
+    }));
+    const aliasJob = (await json(await fetch(base + "/api/jobs/" + launchedByAlias.jobId))).job;
+    const aliasSpec = JSON.parse(aliasJob.spec_json);
+    assert.equal(aliasSpec.verb, "audit");
+    assert.equal(aliasSpec.verifyFindings.length, 1);
+    assert.equal(aliasSpec.verifyFindings[0].id, finding.id);
+    assert.equal(aliasSpec.verifyFindings[0].originId, finding.id);
+
+    const missingAliasSelection = await post(`/api/projects/${created.uuid}/runs`, { verb: "verify" });
+    assert.equal(missingAliasSelection.status, 400);
+    assert.match((await json(missingAliasSelection)).error, /requires findingId\/findingIds or verifyFindings/);
+
+    const wrongProjectAlias = await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "verify",
+      findingIds: [finding.id + 9999],
+    });
+    assert.equal(wrongProjectAlias.status, 400);
+    assert.match((await json(wrongProjectAlias)).error, /outside this project or no longer present/);
+
+    const ambiguousAuditSelection = await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "audit",
+      findingIds: [finding.id],
+    });
+    assert.equal(ambiguousAuditSelection.status, 400);
+    assert.match((await json(ambiguousAuditSelection)).error, /use verb 'verify'/);
+
+    const ignoredRunSelection = await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "run",
+      findingIds: [finding.id],
+    });
+    assert.equal(ignoredRunSelection.status, 400);
+    assert.match((await json(ignoredRunSelection)).error, /only valid with verify, confirm, or report/);
+
+    const invalidVerb = await post(`/api/projects/${created.uuid}/runs`, { verb: "verfiy" });
+    assert.equal(invalidVerb.status, 400);
+    assert.match((await json(invalidVerb)).error, /verb must be one of/);
+
     const invalidOrigin = await post(`/api/projects/${created.uuid}/runs`, {
       verb: "audit",
       verifyFindings: [{ originId: String(finding.id), title: finding.title, location: finding.location }],
