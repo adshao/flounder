@@ -2638,7 +2638,7 @@ async function runLaunch(c: Ctx): Promise<void> {
   // Confirm is finding-grained + resumable, but its distinct-bug consolidation must see the
   // full current confirmed-finding context. The pending rows decide whether there is work to do;
   // the context rows decide what the confirm agent can consolidate against across batches.
-  if (spec.verb === "confirm" && !spec.inputRunDir && !(spec.inputRunDirs && spec.inputRunDirs.length > 0)) {
+  if (spec.verb === "confirm") {
     const findingIds = selectedFindingIds(body);
     if (findingIds.length > 0) {
       const retryContext = new Map(c.store.confirmableContext(Number(project.id)).map((row) => [Number(row.id), row]));
@@ -2680,7 +2680,7 @@ async function runLaunch(c: Ctx): Promise<void> {
       // A focused retry is an explicit request to replace the old blocked decision. Without
       // fresh mode runConfirm may load that decision from a prior artifact and treat it as settled.
       if (selected.some((entry) => entry.reopened)) spec.fresh = true;
-    } else {
+    } else if (!spec.inputRunDir && !(spec.inputRunDirs && spec.inputRunDirs.length > 0)) {
       const currentDecisions = currentConfirmDecisions(c.store.listConfirmDecisions(Number(project.id)).filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary)));
       const pending = confirmWorkRows(c.store, Number(project.id), currentResultRunIds, materialBoundary, currentDecisions);
       if (pending.length === 0) return sendJson(c.res, 400, { error: "nothing to confirm — every audit-confirmed finding already has a real-target decision (use --fresh to redo)" });
