@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, readFile, stat, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { providerAuthPath, providerAuthStatus } from "../dist/provider-auth.js";
+import { loginProvider, providerAuthPath, providerAuthStatus } from "../dist/provider-auth.js";
 
 test("provider auth imports an existing pi provider credential into the Flounder agent dir", async () => {
   const root = await mkdtemp(path.join(os.tmpdir(), "flounder-provider-auth-"));
@@ -27,6 +27,41 @@ test("provider auth imports an existing pi provider credential into the Flounder
     const copied = JSON.parse(await readFile(authPath, "utf8"));
     assert.deepEqual(copied, { "openai-codex": credential });
     assert.equal((await stat(authPath)).mode & 0o777, 0o600);
+  } finally {
+    restoreEnv("FLOUNDER_AGENT_DIR", oldFlounderAgentDir);
+    restoreEnv("PI_AGENT_DIR", oldPiAgentDir);
+  }
+});
+
+test("explicit provider login refreshes an existing Flounder credential from pi auth", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "flounder-provider-auth-refresh-"));
+  const flounderAgent = path.join(root, "flounder-agent");
+  const piAgent = path.join(root, "pi-agent");
+  await mkdir(flounderAgent, { recursive: true });
+  await mkdir(piAgent, { recursive: true });
+  const staleCredential = { type: "oauth", access: "stale", refresh: "stale" };
+  const freshCredential = { type: "oauth", access: "fresh", refresh: "fresh" };
+  const unrelatedCredential = { type: "oauth", subject: "keep-me" };
+  await writeFile(
+    path.join(flounderAgent, "auth.json"),
+    JSON.stringify({ "openai-codex": staleCredential, anthropic: unrelatedCredential }),
+    "utf8",
+  );
+  await writeFile(path.join(piAgent, "auth.json"), JSON.stringify({ "openai-codex": freshCredential }), "utf8");
+
+  const oldFlounderAgentDir = process.env.FLOUNDER_AGENT_DIR;
+  const oldPiAgentDir = process.env.PI_AGENT_DIR;
+  process.env.FLOUNDER_AGENT_DIR = flounderAgent;
+  process.env.PI_AGENT_DIR = piAgent;
+  try {
+    await loginProvider("openai-codex");
+
+    const copied = JSON.parse(await readFile(providerAuthPath(), "utf8"));
+    assert.deepEqual(copied, {
+      "openai-codex": freshCredential,
+      anthropic: unrelatedCredential,
+    });
+    assert.equal((await stat(providerAuthPath())).mode & 0o777, 0o600);
   } finally {
     restoreEnv("FLOUNDER_AGENT_DIR", oldFlounderAgentDir);
     restoreEnv("PI_AGENT_DIR", oldPiAgentDir);

@@ -126,7 +126,7 @@ export async function assertProviderAuthenticated(provider: string): Promise<voi
 
 export async function loginProvider(provider: string): Promise<void> {
   const normalized = provider.trim();
-  const importedFrom = await importDefaultPiAuth(normalized, providerAuthPath());
+  const importedFrom = await importDefaultPiAuth(normalized, providerAuthPath(), { overwrite: true });
   if (importedFrom) {
     console.log(`${normalized} credentials imported from existing pi auth (${importedFrom}) into ${providerAuthPath()}.`);
     return;
@@ -193,7 +193,11 @@ async function hasStoredAuth(provider: string, authPath: string): Promise<boolea
   return Boolean(auth[provider]);
 }
 
-async function importDefaultPiAuth(provider: string, authPath: string): Promise<string | undefined> {
+async function importDefaultPiAuth(
+  provider: string,
+  authPath: string,
+  options: { overwrite?: boolean } = {},
+): Promise<string | undefined> {
   if (process.env.FLOUNDER_DISABLE_PI_AUTH_IMPORT === "1") return undefined;
   const piAuthPath = defaultPiAuthPath();
   if (piAuthPath === authPath || !existsSync(piAuthPath)) return undefined;
@@ -203,7 +207,7 @@ async function importDefaultPiAuth(provider: string, authPath: string): Promise<
 
   await mkdir(dirname(authPath), { recursive: true });
   const auth = await readAuthFile(authPath);
-  if (!auth[provider]) {
+  if (options.overwrite || !auth[provider]) {
     auth[provider] = entry;
     await writeFile(authPath, JSON.stringify(auth, null, 2), { encoding: "utf8", mode: 0o600 });
     await chmod(authPath, 0o600).catch(() => undefined);
