@@ -22,6 +22,29 @@ export const BUG_BOUNTY_KIND = "bug-bounty";
 export const DEFAULT_CONTEST_BATCH_SCOPES = 10;
 export const DEFAULT_CONTEST_DIG_CONCURRENCY = 5;
 
+export function projectBadgeStatus(project: ProjectSnapshot): string | null | undefined {
+  const latest = project.latestRun?.status;
+  if ((project.activeRuns ?? 0) > 0 || latest === "running") return "running";
+  if ((project.queuedRuns ?? 0) > 0) return "queued";
+  if (latest === "error" || latest === "killed") return latest;
+  const total = project.progress?.total ?? 0;
+  const pending = project.progress?.pending ?? 0;
+  if (total > 0 && pending > 0) return "partial";
+  if ((project.verifyPendingFindings ?? 0) > 0 || (project.confirmPendingFindings ?? 0) > 0) return "partial";
+  if (total > 0 || (project.findingsTotal ?? 0) > 0 || (project.reproducedBugs ?? 0) > 0 || (project.confirmedBugs ?? 0) > 0) return "done";
+  return latest ?? (total > 0 ? "done" : undefined);
+}
+
+export function activeJobCounts(jobs: Array<{ status?: unknown }>): { running: number; queued: number } {
+  let running = 0;
+  let queued = 0;
+  for (const job of jobs) {
+    if (job.status === "running" || job.status === "dispatched") running += 1;
+    else if (job.status === "queued") queued += 1;
+  }
+  return { running, queued };
+}
+
 /** Activity is plain text in the product UI. Remove transport-only model markers
  * instead of exposing HTML comments and raw Markdown emphasis to operators. */
 export function normalizeActivityBody(value: string): string {

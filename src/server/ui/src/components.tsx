@@ -39,9 +39,10 @@ export function Counter({ children, live }: { children: ReactNode; live?: boolea
 }
 
 export function StateBadge({ status }: { status?: string | null }) {
-  const cls = ["running", "done", "partial", "error", "killed"].includes(status ?? "") ? status : "none";
+  const cls = ["running", "queued", "done", "partial", "error", "killed"].includes(status ?? "") ? status : "none";
   const label = {
     running: "Running",
+    queued: "Queued",
     done: "Done",
     partial: "Partial",
     error: "Error",

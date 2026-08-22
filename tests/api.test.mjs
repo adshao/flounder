@@ -208,6 +208,7 @@ test("api: project list supports archive, unarchive, pin, and manual order", asy
     assert.equal(list.statusCounts.all, 3);
     assert.equal(list.statusCounts["not-started"], 3);
     assert.equal(list.statusCounts.running, 0);
+    assert.equal(list.statusCounts.queued, 0);
 
     const notStarted = await json(await fetch(base + "/api/projects?status=not-started&limit=2"));
     assert.deepEqual(notStarted.projects.map((project) => project.name), ["gamma", "beta"]);
@@ -265,6 +266,38 @@ test("api: project list supports archive, unarchive, pin, and manual order", asy
     assert.equal((await deleteReq(`/api/projects/${archivedDelete.uuid}`)).status, 200);
     archived = await json(await fetch(base + "/api/projects?archived=1"));
     assert.deepEqual(archived.projects, []);
+  });
+});
+
+test("api: project snapshots distinguish queued work from executor-held work", async () => {
+  await withServer(async (base, out) => {
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const runningProject = await (await post("/api/projects", { name: "running-project", sourcePaths: ["./src"] })).json();
+    const queuedProject = await (await post("/api/projects", { name: "queued-project", sourcePaths: ["./src"] })).json();
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const daemon = store.createDaemonToken("snapshot-status-daemon");
+      const runningJobId = store.enqueueJob(runningProject.name, { verb: "audit" }, daemon.id);
+      assert.equal(store.claimJob(daemon.id)?.id, runningJobId);
+      store.enqueueJob(queuedProject.name, { verb: "audit" }, daemon.id);
+    } finally {
+      store.close();
+    }
+
+    const list = await (await fetch(base + "/api/projects")).json();
+    const runningSnapshot = list.projects.find((project) => project.uuid === runningProject.uuid);
+    const queuedSnapshot = list.projects.find((project) => project.uuid === queuedProject.uuid);
+    assert.equal(runningSnapshot.activeRuns, 1);
+    assert.equal(runningSnapshot.queuedRuns, 0);
+    assert.equal(queuedSnapshot.activeRuns, 0);
+    assert.equal(queuedSnapshot.queuedRuns, 1);
+    assert.equal(list.statusCounts.running, 1);
+    assert.equal(list.statusCounts.queued, 1);
+
+    const running = await (await fetch(base + "/api/projects?status=running")).json();
+    const queued = await (await fetch(base + "/api/projects?status=queued")).json();
+    assert.deepEqual(running.projects.map((project) => project.uuid), [runningProject.uuid]);
+    assert.deepEqual(queued.projects.map((project) => project.uuid), [queuedProject.uuid]);
   });
 });
 
@@ -1928,7 +1961,8 @@ test("api: launching prepare clears the current scope inventory projection", asy
     assert.equal(snapshot.findingsTotal, 0);
     assert.equal(snapshot.reproducedBugs, 0);
     assert.equal(snapshot.confirmDecisionCount, 0);
-    assert.equal(snapshot.activeRuns, 1);
+    assert.equal(snapshot.activeRuns, 0);
+    assert.equal(snapshot.queuedRuns, 1);
     assert.equal(snapshot.latestRun, null);
   });
 });

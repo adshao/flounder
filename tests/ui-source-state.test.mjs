@@ -18,10 +18,23 @@ async function loadTsModule(relativePath) {
   return import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`);
 }
 
-const { bugBountyEngagementLabel, contestReviewState, decisionHasUnresolvedEvidenceConflict, hasUnresolvedEvidenceConflict, isVerifyRun, normalizeActivityBody, pendingConfirmFindings, splitActivitySummaries, phaseState, projectSourceState, reportableDecisions, reportableFindings, runProgress, sortConfirmDecisionsForSubmission } = await loadTsModule("../src/server/ui/src/domain.ts");
+const { activeJobCounts, bugBountyEngagementLabel, contestReviewState, decisionHasUnresolvedEvidenceConflict, hasUnresolvedEvidenceConflict, isVerifyRun, normalizeActivityBody, pendingConfirmFindings, splitActivitySummaries, phaseState, projectBadgeStatus, projectSourceState, reportableDecisions, reportableFindings, runProgress, sortConfirmDecisionsForSubmission } = await loadTsModule("../src/server/ui/src/domain.ts");
 const { nextDialogFocusIndex } = await loadTsModule("../src/server/ui/src/dialog-focus.ts");
 const appSource = readFileSync(new URL("../src/server/ui/src/App.tsx", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("../src/server/ui/src/styles.css", import.meta.url), "utf8");
+
+test("ui: queued work stays distinct from running work", () => {
+  assert.equal(projectBadgeStatus({ uuid: "queued", name: "Queued", activeRuns: 0, queuedRuns: 1 }), "queued");
+  assert.equal(projectBadgeStatus({ uuid: "running", name: "Running", activeRuns: 1, queuedRuns: 2 }), "running");
+  assert.deepEqual(activeJobCounts([
+    { status: "running" },
+    { status: "dispatched" },
+    { status: "queued" },
+    { status: "done" },
+  ]), { running: 2, queued: 1 });
+  assert.match(appSource, /queued > 0 \? <Counter>\{`\$\{queued\} queued`\}<\/Counter>/);
+  assert.match(stylesSource, /\.project-status-icon\.queued/);
+});
 
 test("ui: modal focus traversal wraps in both directions", () => {
   assert.equal(nextDialogFocusIndex(0, 3, false), 1);
