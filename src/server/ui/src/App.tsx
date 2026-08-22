@@ -32,6 +32,7 @@ import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge, useD
 import { EvaluationsWorkspace } from "./EvaluationsView";
 import {
   activeFindings,
+  activeJobCounts,
   bugBountyEngagementLabel,
   confirmedDecisions,
   contestReviewState,
@@ -59,6 +60,7 @@ import {
   splitActivitySummaries,
   localVerifiedFindings,
   pendingConfirmFindings,
+  projectBadgeStatus,
   pendingDecisionReports,
   pendingFormalReports,
   pendingVerifyFindings,
@@ -379,6 +381,7 @@ function normalizeProjectStatusCounts(value: Partial<ProjectStatusCounts> | unde
   return {
     all: value?.all ?? total,
     running: value?.running ?? 0,
+    queued: value?.queued ?? 0,
     "needs-work": value?.["needs-work"] ?? 0,
     done: value?.done ?? 0,
     failed: value?.failed ?? 0,
@@ -389,6 +392,7 @@ function normalizeProjectStatusCounts(value: Partial<ProjectStatusCounts> | unde
 function projectFilterStatus(project: ProjectSnapshot): ProjectStatusFilter {
   const status = projectBadgeStatus(project);
   if (status === "running") return "running";
+  if (status === "queued") return "queued";
   if (status === "partial") return "needs-work";
   if (status === "done") return "done";
   if (status === "error" || status === "killed") return "failed";
@@ -751,18 +755,6 @@ function coverageCapText(mode: CoverageMode, maxScopes: string): string {
   return maxScopes;
 }
 
-function projectBadgeStatus(project: ProjectSnapshot): string | null | undefined {
-  const latest = project.latestRun?.status;
-  if ((project.activeRuns ?? 0) > 0 || latest === "running") return "running";
-  if (latest === "error" || latest === "killed") return latest;
-  const total = project.progress?.total ?? 0;
-  const pending = project.progress?.pending ?? 0;
-  if (total > 0 && pending > 0) return "partial";
-  if ((project.verifyPendingFindings ?? 0) > 0 || (project.confirmPendingFindings ?? 0) > 0) return "partial";
-  if (total > 0 || (project.findingsTotal ?? 0) > 0 || (project.reproducedBugs ?? 0) > 0 || (project.confirmedBugs ?? 0) > 0) return "done";
-  return latest ?? (total > 0 ? "done" : undefined);
-}
-
 function phaseLabel(phase: ProjectPhase): string {
   return {
     prepare: "Prepare",
@@ -790,6 +782,7 @@ function phaseIcon(phase: ProjectPhase): IconName {
 function phaseStatusLabel(status: string): string {
   return {
     running: "Running",
+    queued: "Queued",
     done: "Done",
     partial: "Partial",
     pending: "Pending",
@@ -814,6 +807,7 @@ function projectStatusTitle(project: ProjectSnapshot): string {
   const latest = project.latestRun?.status;
   const latestContext = latest === "error" ? " The latest run failed; inspect its log if this was unexpected." : latest === "killed" ? " The latest run was stopped; recorded progress is kept." : "";
   if (status === "running") return `${label}: a run is active for this project.`;
+  if (status === "queued") return `${label}: work is waiting for an executor.`;
   if (status === "partial") return `${label}: coverage, verification, or confirmation work remains.${latestContext}`;
   if (status === "done") return `${label}: no active run and current workflow has completed.${latestContext}`;
   if (status === "error") return `${label}: the latest run failed.`;
@@ -824,6 +818,7 @@ function projectStatusTitle(project: ProjectSnapshot): string {
 function projectStatusIcon(project: ProjectSnapshot): IconName {
   const status = projectBadgeStatus(project);
   if (status === "running") return "sync";
+  if (status === "queued") return "clock";
   if (status === "done") return "shieldcheck";
   if (status === "partial") return "clock";
   if (status === "error" || status === "killed") return "x";
@@ -1007,6 +1002,7 @@ const PROJECT_PAGE_SIZE = 100;
 const PROJECT_STATUS_OPTIONS: Array<{ value: ProjectStatusFilter; label: string }> = [
   { value: "all", label: "All" },
   { value: "running", label: "Running" },
+  { value: "queued", label: "Queued" },
   { value: "needs-work", label: "Needs work" },
   { value: "done", label: "Done" },
   { value: "failed", label: "Failed" },
@@ -1015,6 +1011,7 @@ const PROJECT_STATUS_OPTIONS: Array<{ value: ProjectStatusFilter; label: string 
 const EMPTY_PROJECT_STATUS_COUNTS: ProjectStatusCounts = {
   all: 0,
   running: 0,
+  queued: 0,
   "needs-work": 0,
   done: 0,
   failed: 0,
@@ -1640,7 +1637,8 @@ export function App() {
   const [projectStatusCounts, setProjectStatusCounts] = useState<ProjectStatusCounts>(EMPTY_PROJECT_STATUS_COUNTS);
   const [projectLoading, setProjectLoading] = useState(false);
   const [archivedProjectLoading, setArchivedProjectLoading] = useState(false);
-  const [activeJobsTotal, setActiveJobsTotal] = useState(0);
+  const [activeRunningJobsTotal, setActiveRunningJobsTotal] = useState(0);
+  const [queuedJobsTotal, setQueuedJobsTotal] = useState(0);
   const [maintainerMode, setMaintainerMode] = useState(false);
   const [detail, setDetail] = useState<ProjectDetail | null>(null);
   const [providers, setProviders] = useState<ProviderProfile[]>([]);
@@ -1844,7 +1842,9 @@ export function App() {
     : projects;
   const onlineDaemons = daemons.filter((daemon) => daemonHealth(daemon) === "online");
   const loadedRunning = projects.reduce((n, project) => n + (project.activeRuns ?? (project.latestRun?.status === "running" ? 1 : 0)), 0);
-  const latestRunning = Math.max(activeJobsTotal, loadedRunning);
+  const loadedQueued = projects.reduce((n, project) => n + (project.queuedRuns ?? 0), 0);
+  const latestRunning = Math.max(activeRunningJobsTotal, loadedRunning);
+  const latestQueued = Math.max(queuedJobsTotal, loadedQueued);
   const visibleRunningRun = detail?.runs.some((run) => run.status === "running") ?? false;
   const emptyProjectListTitle = projectQuery.trim() && projects.length === 0
     ? "No matching projects"
@@ -1867,8 +1867,12 @@ export function App() {
     const source = new EventSource("/api/stream");
     source.onmessage = (message) => {
       try {
-        const payload = JSON.parse(message.data) as { projects?: ProjectSnapshot[]; active?: unknown[] };
-        if (Array.isArray(payload.active)) setActiveJobsTotal(payload.active.length);
+        const payload = JSON.parse(message.data) as { projects?: ProjectSnapshot[]; active?: Array<{ status?: unknown }> };
+        if (Array.isArray(payload.active)) {
+          const counts = activeJobCounts(payload.active);
+          setActiveRunningJobsTotal(counts.running);
+          setQueuedJobsTotal(counts.queued);
+        }
         if (Array.isArray(payload.projects)) {
           const filtersActive = Boolean(projectQuery.trim()) || projectStatusFilter !== "all";
           const incoming = projectStatusFilter === "all" ? payload.projects : payload.projects.filter((project) => projectMatchesStatusFilter(project, projectStatusFilter));
@@ -2165,6 +2169,7 @@ export function App() {
       <ShellHeader
         route={route}
         running={latestRunning}
+        queued={latestQueued}
         onTheme={() => {
           localStorage.setItem("flounder-theme-explicit", "1");
           setTheme(theme === "dark" ? "light" : "dark");
@@ -2174,7 +2179,7 @@ export function App() {
         theme={theme}
       />
       <StorageWarningBanner />
-      {mobileMenuOpen ? <MobileMenu route={route} running={latestRunning} theme={theme} onClose={() => setMobileMenuOpen(false)} onTheme={() => {
+      {mobileMenuOpen ? <MobileMenu route={route} running={latestRunning} queued={latestQueued} theme={theme} onClose={() => setMobileMenuOpen(false)} onTheme={() => {
         localStorage.setItem("flounder-theme-explicit", "1");
         setTheme(theme === "dark" ? "light" : "dark");
       }} /> : null}
@@ -2380,7 +2385,7 @@ export function App() {
   );
 }
 
-function ShellHeader({ route, running, theme, onTheme, onCommands, onMenu }: { route: RouteState; running: number; theme: string; onTheme: () => void; onCommands: () => void; onMenu: () => void }) {
+function ShellHeader({ route, running, queued, theme, onTheme, onCommands, onMenu }: { route: RouteState; running: number; queued: number; theme: string; onTheme: () => void; onCommands: () => void; onMenu: () => void }) {
   return (
     <header className="topbar">
       <button className="brand" onClick={() => go("/")} aria-label="Go to projects">
@@ -2393,6 +2398,7 @@ function ShellHeader({ route, running, theme, onTheme, onCommands, onMenu }: { r
       </nav>
       <div className="topbar-spacer" />
       {running > 0 ? <Counter live>{`${running} running`}</Counter> : null}
+      {queued > 0 ? <Counter>{`${queued} queued`}</Counter> : null}
       <IconButton icon="search" title="Commands (Cmd-K)" aria-label="Commands" onClick={onCommands} />
       <IconButton className="desktop-tool" icon="gear" title="Settings" aria-label="Settings" selected={route.view === "settings"} onClick={() => go("/settings")} />
       <IconButton className="desktop-tool" icon={theme === "dark" ? "sun" : "moon"} title="Toggle theme" aria-label="Toggle theme" onClick={onTheme} />
@@ -2401,7 +2407,7 @@ function ShellHeader({ route, running, theme, onTheme, onCommands, onMenu }: { r
   );
 }
 
-function MobileMenu({ route, running, theme, onClose, onTheme }: { route: RouteState; running: number; theme: string; onClose: () => void; onTheme: () => void }) {
+function MobileMenu({ route, running, queued, theme, onClose, onTheme }: { route: RouteState; running: number; queued: number; theme: string; onClose: () => void; onTheme: () => void }) {
   const { dialogRef, onDialogKeyDown } = useDialogFocus(onClose);
   const navigate = (pathname: string) => {
     go(pathname);
@@ -2415,6 +2421,7 @@ function MobileMenu({ route, running, theme, onClose, onTheme }: { route: RouteS
           <IconButton icon="x" title="Close" aria-label="Close menu" onClick={onClose} />
         </div>
         {running > 0 ? <Counter live>{`${running} running`}</Counter> : null}
+        {queued > 0 ? <Counter>{`${queued} queued`}</Counter> : null}
         <button className={route.view === "projects" ? "sel" : ""} onClick={() => navigate(route.projectUuid ? projectPath(route.projectUuid) : "/")}>Projects</button>
         <button className={route.view === "findings" ? "sel" : ""} onClick={() => navigate("/findings")}>Findings</button>
         <button className={route.view === "evaluations" ? "sel" : ""} onClick={() => navigate(route.evaluationUuid ? `/evaluations/${encodeURIComponent(route.evaluationUuid)}` : "/evaluations")}>Evaluations</button>

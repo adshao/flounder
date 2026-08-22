@@ -41,6 +41,7 @@ export interface ProjectSnapshot {
   confirmPendingFindings?: number;
   confirmDecisionCount?: number;
   activeRuns?: number;
+  queuedRuns?: number;
   currentRunCount?: number;
   runCount?: number;
   latestRun?: RunRow | null;
@@ -97,7 +98,7 @@ export interface ProjectStorageCleanupResult {
   databasePreserved: true;
 }
 
-export type ProjectStatusFilter = "all" | "running" | "needs-work" | "done" | "failed" | "not-started";
+export type ProjectStatusFilter = "all" | "running" | "queued" | "needs-work" | "done" | "failed" | "not-started";
 export type ProjectStatusCounts = Record<ProjectStatusFilter, number>;
 
 export interface ProjectRow {
