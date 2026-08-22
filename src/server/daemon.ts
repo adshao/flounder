@@ -37,6 +37,96 @@ export interface DaemonOptions {
 
 type Activity = { kind: string; delta?: string; tool?: string; step?: number; streamId?: string };
 
+type DaemonJob = { id: number; project: string; spec: LaunchSpec };
+const TERMINAL_RETRY_INITIAL_DELAY_MS = 250;
+const TERMINAL_RETRY_MAX_DELAY_MS = 5_000;
+const TERMINAL_REQUEST_TIMEOUT_MS = 10_000;
+const TERMINAL_RETRY_LOG_INTERVAL = 12;
+
+export function createSerializedClaimLoop<T>(options: {
+  maxConcurrent: number;
+  activeCount: () => number;
+  claim: () => Promise<T | undefined>;
+  start: (job: T) => void;
+}): () => Promise<void> {
+  let running: Promise<void> | undefined;
+  let requested = false;
+
+  const trigger = (): Promise<void> => {
+    requested = true;
+    if (running) return running;
+
+    const current = (async () => {
+      do {
+        requested = false;
+        while (options.activeCount() < options.maxConcurrent) {
+          const job = await options.claim();
+          if (!job) break;
+          options.start(job);
+        }
+      } while (requested && options.activeCount() < options.maxConcurrent);
+    })().finally(() => {
+      if (running === current) running = undefined;
+      if (requested) void trigger();
+    });
+    running = current;
+    return current;
+  };
+
+  return trigger;
+}
+
+export async function requestUntilAccepted(
+  method: "POST" | "PATCH",
+  base: string,
+  headers: Record<string, string>,
+  requestPath: string,
+  body: unknown,
+  options: {
+    fetchImpl?: typeof fetch;
+    sleep?: (delayMs: number) => Promise<void>;
+    initialDelayMs?: number;
+    maxDelayMs?: number;
+    requestTimeoutMs?: number;
+    onRetry?: (attempt: number, status: number | undefined) => void;
+  } = {},
+): Promise<void> {
+  const fetchImpl = options.fetchImpl ?? fetch;
+  const sleep = options.sleep ?? ((delayMs: number) => new Promise<void>((resolve) => setTimeout(resolve, delayMs)));
+  const maxDelayMs = Math.max(1, options.maxDelayMs ?? TERMINAL_RETRY_MAX_DELAY_MS);
+  const requestTimeoutMs = Math.max(1, options.requestTimeoutMs ?? TERMINAL_REQUEST_TIMEOUT_MS);
+  let delayMs = Math.max(1, options.initialDelayMs ?? TERMINAL_RETRY_INITIAL_DELAY_MS);
+  let attempt = 0;
+
+  for (;;) {
+    attempt += 1;
+    const controller = new AbortController();
+    const timeout = setTimeout(() => controller.abort(), requestTimeoutMs);
+    const response = await fetchImpl(base + requestPath, {
+      method,
+      headers,
+      body: JSON.stringify(body),
+      signal: controller.signal,
+    }).catch(() => null).finally(() => clearTimeout(timeout));
+    if (response?.ok) return;
+    options.onRetry?.(attempt, response?.status);
+    await sleep(delayMs);
+    delayMs = Math.min(maxDelayMs, delayMs * 2);
+  }
+}
+
+export async function completeDaemonJobHandoff(options: {
+  flushRunState: () => Promise<void>;
+  deliverJobState: () => Promise<void>;
+  release: () => void;
+  scheduleClaim: () => void;
+}): Promise<void> {
+  await options.flushRunState();
+  await options.deliverJobState();
+  options.release();
+  options.scheduleClaim();
+}
+
 let defaultSandboxBuild: Promise<SandboxImageBuildResult> | undefined;
 
 export async function runDaemon(opts: DaemonOptions): Promise<void> {
@@ -70,17 +160,7 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
   setInterval(heartbeat, 10_000);
   heartbeat();
 
-  const claimLoop = async (): Promise<void> => {
-    while (inflight.size < maxConcurrent) {
-      const res = await fetch(base + "/api/daemon/claim", { method: "POST", headers }).catch(() => null);
-      if (!res || !res.ok) return;
-      const data = (await res.json().catch(() => ({}))) as { job?: { id: number; project: string; spec: LaunchSpec } };
-      if (!data.job) return;
-      void runJob(data.job);
-    }
-  };
-
-  const runJob = async (job: { id: number; project: string; spec: LaunchSpec }): Promise<void> => {
+  const runJob = async (job: DaemonJob): Promise<void> => {
     const abort = new AbortController();
     inflight.set(job.id, abort);
     heartbeat();
@@ -99,6 +179,8 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
       sink.flush();
       await tracker?.flush();
     };
+    let terminal: "done" | "error" | "canceled";
+    let terminalError: string | undefined;
     try {
       const cfg = specToConfig(spec, out, workspace);
       if (spec.mockLlm) {
@@ -150,22 +232,45 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
           if (verifyTempDir) await rm(verifyTempDir, { recursive: true, force: true });
         }
       }
-      await flushTracker();
-      const terminal = daemonJobTerminalState(trackers.map((item) => item.terminalState()), abort.signal.aborted);
-      await post(base, headers, `/api/daemon/jobs/${job.id}/status`, {
-        status: terminal,
-        ...(terminal === "error" ? { error: trackers.find((item) => item.terminalState() === "error")?.errorSummary() ?? "one or more run phases finished with status error" } : {}),
-      });
+      terminal = daemonJobTerminalState(trackers.map((item) => item.terminalState()), abort.signal.aborted);
+      if (terminal === "error") terminalError = trackers.find((item) => item.terminalState() === "error")?.errorSummary() ?? "one or more run phases finished with status error";
     } catch (error) {
-      await flushTracker();
-      await post(base, headers, `/api/daemon/jobs/${job.id}/status`, { status: abort.signal.aborted ? "canceled" : "error", error: error instanceof Error ? error.message.slice(0, 500) : String(error) });
-    } finally {
-      inflight.delete(job.id);
-      runScopeTargets.delete(job.id);
-      heartbeat();
-      void claimLoop();
+      terminal = abort.signal.aborted ? "canceled" : "error";
+      terminalError = error instanceof Error ? error.message.slice(0, 500) : String(error);
     }
+
+    await completeDaemonJobHandoff({
+      flushRunState: flushTracker,
+      deliverJobState: () => requestUntilAccepted("POST", base, headers, `/api/daemon/jobs/${job.id}/status`, {
+        status: terminal,
+        ...(terminalError ? { error: terminalError } : {}),
+      }, {
+        onRetry: (attempt, status) => {
+          if (attempt === 1 || attempt % TERMINAL_RETRY_LOG_INTERVAL === 0) {
+            console.warn(`[flounder daemon] terminal handoff for job ${job.id} failed${status ? ` (HTTP ${status})` : ""}; retaining the job and retrying`);
+          }
+        },
+      }),
+      release: () => {
+        inflight.delete(job.id);
+        runScopeTargets.delete(job.id);
+        heartbeat();
+      },
+      scheduleClaim: () => { void claimLoop(); },
+    });
   };
+
+  const claimLoop = createSerializedClaimLoop<DaemonJob>({
+    maxConcurrent,
+    activeCount: () => inflight.size,
+    claim: async () => {
+      const res = await fetch(base + "/api/daemon/claim", { method: "POST", headers }).catch(() => null);
+      if (!res?.ok) return undefined;
+      const data = (await res.json().catch(() => ({}))) as { job?: DaemonJob };
+      return data.job;
+    },
+    start: (job) => { void runJob(job); },
+  });
 
   // SSE: dispatch nudges (re-claim) + cancels. Reconnect with backoff; also claim on connect.
   for (;;) {
@@ -651,7 +756,15 @@ class RemoteTracker implements RunTracker {
 
   finish(status: RunStatus, coverage?: Coverage, findingsTotal?: number): void {
     this.finalStatus = status;
-    this.enqueue(() => (this.runId ? this.req("PATCH", `/api/daemon/runs/${this.runId}`, { finish: { status, coverage, findingsTotal } }) : Promise.resolve()));
+    this.chain = this.chain.then(() => (this.runId
+      ? requestUntilAccepted("PATCH", this.base, this.headers, `/api/daemon/runs/${this.runId}`, { finish: { status, coverage, findingsTotal } }, {
+        onRetry: (attempt, responseStatus) => {
+          if (attempt === 1 || attempt % TERMINAL_RETRY_LOG_INTERVAL === 0) {
+            console.warn(`[flounder daemon] terminal run update for ${this.targetName} failed${responseStatus ? ` (HTTP ${responseStatus})` : ""}; retaining the job and retrying`);
+          }
+        },
+      })
+      : Promise.resolve()));
   }
 
   terminalState(): RunStatus | undefined {

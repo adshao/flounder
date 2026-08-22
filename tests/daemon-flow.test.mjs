@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { startUiServer } from "../dist/server/app.js";
-import { daemonJobTerminalState, ensureDaemonDirectories, loadVerifyArtifactReplay } from "../dist/server/daemon.js";
+import { completeDaemonJobHandoff, createSerializedClaimLoop, daemonJobTerminalState, ensureDaemonDirectories, loadVerifyArtifactReplay, requestUntilAccepted } from "../dist/server/daemon.js";
 import { MetadataStore } from "../dist/db/store.js";
 import { DAEMON_PROTOCOL_VERSION } from "../dist/server/protocol.js";
 
@@ -61,6 +61,95 @@ test("daemon: job terminal state reflects every persisted run phase", () => {
   assert.equal(daemonJobTerminalState(["done", "error", "done"]), "error");
   assert.equal(daemonJobTerminalState(["done", "killed"]), "canceled");
   assert.equal(daemonJobTerminalState(["done"], true), "canceled");
+});
+
+test("daemon: concurrent claim nudges share one drain and respect executor capacity", async () => {
+  const queued = [1, 2, 3];
+  const active = new Set();
+  let releaseFirstClaim;
+  let claimCalls = 0;
+  const firstClaim = new Promise((resolve) => { releaseFirstClaim = resolve; });
+  const claimLoop = createSerializedClaimLoop({
+    maxConcurrent: 2,
+    activeCount: () => active.size,
+    claim: async () => {
+      claimCalls += 1;
+      if (claimCalls === 1) await firstClaim;
+      return queued.shift();
+    },
+    start: (job) => { active.add(job); },
+  });
+
+  const drains = [claimLoop(), claimLoop(), claimLoop()];
+  releaseFirstClaim();
+  await Promise.all(drains);
+
+  assert.deepEqual([...active], [1, 2]);
+  assert.deepEqual(queued, [3]);
+  assert.equal(claimCalls, 2);
+});
+
+test("daemon: terminal handoff retries transport and HTTP failures until accepted", async () => {
+  const responses = [new Error("connection reset"), new Response(null, { status: 503 }), new Response(null, { status: 200 })];
+  const waits = [];
+  const retries = [];
+  const requests = [];
+
+  await requestUntilAccepted("POST", "http://127.0.0.1:4500", { authorization: "Bearer test" }, "/api/daemon/jobs/7/status", { status: "done" }, {
+    initialDelayMs: 2,
+    maxDelayMs: 4,
+    fetchImpl: async (url, init) => {
+      requests.push({ url, init });
+      const response = responses.shift();
+      if (response instanceof Error) throw response;
+      return response;
+    },
+    sleep: async (delayMs) => { waits.push(delayMs); },
+    onRetry: (attempt, status) => { retries.push({ attempt, status }); },
+  });
+
+  assert.equal(requests.length, 3);
+  assert.deepEqual(waits, [2, 4]);
+  assert.deepEqual(retries, [{ attempt: 1, status: undefined }, { attempt: 2, status: 503 }]);
+  assert.equal(requests[0].url, "http://127.0.0.1:4500/api/daemon/jobs/7/status");
+  assert.equal(requests[0].init.method, "POST");
+  assert.equal(requests[0].init.body, JSON.stringify({ status: "done" }));
+});
+
+test("daemon: terminal handoff retains capacity until run and job state are accepted", async () => {
+  const deferred = () => {
+    let resolve;
+    const promise = new Promise((accept) => { resolve = accept; });
+    return { promise, resolve };
+  };
+  const tick = () => new Promise((resolve) => setImmediate(resolve));
+  const runState = deferred();
+  const jobState = deferred();
+  const events = [];
+
+  const handoff = completeDaemonJobHandoff({
+    flushRunState: async () => {
+      events.push("run:start");
+      await runState.promise;
+      events.push("run:accepted");
+    },
+    deliverJobState: async () => {
+      events.push("job:start");
+      await jobState.promise;
+      events.push("job:accepted");
+    },
+    release: () => { events.push("capacity:released"); },
+    scheduleClaim: () => { events.push("claim:scheduled"); },
+  });
+
+  await tick();
+  assert.deepEqual(events, ["run:start"]);
+  runState.resolve();
+  await tick();
+  assert.deepEqual(events, ["run:start", "run:accepted", "job:start"]);
+  jobState.resolve();
+  await handoff;
+  assert.deepEqual(events, ["run:start", "run:accepted", "job:start", "job:accepted", "capacity:released", "claim:scheduled"]);
 });
 
 test("daemon: startup creates the reported product home and workspace directories", async () => {
