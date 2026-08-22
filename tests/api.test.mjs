@@ -208,6 +208,7 @@ test("api: project list supports archive, unarchive, pin, and manual order", asy
     assert.equal(list.statusCounts.all, 3);
     assert.equal(list.statusCounts["not-started"], 3);
     assert.equal(list.statusCounts.running, 0);
+    assert.equal(list.statusCounts.queued, 0);
 
     const notStarted = await json(await fetch(base + "/api/projects?status=not-started&limit=2"));
     assert.deepEqual(notStarted.projects.map((project) => project.name), ["gamma", "beta"]);
@@ -265,6 +266,38 @@ test("api: project list supports archive, unarchive, pin, and manual order", asy
     assert.equal((await deleteReq(`/api/projects/${archivedDelete.uuid}`)).status, 200);
     archived = await json(await fetch(base + "/api/projects?archived=1"));
     assert.deepEqual(archived.projects, []);
+  });
+});
+
+test("api: project snapshots distinguish queued work from executor-held work", async () => {
+  await withServer(async (base, out) => {
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const runningProject = await (await post("/api/projects", { name: "running-project", sourcePaths: ["./src"] })).json();
+    const queuedProject = await (await post("/api/projects", { name: "queued-project", sourcePaths: ["./src"] })).json();
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const daemon = store.createDaemonToken("snapshot-status-daemon");
+      const runningJobId = store.enqueueJob(runningProject.name, { verb: "audit" }, daemon.id);
+      assert.equal(store.claimJob(daemon.id)?.id, runningJobId);
+      store.enqueueJob(queuedProject.name, { verb: "audit" }, daemon.id);
+    } finally {
+      store.close();
+    }
+
+    const list = await (await fetch(base + "/api/projects")).json();
+    const runningSnapshot = list.projects.find((project) => project.uuid === runningProject.uuid);
+    const queuedSnapshot = list.projects.find((project) => project.uuid === queuedProject.uuid);
+    assert.equal(runningSnapshot.activeRuns, 1);
+    assert.equal(runningSnapshot.queuedRuns, 0);
+    assert.equal(queuedSnapshot.activeRuns, 0);
+    assert.equal(queuedSnapshot.queuedRuns, 1);
+    assert.equal(list.statusCounts.running, 1);
+    assert.equal(list.statusCounts.queued, 1);
+
+    const running = await (await fetch(base + "/api/projects?status=running")).json();
+    const queued = await (await fetch(base + "/api/projects?status=queued")).json();
+    assert.deepEqual(running.projects.map((project) => project.uuid), [runningProject.uuid]);
+    assert.deepEqual(queued.projects.map((project) => project.uuid), [queuedProject.uuid]);
   });
 });
 
@@ -1569,6 +1602,46 @@ test("api: verify launch links project finding rows back to the original finding
     assert.equal(idSpec.verifyFindings[0].title, "Proof input is not bound");
     assert.equal(idSpec.verifyFindings[0].location, "src/Rollup.sol:44");
 
+    const launchedByAlias = await json(await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "verify",
+      findingIds: [finding.id],
+    }));
+    const aliasJob = (await json(await fetch(base + "/api/jobs/" + launchedByAlias.jobId))).job;
+    const aliasSpec = JSON.parse(aliasJob.spec_json);
+    assert.equal(aliasSpec.verb, "audit");
+    assert.equal(aliasSpec.verifyFindings.length, 1);
+    assert.equal(aliasSpec.verifyFindings[0].id, finding.id);
+    assert.equal(aliasSpec.verifyFindings[0].originId, finding.id);
+
+    const missingAliasSelection = await post(`/api/projects/${created.uuid}/runs`, { verb: "verify" });
+    assert.equal(missingAliasSelection.status, 400);
+    assert.match((await json(missingAliasSelection)).error, /requires findingId\/findingIds or verifyFindings/);
+
+    const wrongProjectAlias = await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "verify",
+      findingIds: [finding.id + 9999],
+    });
+    assert.equal(wrongProjectAlias.status, 400);
+    assert.match((await json(wrongProjectAlias)).error, /outside this project or no longer present/);
+
+    const ambiguousAuditSelection = await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "audit",
+      findingIds: [finding.id],
+    });
+    assert.equal(ambiguousAuditSelection.status, 400);
+    assert.match((await json(ambiguousAuditSelection)).error, /use verb 'verify'/);
+
+    const ignoredRunSelection = await post(`/api/projects/${created.uuid}/runs`, {
+      verb: "run",
+      findingIds: [finding.id],
+    });
+    assert.equal(ignoredRunSelection.status, 400);
+    assert.match((await json(ignoredRunSelection)).error, /only valid with verify, confirm, or report/);
+
+    const invalidVerb = await post(`/api/projects/${created.uuid}/runs`, { verb: "verfiy" });
+    assert.equal(invalidVerb.status, 400);
+    assert.match((await json(invalidVerb)).error, /verb must be one of/);
+
     const invalidOrigin = await post(`/api/projects/${created.uuid}/runs`, {
       verb: "audit",
       verifyFindings: [{ originId: String(finding.id), title: finding.title, location: finding.location }],
@@ -1888,7 +1961,8 @@ test("api: launching prepare clears the current scope inventory projection", asy
     assert.equal(snapshot.findingsTotal, 0);
     assert.equal(snapshot.reproducedBugs, 0);
     assert.equal(snapshot.confirmDecisionCount, 0);
-    assert.equal(snapshot.activeRuns, 1);
+    assert.equal(snapshot.activeRuns, 0);
+    assert.equal(snapshot.queuedRuns, 1);
     assert.equal(snapshot.latestRun, null);
   });
 });
@@ -3072,11 +3146,17 @@ test("api: confirm launch carries DB-backed seeds when prior run artifact is mis
     const explicit = await json(await post(`/api/projects/${created.uuid}/runs`, {
       verb: "confirm",
       findingIds: [readyId],
+      inputRunDir: missingRunDir,
       sandboxConfirmNetwork: "none",
     }));
     const explicitJob = (await json(await fetch(base + "/api/jobs/" + explicit.jobId))).job;
     const explicitSpec = JSON.parse(explicitJob.spec_json);
     assert.equal(explicitSpec.sandboxConfirmNetwork, "none");
+    assert.equal(explicitSpec.inputRunDir, missingRunDir);
+    assert.ok(explicitSpec.confirmKeys.includes("kdbseed"));
+    assert.ok(explicitSpec.confirmKeys.includes(`origin:${readyId}:kdbseed`));
+    assert.equal(explicitSpec.confirmFindings.length, 1);
+    assert.equal(explicitSpec.confirmFindings[0].originId, readyId);
   });
 });
 

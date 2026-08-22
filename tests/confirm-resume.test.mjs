@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { assertCompleteConfirmDecisionCoverage, enforceBountySubmitReadiness, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
+import { assertCompleteConfirmDecisionCoverage, assertConfirmCompletion, enforceBountySubmitReadiness, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
 import { publicPath } from "../dist/util/paths.js";
 
 // `flounder confirm` auto-resumes a prior interrupted confirm of the same input run: it finds
@@ -112,6 +112,24 @@ test("confirm completion rejects a decision sheet that omits selected finding id
       { members: ["finding-a", "finding-b"] },
     ]),
     /decision sheet omitted 1 selected finding id.*finding-c/,
+  );
+});
+
+test("confirm completion preserves the provider session error ahead of decision coverage", () => {
+  assert.throws(
+    () => assertConfirmCompletion(
+      {
+        stoppedReason: "error",
+        steps: [{ tool: "(session-error)", observation: "Codex error: request was flagged by the provider" }],
+      },
+      [{ id: "finding-a" }],
+      [],
+    ),
+    (error) => {
+      assert.match(error.message, /model session failed.*flagged by the provider/);
+      assert.doesNotMatch(error.message, /decision sheet omitted/);
+      return true;
+    },
   );
 });
 

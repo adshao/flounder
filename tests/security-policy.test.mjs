@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, openWorldCommandNeedsNetwork } from "../dist/security/policy.js";
+import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, openWorldCommandNeedsNetwork } from "../dist/security/policy.js";
 
 const cmd = (program, ...args) => ({ program, args });
 
@@ -152,13 +152,19 @@ test("agent bash allows readonly tool discovery, version, and local JSON inspect
     cmd("tolk-js", "--version"),
     cmd("tact", "--version"),
     cmd("forge", "--version"),
+    cmd("cargo", "tree", "-i", "solana-program"),
+    cmd("cargo", "+1.86.0", "tree", "--duplicates", "--manifest-path", "sources/protocol/Cargo.toml"),
     cmd("jq", ".", "provenance/mainnet_rpc_state_20260614.json"),
     cmd("python3", "-m", "json.tool", "provenance/mainnet_rpc_state_20260614.json"),
   ]) {
     assert.equal(analyzeAgentBashCommandSafety(c).blocked, false, `${c.program} ${c.args.join(" ")} should be readonly inspection`);
+    assert.equal(isAgentInspectionCommand(c), true, `${c.program} ${c.args.join(" ")} should use the inspection workspace`);
     assert.equal(isAgentBuildCommand(c), false, `${c.program} ${c.args.join(" ")} should not be a build command`);
     assert.equal(isAgentConfirmCommand(c), false, `${c.program} ${c.args.join(" ")} should not confirm findings`);
   }
+
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "tree", "--manifest-path", "../outside/Cargo.toml")).blocked, true);
+  assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "metadata")).blocked, true);
 });
 
 test("agent bash allows readonly file-existence inspection tests only", () => {
@@ -242,6 +248,7 @@ test("open-world egress is granted per command instead of per phase", () => {
     cmd("wget", "-q", "https://example.com/spec.json"),
     cmd("git", "clone", "https://github.com/example/project"),
     cmd("git", "clone", "--branch", "main", "--single-branch", "https://github.com/example/project", "sources/project"),
+    cmd("git", "clone", "--depth", "1", "--filter=blob:none", "--no-checkout", "https://github.com/example/project", "sources/project"),
     cmd("gh", "api", "repos/example/project"),
     cmd("gh", "issue", "view", "123"),
     cmd("solana", "program", "show", "4yBT18tBcWqCDK8p3RMXdmZMjHr3wJM7jM6HVYemEqGh", "--url", "https://api.mainnet-beta.solana.com"),

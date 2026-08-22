@@ -173,7 +173,7 @@ export async function runAudit(
   };
   const runPhase = async (
     phaseCfg: AuditorConfig,
-    opts: { mode: "breadth" | "map" | "dig" | "verify" | "synthesize"; deepFocus?: string; verifySeed?: string; synthSeed?: string; maxSteps: number; mapExistingScopesPath?: string; mapExistingScopesCount?: number },
+    opts: { mode: "breadth" | "map" | "dig" | "verify" | "synthesize"; deepFocus?: string; verifySeed?: string; synthSeed?: string; maxSteps: number; mapExistingScopesPath?: string; mapExistingScopesCount?: number; recordFailure?: boolean },
     over?: { ctx: ToolContext; cwd: string; activityStreamId?: string },
   ): Promise<{ steps: TranscriptStep[]; stoppedReason: string }> => {
     const phaseCtx = over?.ctx ?? ctx;
@@ -186,8 +186,9 @@ export async function runAudit(
       ...(opts.verifySeed ? { verify: opts.verifySeed } : {}),
       ...(opts.synthSeed ? { synthesize: opts.synthSeed } : {}),
     };
+    const recordPhase = <T extends { stoppedReason: string }>(phase: T): T => opts.recordFailure === false ? phase : rememberPhase(phase);
     if (!options.llm && isPiSessionProvider(phaseCfg.provider)) {
-      return rememberPhase(await runAuditSession({
+      return recordPhase(await runAuditSession({
         cfg: { ...phaseCfg, auditMaxSteps: opts.maxSteps },
         ctx: phaseCtx,
         tools,
@@ -208,7 +209,7 @@ export async function runAudit(
     if (llm && "setLogger" in llm && typeof (llm as { setLogger?: unknown }).setLogger === "function") {
       (llm as { setLogger(logger: RunLogger): void }).setLogger(logger);
     }
-    return rememberPhase(await runAuditLoop({
+    return recordPhase(await runAuditLoop({
       cfg: phaseCfg,
       llm,
       tools,
@@ -611,12 +612,20 @@ export async function runAudit(
       const perScope: AgentFinding[] = [];
       const perScopeOutcomes: ScopeOutcome[] = [];
       const stepsOut: TranscriptStep[] = [];
+      let sampleFailureReason: string | undefined;
       const sampleOffset = nextScopeOutcomeSample(scopeOutcomes, scope.id) - 1;
       for (let sample = 1; sample <= maxSamples; sample += 1) {
         if (options.signal?.aborted) throw new Error("audit aborted");
         clearScratchFindings(sess);
         clearScratchScopeOutcome(sess);
-        const dig = await runPhase(digCfg, { mode: "dig", deepFocus, maxSteps: cfg.auditDigSteps }, over);
+        // A repeated dig sample is recoverable: a provider transport may fail one
+        // attempt while a later independent sample still persists a complete scope
+        // outcome. Defer the run-level failure decision until the sample batch has
+        // either reached durable coverage or exhausted its attempts.
+        const dig = await runPhase(digCfg, { mode: "dig", deepFocus, maxSteps: cfg.auditDigSteps, recordFailure: false }, over);
+        if (!sampleFailureReason && (dig.stoppedReason === "error" || dig.stoppedReason === "stalled")) {
+          sampleFailureReason = dig.stoppedReason;
+        }
         if (options.signal?.aborted) throw new Error("audit aborted");
         stepsOut.push(...dig.steps);
         ingestFindingsFromScratch(sess);
@@ -642,6 +651,8 @@ export async function runAudit(
         });
         if (sample >= samples && (!cfg.auditAdaptiveDig || sample >= maxSamples || !scopeOutcomeNeedsAnotherSample(perScopeOutcomes))) break;
       }
+      const unresolvedFailure = digBatchStoppedReason(sampleFailureReason, coverageCompleted(perScopeOutcomes));
+      if (!phaseFailureReason && unresolvedFailure) phaseFailureReason = unresolvedFailure;
       return { findings: dedupeFindings(perScope), outcomes: perScopeOutcomes, steps: stepsOut };
     };
 
@@ -1236,6 +1247,17 @@ export function verifyBatchStoppedReason(
   // claim without one remains blocked by the transport failure.
   if (totalClaims > 0 && settledVerdicts === totalClaims) return "finished";
   return phaseFailureReason ?? "finished";
+}
+
+export function digBatchStoppedReason(
+  phaseFailureReason: string | undefined,
+  coverageComplete: boolean,
+): string | undefined {
+  // Repeated/adaptive Dig treats the durable scope outcome as its completion
+  // contract. A transient provider failure from an earlier sample must not poison
+  // an otherwise complete run after a later independent sample recovers coverage.
+  if (coverageComplete) return undefined;
+  return phaseFailureReason;
 }
 
 export function dischargeChallengeFindingTitle(verdict: { title?: string }, fallback: string): string {

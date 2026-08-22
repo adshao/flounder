@@ -56,7 +56,7 @@ const UI_PUBLIC_DIR = path.dirname(UI_HTML_PATH);
 const PROJECT_STREAM_LIMIT = 100;
 const DAEMON_JOB_HEARTBEAT_TTL_MS = 45_000;
 const DAEMON_OFFLINE_RECONCILE_GRACE_MS = DAEMON_JOB_HEARTBEAT_TTL_MS * 2;
-const PROJECT_STATUS_FILTERS = ["running", "needs-work", "done", "failed", "not-started"] as const;
+const PROJECT_STATUS_FILTERS = ["running", "queued", "needs-work", "done", "failed", "not-started"] as const;
 const PERSISTED_ACTIVITY_TAIL_BYTES = 16 * 1024 * 1024;
 const BUG_BOUNTY_CONTEST_KIND = "bug-bounty-contest";
 const DEFAULT_CONTEST_BATCH_SCOPES = 10;
@@ -245,7 +245,7 @@ const ROUTES: Route[] = [
       limit: "number? (default 100)",
       offset: "number? (default 0)",
       q: "string? — case-insensitive project-name search",
-      status: "string? — one of running, needs-work, done, failed, not-started",
+      status: "string? — one of running, queued, needs-work, done, failed, not-started",
       origin: "project|evaluation|all? — default project; evaluation rows are internal tracking",
     },
     handler: async (c) => {
@@ -317,7 +317,7 @@ const ROUTES: Route[] = [
     summary: "Queue project work (Run/Continue pipeline, map, audit a region/scope, verify, confirm, report, or prepare). The job is dispatched to a connected daemon, which executes it and reports back. Uses the project's stored materials + config unless overridden. This is the single action behind the UI's primary and More actions controls.",
     params: { uuid: "project UUID" },
     body: {
-      verb: "'run' | 'map' | 'audit' | 'confirm' | 'report' | 'prepare' (default 'run'; project run = prepare-if-needed→map/dig→synthesize→verify→confirm→report; source run = map→dig→synthesize→verify)",
+      verb: "'run' | 'map' | 'audit' | 'verify' | 'confirm' | 'report' | 'prepare' (default 'run'; verify is a project API alias for audit + verifyFindings; project run = prepare-if-needed→map/dig→synthesize→verify→confirm→report; source run = map→dig→synthesize→verify)",
       remap: "boolean? — re-enumerate scopes (restart)", appendMap: "boolean? — expand the existing scope inventory by appending novel scopes", appendMapSeedPaths: "string[]? — extra prior scope inventories used only as append-map covered-reference seed", fresh: "boolean? — confirm: ignore a prior interrupted confirm",
       quick: "boolean? — run: single breadth pass", mockLlm: "boolean? — offline mock model",
       verifyFromStart: "boolean? — run/continue pipeline: re-run Verify from the beginning instead of only pending candidates",
@@ -328,8 +328,8 @@ const ROUTES: Route[] = [
       scopeCoverageMode: "focused|standard|half|full|custom? — one-off coverage mode for this run; standard means audit until the project has 30 audited scopes; pass continueCoverage:true to explicitly start another scope batch after verify/confirm/report are settled. Bug-bounty contest projects default to short custom batches unless overridden.",
       maxScopes: "number? — one-off scope cap for this run, or the custom target when scopeCoverageMode=custom", mapSteps: "number? — one-off map turn cap", mapSamples: "number? — independent Map inventories to union without dropping singleton scopes", digSteps: "number? — one-off per-scope dig turn cap",
       maxSteps: "number? — one-off global turn cap", digSamples: "number? — minimum independent samples per scope", digMaxSamples: "number? — adaptive per-scope sample ceiling", adaptiveDig: "boolean? — add bounded samples only for incomplete/uncertain outcomes", eagerPrepare: "boolean? — warm the build before Dig and surface repairable resource blockers", digConcurrency: "number? — one-off parallel scopes", verifyConcurrency: "number? — one-off parallel Verify findings (isolated workspaces)",
-      findingId: "number? — confirm/report: reproduce or report one selected finding",
-      findingIds: "number[]? — confirm/report: reproduce selected pending or explicitly reopened audit-confirmed findings, or generate/regenerate formal reports for selected reproduced findings. Report without selection only generates missing reports.",
+      findingId: "number? — verify/confirm/report: verify, reproduce, or report one selected finding",
+      findingIds: "number[]? — verify: resolve selected project findings into verifyFindings; confirm/report: reproduce selected pending or explicitly reopened audit-confirmed findings, or generate/regenerate formal reports for selected reproduced findings. Report without selection only generates missing reports.",
       inputRunDir: "string? — confirm: the finished run dir to reproduce",
       clue: "string? — prepare: the tx / address / project / link to acquire from",
       posture: "string? — prepare: 'blind' | 'informed'", matchDeployed: "boolean? — prepare: prove staged source matches the live deployment (default true)", endpoint: "string? — prepare: read-only access hint (e.g. RPC URL)",
@@ -2494,7 +2494,39 @@ async function runLaunch(c: Ctx): Promise<void> {
   const uuid = c.params.uuid ?? "";
   const project = c.store.getProjectByRef(uuid);
   if (!project) return sendJson(c.res, 404, { error: `no project with uuid ${uuid}` });
-  const body = (await readBody(c.req)) as Record<string, unknown>;
+  const body = { ...((await readBody(c.req)) as Record<string, unknown>) };
+  const requestedVerb = typeof body.verb === "string" && body.verb.trim() ? body.verb.trim() : "run";
+  if (!["run", "map", "audit", "verify", "confirm", "report", "prepare"].includes(requestedVerb)) {
+    return sendJson(c.res, 400, { error: "verb must be one of run | map | audit | verify | confirm | report | prepare" });
+  }
+  body.verb = requestedVerb;
+  const selectedIds = selectedFindingIds(body);
+  if (requestedVerb === "verify") {
+    if (body.verifyFindings === undefined) {
+      if (selectedIds.length === 0) {
+        return sendJson(c.res, 400, { error: "verify requires findingId/findingIds or verifyFindings" });
+      }
+      const missing = selectedIds.filter((id) => {
+        const finding = c.store.getFinding(id);
+        return !finding || Number(finding.project_id) !== Number(project.id);
+      });
+      if (missing.length > 0) {
+        return sendJson(c.res, 400, { error: `finding ${missing.join(", ")} is outside this project or no longer present` });
+      }
+      body.verifyFindings = selectedIds.map((id) => ({ id }));
+    }
+    // Verify remains the existing sealed audit verifier internally. Normalize the friendly API
+    // alias before coverage defaults are computed so it cannot fall through to a broad Dig run.
+    body.verb = "audit";
+  } else if (requestedVerb === "audit" && body.verifyFindings === undefined && selectedIds.length > 0) {
+    return sendJson(c.res, 400, {
+      error: "findingId/findingIds do not select an audit scope; use verb 'verify' or pass verifyFindings",
+    });
+  } else if (selectedIds.length > 0 && requestedVerb !== "confirm" && requestedVerb !== "report") {
+    return sendJson(c.res, 400, {
+      error: "findingId/findingIds are only valid with verify, confirm, or report",
+    });
+  }
   const profile = project.provider_id != null ? c.store.getProvider(Number(project.provider_id)) : undefined;
   const phaseProfiles = phaseProviderProfiles(project, c.store);
   const projectId = Number(project.id);
@@ -2606,7 +2638,7 @@ async function runLaunch(c: Ctx): Promise<void> {
   // Confirm is finding-grained + resumable, but its distinct-bug consolidation must see the
   // full current confirmed-finding context. The pending rows decide whether there is work to do;
   // the context rows decide what the confirm agent can consolidate against across batches.
-  if (spec.verb === "confirm" && !spec.inputRunDir && !(spec.inputRunDirs && spec.inputRunDirs.length > 0)) {
+  if (spec.verb === "confirm") {
     const findingIds = selectedFindingIds(body);
     if (findingIds.length > 0) {
       const retryContext = new Map(c.store.confirmableContext(Number(project.id)).map((row) => [Number(row.id), row]));
@@ -2648,7 +2680,7 @@ async function runLaunch(c: Ctx): Promise<void> {
       // A focused retry is an explicit request to replace the old blocked decision. Without
       // fresh mode runConfirm may load that decision from a prior artifact and treat it as settled.
       if (selected.some((entry) => entry.reopened)) spec.fresh = true;
-    } else {
+    } else if (!spec.inputRunDir && !(spec.inputRunDirs && spec.inputRunDirs.length > 0)) {
       const currentDecisions = currentConfirmDecisions(c.store.listConfirmDecisions(Number(project.id)).filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary)));
       const pending = confirmWorkRows(c.store, Number(project.id), currentResultRunIds, materialBoundary, currentDecisions);
       if (pending.length === 0) return sendJson(c.res, 400, { error: "nothing to confirm — every audit-confirmed finding already has a real-target decision (use --fresh to redo)" });
@@ -5600,7 +5632,7 @@ function normalizeFindingSourceFilter(value: string | null | undefined): "projec
 }
 
 function emptyProjectStatusCounts(total = 0): ProjectStatusCounts {
-  return { all: total, running: 0, "needs-work": 0, done: 0, failed: 0, "not-started": 0 };
+  return { all: total, running: 0, queued: 0, "needs-work": 0, done: 0, failed: 0, "not-started": 0 };
 }
 
 function numberField(row: Record<string, unknown>, key: string): number {
@@ -5612,6 +5644,7 @@ function projectSnapshotStatus(row: Record<string, unknown>): ProjectStatusFilte
   const latest = row.latestRun as { status?: unknown } | null | undefined;
   const latestStatus = typeof latest?.status === "string" ? latest.status : "";
   if (numberField(row, "activeRuns") > 0 || latestStatus === "running") return "running";
+  if (numberField(row, "queuedRuns") > 0) return "queued";
   if (latestStatus === "error" || latestStatus === "killed") return "failed";
   const progress = row.progress as Coverage | null | undefined;
   const total = typeof progress?.total === "number" ? progress.total : 0;
@@ -5666,9 +5699,12 @@ function projectListResponse(
 function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}): Array<Record<string, unknown>> {
   const runningJobs = store.runningJobs();
   const activeByTarget = new Map<string, number>();
+  const queuedByTarget = new Map<string, number>();
   for (const job of runningJobs) {
     if (store.getWorkItemByJob(Number(job.id))) continue;
-    activeByTarget.set(String(job.project), (activeByTarget.get(String(job.project)) ?? 0) + 1);
+    const target = String(job.project);
+    const counts = job.status === "queued" ? queuedByTarget : activeByTarget;
+    counts.set(target, (counts.get(target) ?? 0) + 1);
   }
   return store.listProjects(options).map((project) => {
     const id = Number(project.id);
@@ -5725,6 +5761,7 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       latestRunHealth: runHealthDisplayRow(projectCurrentRunHealth(store, id, confirmDecisions)),
       backlogCounts: store.discoveryBacklogCounts(id),
       activeRuns: activeByTarget.get(String(project.name)) ?? 0,
+      queuedRuns: queuedByTarget.get(String(project.name)) ?? 0,
       material: materialSummary(allRuns, materialBoundary, activePrepareRefresh),
     };
   });
