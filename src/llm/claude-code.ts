@@ -36,8 +36,6 @@ export class ClaudeCodeClient implements LlmClient {
       "--model",
       input.model,
       ...(effort ? ["--effort", effort] : []),
-      "--append-system-prompt",
-      system,
       "--output-format",
       "json",
       "--disallowedTools",
@@ -45,9 +43,15 @@ export class ClaudeCodeClient implements LlmClient {
       "--permission-mode",
       "default",
     ];
+    // Windows CreateProcess has a 32k-char command-line limit; long system
+    // prompts passed via --append-system-prompt make claude.cmd exit(255)
+    // instantly with no output (upstream then sees a timeout). Fold the
+    // rendered system prompt into stdin instead — same semantics for a pure
+    // text-completion backend.
+    const stdinPayload = `${system}\n\n---\n\n${input.user}`;
 
     try {
-      const stdout = await spawnClaude(args, input.user, {
+      const stdout = await spawnClaude(args, stdinPayload, {
         cwd: tmp,
         maxBuffer: 20 * 1024 * 1024,
         timeout: Number(process.env.FLOUNDER_CLAUDE_CODE_TIMEOUT_MS ?? 900_000),
@@ -75,7 +79,20 @@ export class ClaudeCodeClient implements LlmClient {
       });
       throw new Error(`claude-code completion failed: ${message}`);
     } finally {
-      await rm(tmp, { recursive: true, force: true });
+      // Windows: the spawned claude.cmd may still hold the temp cwd briefly
+      // after close (EBUSY) — retry instead of failing the whole call.
+      for (let attempt = 0; attempt < 5; attempt++) {
+        try {
+          await rm(tmp, { recursive: true, force: true });
+          break;
+        } catch (error) {
+          if (attempt === 4) {
+            if (process.platform !== "win32") throw error;
+            break;
+          }
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      }
     }
   }
 }
@@ -131,7 +148,8 @@ function parseClaudeOutput(stdout: string): { text: string; meta: Record<string,
 
 function spawnClaude(args: string[], input: string, options: { cwd: string; maxBuffer: number; timeout: number }): Promise<string> {
   return new Promise((resolve, reject) => {
-    const child = spawn("claude", args, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"] });
+    const isWindows = process.platform === "win32";
+    const child = spawn(isWindows ? "claude.cmd" : "claude", args, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], shell: isWindows });
     let stdout = "";
     let stderr = "";
     let settled = false;
