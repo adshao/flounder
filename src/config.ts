@@ -168,8 +168,8 @@ export interface CustomModelDefinition {
   baseModel: string;
 }
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const DEFAULT_AUDIT_MODEL = "gpt-5.6-sol";
 
 export function flounderHomeDir(): string {

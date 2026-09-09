@@ -304,7 +304,7 @@ async function parseConfig(args: string[]): Promise<{ cfg: AuditorConfig; modelO
   cfg.auditAppendMapSeedPaths = readMultiFlag(args, "--append-map-seed");
   if (args.includes("--dry-run")) cfg.dryRun = true;
   const thinking = readFlag(args, "--thinking");
-  if (thinking === "off" || thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh") {
+  if (thinking === "off" || thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh" || thinking === "max") {
     cfg.thinkingLevel = thinking;
   }
   const hasConfigKey = (...keys: string[]): boolean => keys.some((key) => Object.prototype.hasOwnProperty.call(explicitConfig, key));
@@ -397,7 +397,7 @@ function applyConfigOverrides(cfg: AuditorConfig, raw: Record<string, unknown>):
   const rawVerifyConcurrency = raw.auditVerifyConcurrency ?? raw.audit_verify_concurrency;
   if (typeof rawVerifyConcurrency === "number" && Number.isFinite(rawVerifyConcurrency)) cfg.auditVerifyConcurrency = Math.max(1, Math.floor(rawVerifyConcurrency));
   const rawThinking = raw.thinkingLevel ?? raw.thinking_level ?? raw.thinking;
-  if (rawThinking === "off" || rawThinking === "minimal" || rawThinking === "low" || rawThinking === "medium" || rawThinking === "high" || rawThinking === "xhigh") {
+  if (rawThinking === "off" || rawThinking === "minimal" || rawThinking === "low" || rawThinking === "medium" || rawThinking === "high" || rawThinking === "xhigh" || rawThinking === "max") {
     cfg.thinkingLevel = rawThinking;
   }
   const rawModels = normalizeRoleModels(raw.models);
@@ -1442,7 +1442,7 @@ Shared options:
   --config <file>         JSON config with project context, models, and paths
   --provider <name>       Flounder provider id (default openai-codex); codex-cli/claude-code are explicit local fallbacks
   --model <name>          set the audit model
-  --thinking <level>      off|minimal|low|medium|high|xhigh
+  --thinking <level>      off|minimal|low|medium|high|xhigh|max
   --out <dir>             artifact output directory and local tracking store (default ~/.flounder)
   --history-dir <dir>     project history directory, default <out>/history
   --workspace <dir>       daemon project workspace root, default ~/.flounder/workspace

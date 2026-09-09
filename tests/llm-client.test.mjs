@@ -27,11 +27,11 @@ test("codex-cli fallback isolates non-interactive audit calls from user config a
     model: "gpt-5.5",
     workdir: "tmp-workdir",
     outputFile: "tmp-workdir/last-message.txt",
-    thinkingLevel: "xhigh",
+    thinkingLevel: "max",
     webSearch: "disabled",
   });
 
-  assert.deepEqual(args.slice(0, 5), ["exec", "-c", "web_search=disabled", "-c", 'model_reasoning_effort="xhigh"']);
+  assert.deepEqual(args.slice(0, 5), ["exec", "-c", "web_search=disabled", "-c", 'model_reasoning_effort="max"']);
   assert.ok(args.includes("--ephemeral"));
   assert.ok(args.includes("--json"));
   assert.ok(args.includes("--ignore-user-config"));

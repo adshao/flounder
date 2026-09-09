@@ -15,8 +15,8 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import path from "node:path";
 import { flounderHomeDir } from "./config.js";
 
-export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
-const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh"];
+export type ThinkingLevel = "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
+const THINKING_LEVELS: readonly ThinkingLevel[] = ["off", "minimal", "low", "medium", "high", "xhigh", "max"];
 const POSTURES = ["blind", "informed"] as const;
 
 // The persistable keys. Each maps 1:1 to a CLI concept; the type drives validation in `set`
@@ -46,7 +46,7 @@ export const CLI_CONFIG_KEYS: Record<CliConfigKey, KeySpec> = {
   server: { type: "string", summary: "control-plane URL the CLI drives, e.g. http://127.0.0.1:4500" },
   provider: { type: "string", summary: "pi-ai provider id (default openai-codex)" },
   model: { type: "string", summary: "audit model id" },
-  thinking: { type: "thinking", summary: "reasoning effort: off|minimal|low|medium|high|xhigh" },
+  thinking: { type: "thinking", summary: "reasoning effort: off|minimal|low|medium|high|xhigh|max" },
   out: { type: "string", summary: "artifact output dir + store location (match the control plane to share state)" },
   posture: { type: "posture", summary: "flounder prepare default posture: blind|informed" },
 };

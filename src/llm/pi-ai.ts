@@ -24,7 +24,7 @@ export class PiAiClient implements LlmClient {
     const model = resolvePiModel(provider, input.model, this.customModels);
     if (!model) throw new Error(`Unknown pi-ai model: provider=${this.provider} model=${input.model}`);
 
-    const options: { maxTokens?: number; reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" } = {};
+    const options: { maxTokens?: number; reasoning?: "minimal" | "low" | "medium" | "high" | "xhigh" | "max" } = {};
     if (input.maxTokens !== undefined) options.maxTokens = input.maxTokens;
     if (input.thinkingLevel !== undefined && input.thinkingLevel !== "off") options.reasoning = input.thinkingLevel;
 

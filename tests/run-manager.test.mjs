@@ -251,6 +251,9 @@ test("specToConfig: posture per verb + unbounded budgets by default", () => {
   assert.equal(capped.auditMapSteps, 50);
   assert.equal(capped.auditRemap, true);
 
+  const maxThinking = specToConfig({ ...base, verb: "run", thinking: "max" }, "out");
+  assert.equal(maxThinking.thinkingLevel, "max");
+
   const append = specToConfig({ ...base, verb: "map", appendMap: true }, "out");
   assert.equal(append.auditMapOnly, true);
   assert.equal(append.auditAppendMap, true);

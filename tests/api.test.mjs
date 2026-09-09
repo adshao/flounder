@@ -5600,6 +5600,30 @@ test("api: provider profiles — seed + CRUD + per-phase roles; pi discovery", a
     const astra = discoveredModels.find((m) => m.id === "gpt-6-astra");
     assert.ok(astra, "the pinned pi runtime must expose the Astra model");
     assert.ok(astra.thinkingLevels.includes("medium"), "Astra should expose medium through pi metadata");
+    const sol = discoveredModels.find((m) => m.id === "gpt-5.6-sol");
+    assert.ok(sol, "the pinned pi runtime must expose the Sol model");
+    assert.ok(sol.thinkingLevels.includes("max"), "Sol should expose max through pi metadata");
+
+    // A thinking level advertised by pi must persist through both creation and
+    // editing, then survive profile resolution into the queued daemon job.
+    const solMax = await json(await post("/api/providers", {
+      name: "sol-max",
+      provider: "openai-codex",
+      model: "gpt-5.6-sol",
+      thinking: "max",
+    }));
+    assert.equal((await json(await fetch(base + "/api/providers/" + solMax.id))).provider.thinking, "max");
+    await fetch(base + "/api/providers/" + solMax.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ thinking: "xhigh" }) });
+    await fetch(base + "/api/providers/" + solMax.id, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify({ thinking: "max" }) });
+    assert.equal((await json(await fetch(base + "/api/providers/" + solMax.id))).provider.thinking, "max");
+    const solMaxLaunch = await json(await post("/api/launch", {
+      target: "sol-max-direct",
+      verb: "run",
+      providerProfileId: solMax.id,
+      sourcePaths: [path.join(os.tmpdir(), "sol-max-direct")],
+    }));
+    const solMaxJob = (await json(await fetch(base + "/api/jobs/" + solMaxLaunch.jobId))).job;
+    assert.equal(JSON.parse(solMaxJob.spec_json).thinking, "max");
 
     // Unknown pi model ids must declare a known compatibility base. The saved
     // definition is delivered in the selected daemon's job instead of requiring

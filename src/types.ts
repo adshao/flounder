@@ -355,7 +355,7 @@ export interface LlmClient {
     user: string;
     model?: string;
     maxTokens?: number;
-    thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh";
+    thinkingLevel?: "off" | "minimal" | "low" | "medium" | "high" | "xhigh" | "max";
     // When true, the call is one turn of an agentic tool loop: the model must be
     // free to drive its own investigation and emit a tool action. CLI-fallback
     // providers must not inject a "do not inspect files / answer only from the

@@ -567,7 +567,7 @@ const ROUTES: Route[] = [
   route({
     method: "POST", path: "/api/providers",
     summary: "Create a provider profile.",
-    body: { name: "string (unique)", provider: "pi-ai provider id, or claude-code / codex-cli / mock", model: "string? — default or custom model id", baseModel: "string? — required when model is not in pi's catalog; known same-provider model whose transport/capability metadata is reused", thinking: "off|minimal|low|medium|high|xhigh?", roles: "object? — per-phase overrides { map|dig|refute: { provider?, model?, thinking? } }" },
+    body: { name: "string (unique)", provider: "pi-ai provider id, or claude-code / codex-cli / mock", model: "string? — default or custom model id", baseModel: "string? — required when model is not in pi's catalog; known same-provider model whose transport/capability metadata is reused", thinking: "off|minimal|low|medium|high|xhigh|max?", roles: "object? — per-phase overrides { map|dig|refute: { provider?, model?, thinking? } }" },
     handler: providerCreate,
   }),
   route({

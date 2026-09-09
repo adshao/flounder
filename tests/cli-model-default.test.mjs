@@ -52,11 +52,12 @@ test("CLI defers implicit model selection to the control plane", async () => {
   try {
     await runCli(["run", "--source", temp, "--target", "implicit-model", "--server", base, "--mock-llm"], process.cwd(), temp);
     await runCli(["run", "--source", temp, "--target", "explicit-model", "--server", base, "--mock-llm", "--model", "gpt-5.6-sol"], process.cwd(), temp);
+    await runCli(["run", "--source", temp, "--target", "max-thinking", "--server", base, "--mock-llm", "--thinking", "max"], process.cwd(), temp);
   } finally {
     await new Promise((resolve) => server.close(resolve));
   }
 
-  assert.equal(posted.length, 2);
+  assert.equal(posted.length, 3);
   assert.equal("provider" in posted[0], false);
   assert.equal("model" in posted[0], false);
   assert.equal("customModels" in posted[0], false);
@@ -64,6 +65,7 @@ test("CLI defers implicit model selection to the control plane", async () => {
   assert.equal(posted[1].provider, "openai-codex");
   assert.equal(posted[1].model, "gpt-5.6-sol");
   assert.equal(posted[1].thinking, "xhigh");
+  assert.equal(posted[2].thinking, "max");
 });
 
 function json(res, body, status = 200) {
