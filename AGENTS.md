@@ -75,7 +75,7 @@
 - Providing reference material to the audit is supported and encouraged — it is context, not an answer. Two channels: `--scope-note` for a one-line threat-model/invariant hint, and **`--corpus <paths...>` for full design MATERIALS** the model reads to derive what the code must enforce — specifications, whitepapers, design notes, protocol docs, prior audit reports, incident write-ups/post-mortems, a relevant book chapter. Corpus files are copied into the sandbox under `corpus/` and the map/dig prompts treat them as design intent (model-owned interpretation of target intent). Prefer `--corpus` for anything longer than a sentence. The hard line: materials describe what the system is SUPPOSED to guarantee; they must not contain the suspected bug, its location, or its mechanism — give the spec and let the model find the gap (this keeps blind investigation genuine, e.g. give a circuit's design spec, not "the remainder is unconstrained").
 - Do NOT author the materials yourself. `--corpus` must be the project's OWN real documentation (official specs, whitepapers, design docs, READMEs from the repo) plus, for an incident, a strictly FACTUAL brief (official statement + verified on-chain facts) — never a doc you wrote that interprets the design or enumerates obligations to check ("O1..O6"), and never a `--source` subset you hand-picked because you suspect the bug is there. Self-written "design intent" and pre-limited scope inject your (possibly wrong) interpretation and bias the agent. Give real docs + the codebase broadly + a neutral scope-note, and let the agent enumerate obligations, choose scope, and produce findings entirely on its own.
 - Confirmability gates which targets are worth a campaign: prefer Solidity (Foundry), Rust (cargo), Go, JS/TS where the dig can execute-confirm.
-- Hybrid Foundry dependency resolution is the common real-world build trap. A repo can resolve dependencies BOTH from `lib/` (forge-style remappings to vendored submodules, e.g. `openzeppelin-contracts/=lib/openzeppelin-contracts/src/`) AND from `node_modules` (package-style `@scope/...` imports that forge auto-remaps, e.g. `@openzeppelin/contracts/...`). Having `lib/` populated is NOT enough — if any source imports `@openzeppelin/contracts/...`, `forge build` fails with `Source "@openzeppelin/contracts/..." not found` until `npm install` (run at the root where `package-lock.json` lives, NOT in a vendored sub-lib) creates `node_modules`. So: pick the package manager by the lockfile CO-LOCATED with the root `package.json`, run install at that root before `forge build`, and verify the warm-up logs `forge build ok=true` (a passing targeted `forge test` can still compile a subset even when the full build fails, so don't infer build health from one green test). The toolchain warm-up now handles the ordering and root selection automatically.
+- Hybrid Foundry dependency resolution is the common real-world build trap. A repo can resolve dependencies BOTH from `lib/` (forge-style remappings to vendored submodules, e.g. `openzeppelin-contracts/=lib/openzeppelin-contracts/src/`) AND from `node_modules` (package-style `@scope/...` imports that forge auto-remaps, e.g. `@openzeppelin/contracts/...`). Having `lib/` populated is NOT enough — if any source imports `@openzeppelin/contracts/...`, `forge build` fails with `Source "@openzeppelin/contracts/..." not found` until `npm install` (run at the root holding `package.json` and its npm lock or shrinkwrap, NOT in a vendored sub-lib) creates `node_modules`. So: pick the package manager by the lockfile CO-LOCATED with the root `package.json`, run install at that root before `forge build`, and verify the warm-up logs `forge build ok=true` (a passing targeted `forge test` can still compile a subset even when the full build fails, so don't infer build health from one green test). The toolchain warm-up now handles the ordering and root selection automatically.
 
 ## Security And White-Hat Boundaries
 
@@ -107,6 +107,35 @@
 - Add tests for behavior that affects audit correctness, command safety, artifact contents, path redaction, or public packaging.
 - Prefer deterministic mock-mode tests for CI and explicit opt-in for live model/provider calls.
 - Keep examples safe by default. They should work without credentials unless they clearly document an opt-in live path.
+
+## Pull Request Quality Gate
+
+- Treat `docs/QUALITY_GATES.md` as the canonical merge policy. Run
+  `npm run quality:pr -- --base-ref <base-sha> --head-ref <head-sha>` and
+  `npm run verify` against immutable revisions before giving a merge verdict.
+- Use an isolated worktree when the current checkout is dirty or belongs to
+  another task. Never overwrite unrelated changes to review a pull request.
+- A worktree is not an execution sandbox. Use gate scripts from the trusted base
+  revision, and run candidate builds/tests only in ephemeral secret-free hosted
+  CI or a disposable no-credential sandbox built outside the candidate tree.
+  Never expose maintainer HOME, SSH, cloud, npm, GitHub, provider/agent auth, or
+  a container socket to candidate code.
+- Apply every semantic lens reported by the gate and inspect related call sites
+  outside the diff when checking enum, mode, status, persistence, prompt, or
+  trust-boundary completeness.
+- Treat downstream execution as part of the review threat model. Any source,
+  script, workflow, dependency, container, skill, or prompt can be a supply-chain
+  payload. Trace new network, subprocess, filesystem, environment, credential,
+  dynamic-loading, native-code, and generated-code capabilities before approval.
+- Run `npm run check:supply-chain`. Fork pull requests must remain read-only,
+  secret-free, GitHub-hosted, SHA-pinned, and unable to run dependency lifecycle
+  scripts. Do not approve tracked symlinks, submodules, or consumer install hooks.
+- Review is read-only by default. Publish a GitHub review, approve, request
+  changes, merge, or change repository rules only when the user explicitly
+  authorizes that action.
+- Re-read the pull request head SHA immediately before publishing. A new head
+  invalidates the previous verdict and requires the affected checks to run
+  again. Use a head-SHA marker to avoid duplicate reviews on retries.
 
 ## Git And Packaging
 

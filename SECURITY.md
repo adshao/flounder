@@ -29,10 +29,42 @@ Instead, contact the maintainers privately. If the repository has no private sec
 Run:
 
 ```bash
-npm audit --audit-level=moderate
+npm run check:supply-chain
+npm audit --omit=dev --audit-level=high
 ```
 
 Before publishing a release or accepting dependency updates.
+
+Flounder treats downstream execution as a primary threat boundary. A fork user
+may install, build, start the control plane, load a skill, or run an audit with
+provider credentials present. Contributions must not add install lifecycle
+hooks, mutable workflow dependencies, privileged fork CI, hidden dependency
+sources, or unreviewed access to credentials, the network, subprocesses, or the
+host filesystem. The pull request policy and enforcement details live in
+[`docs/QUALITY_GATES.md`](docs/QUALITY_GATES.md).
+
+The published npm shrinkwrap pins the reviewed transitive registry graph.
+Candidate pull requests are checked against the protected base allowlist, so a
+contributor cannot authorize its own workflow bytes, action, container, or
+dependency lifecycle script. Every workflow file is also bound to an exact
+protected SHA-256 digest, causing any inserted host step, permission, secret,
+mount, or artifact mutation to fail closed.
+
+The repository `.npmrc` disables dependency lifecycle scripts for clone and
+fork development installs. Do not override it on an unreviewed branch.
+
+Release artifacts include `SHA256SUMS` and a CycloneDX SBOM. Consumers should
+compare the package checksum with `SHA256SUMS`, review the SBOM and source diff,
+and avoid running unreviewed fork branches with real provider credentials or
+host execution enabled.
+
+Release builds run after dependency installation inside a digest-pinned,
+network-denied container with a read-only root, dropped capabilities, and no
+host container socket. Candidate build code can export only `dist`; after that
+container terminates, a separate container packs a fresh source tree and the
+verifier requires every packaged non-`dist` byte to exactly match the reviewed
+source. The uploaded package is verified from a downloaded copy in another job,
+so package execution cannot rewrite the uploaded object.
 
 ## Sensitive Data Hygiene
 

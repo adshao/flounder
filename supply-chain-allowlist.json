@@ -1,0 +1,86 @@
+{
+  "schemaVersion": 1,
+  "actions": [
+    {
+      "reference": "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
+      "version": "v7.0.1",
+      "source": "https://github.com/actions/checkout",
+      "reason": "Official GitHub checkout action pinned to its verified release commit."
+    },
+    {
+      "reference": "actions/setup-node@820762786026740c76f36085b0efc47a31fe5020",
+      "version": "v7.0.0",
+      "source": "https://github.com/actions/setup-node",
+      "reason": "Official GitHub Node setup action pinned to its verified release commit."
+    },
+    {
+      "reference": "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
+      "version": "v7.0.1",
+      "source": "https://github.com/actions/upload-artifact",
+      "reason": "Official GitHub artifact action pinned to its verified release commit."
+    },
+    {
+      "reference": "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
+      "version": "v8.0.1",
+      "source": "https://github.com/actions/download-artifact",
+      "reason": "Official GitHub artifact download action pinned to its verified release commit."
+    }
+  ],
+  "containers": [
+    {
+      "reference": "docker.io/library/node:24.13.0-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f",
+      "source": "https://hub.docker.com/_/node",
+      "reason": "Official Node 24.13.0 multi-architecture image used only for the network-denied release build sandbox."
+    }
+  ],
+  "workflows": [
+    {
+      "path": ".github/workflows/ci.yml",
+      "sha256": "5481f9cb79c5e93b9ca8919250673eb84daeeb6d3ffaef58e55ea9b612477118",
+      "reason": "Exact reviewed CI workflow; changes require protected-base pre-authorization."
+    },
+    {
+      "path": ".github/workflows/release.yml",
+      "sha256": "7f76b5686c4193f8d425ff567cb77810d771e19c7767d72732f9096b9fd29a9e",
+      "reason": "Exact reviewed release workflow; changes require protected-base pre-authorization."
+    }
+  ],
+  "installScripts": [
+    {
+      "path": "node_modules/@earendil-works/pi-coding-agent/node_modules/@google/genai",
+      "version": "1.52.0",
+      "integrity": "sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==",
+      "reason": "The published package declares a no-op preinstall script; repository installs still disable all lifecycle scripts."
+    },
+    {
+      "path": "node_modules/@earendil-works/pi-coding-agent/node_modules/esbuild",
+      "version": "0.28.1",
+      "integrity": "sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==",
+      "reason": "The package selects its platform binary in postinstall; repository installs keep lifecycle execution disabled."
+    },
+    {
+      "path": "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs",
+      "version": "7.6.5",
+      "integrity": "sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==",
+      "reason": "The package declares its documented code-generation postinstall; repository installs keep lifecycle execution disabled."
+    },
+    {
+      "path": "node_modules/@google/genai",
+      "version": "1.52.0",
+      "integrity": "sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==",
+      "reason": "The published package declares a no-op preinstall script; repository installs still disable all lifecycle scripts."
+    },
+    {
+      "path": "node_modules/fsevents",
+      "version": "2.3.3",
+      "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
+      "reason": "This optional macOS filesystem dependency declares native build metadata; repository installs keep lifecycle execution disabled."
+    },
+    {
+      "path": "node_modules/protobufjs",
+      "version": "7.6.6",
+      "integrity": "sha512-dYDWdjSl5RNb7SgPxGQcRU+GtvP7s2fpkrY0r432PcOIaZ0/rBcxEZnQN67iJhFuQiVw754JDoPruPCNdGsbjg==",
+      "reason": "The package declares its documented code-generation postinstall; repository installs keep lifecycle execution disabled."
+    }
+  ]
+}

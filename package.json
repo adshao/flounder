@@ -45,14 +45,15 @@
     "check:db-upgrade:dist": "node scripts/check-db-upgrade.mjs",
     "check:public": "node scripts/check-public-surface.mjs",
     "check:public:commit": "node scripts/check-public-surface.mjs --head-only",
+    "check:supply-chain": "node scripts/check-supply-chain.mjs",
+    "quality:pr": "node scripts/pr-quality-gate.mjs",
     "hooks:install": "git config core.hooksPath .githooks",
-    "verify": "npm run check && npm test && npm run check:api-catalog:dist && npm run check:db-upgrade:dist && npm run mock-audit && npm run check:public && npm run check:package:dist",
+    "verify": "npm run check && npm test && npm run check:api-catalog:dist && npm run check:db-upgrade:dist && npm run mock-audit && npm run check:supply-chain && npm run check:public && npm run check:package:dist",
     "sandbox:build": "docker build -f docker/flounder-sandbox.Dockerfile -t flounder-sandbox:latest .",
     "sandbox:rust:target": "node scripts/rust-sandbox-image.mjs",
     "sandbox:cairo:build": "docker build -f docker/flounder-sandbox-cairo.Dockerfile -t flounder-sandbox:cairo .",
     "sandbox:cairo:target": "node scripts/cairo-sandbox-image.mjs",
     "sandbox:ton:build": "docker build -f docker/flounder-sandbox-ton.Dockerfile -t flounder-sandbox:ton .",
-    "prepack": "npm run build",
     "start": "node ./dist/cli.js",
     "mock-audit": "node scripts/mock-audit.mjs",
     "check:package": "npm run build && npm run check:package:dist",
@@ -90,6 +91,8 @@
     "AGENTS.md",
     "CONTRIBUTING.md",
     "SECURITY.md",
+    "npm-shrinkwrap.json",
+    "supply-chain-allowlist.json",
     "LICENSE"
   ],
   "pi": {
@@ -106,7 +109,7 @@
   "peerDependencies": {
     "@earendil-works/pi-ai": ">=0.85.1 <0.86",
     "@earendil-works/pi-coding-agent": ">=0.85.1 <0.86",
-    "typebox": "*"
+    "typebox": ">=1.2.0 <1.3"
   },
   "devDependencies": {
     "@earendil-works/pi-ai": "0.85.1",
@@ -120,7 +123,8 @@
     "vite": "^8.0.16"
   },
   "dependencies": {
-    "react": "^19.2.7",
-    "react-dom": "^19.2.7"
+    "react": "19.2.7",
+    "react-dom": "19.2.7",
+    "yaml": "2.9.0"
   }
 }

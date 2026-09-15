@@ -21,6 +21,49 @@ concurrency:
   cancel-in-progress: true
 
 jobs:
+  trusted-policy:
+    name: Trusted PR Policy
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    steps:
+      - name: Checkout candidate without credentials
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          path: candidate
+          persist-credentials: false
+
+      - name: Checkout protected base tooling
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          path: trusted
+          persist-credentials: false
+
+      - name: Setup trusted Node runtime
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: trusted/.nvmrc
+
+      - name: Install protected gate dependencies
+        working-directory: trusted
+        run: npm ci --ignore-scripts
+
+      - name: Inspect candidate with protected gate and allowlist
+        working-directory: candidate
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: |
+          if [[ ! -f ../trusted/scripts/check-supply-chain.mjs ]]; then
+            echo "Trusted PR Policy activates after this bootstrap change lands on the base branch."
+            exit 0
+          fi
+          node ../trusted/scripts/check-supply-chain.mjs --root . --baseline-root ../trusted
+          node ../trusted/scripts/pr-quality-gate.mjs --base-ref "$BASE_SHA" --head-ref "$HEAD_SHA" --output pr-quality-gate.json
+
   verify:
     name: Verify
     runs-on: ubuntu-latest
@@ -30,12 +73,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -58,8 +102,56 @@ jobs:
       - name: Installed package contract
         run: npm run check:package:dist
 
+      - name: Supply-chain contract
+        run: npm run check:supply-chain
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
+
       - name: Public-surface scan
         run: npm run check:public
 
       - name: Package dry run
         run: npm pack --dry-run
+
+      - name: Pull request quality gate
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+        run: npm run quality:pr -- --base-ref "$BASE_SHA" --head-ref "$HEAD_SHA" --output pr-quality-gate.json
+
+      - name: Upload pull request quality report
+        if: always() && github.event_name == 'pull_request'
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+        with:
+          name: pr-quality-gate
+          path: pr-quality-gate.json
+          if-no-files-found: ignore
+
+  windows-compatibility:
+    name: Windows Compatibility
+    if: github.event_name == 'pull_request'
+    runs-on: windows-latest
+    timeout-minutes: 20
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Typecheck
+        run: npm run check
+
+      - name: Build and test
+        run: npm test

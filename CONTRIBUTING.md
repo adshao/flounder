@@ -11,7 +11,7 @@ Use Node 24 LTS. This repository includes `.nvmrc` and `.node-version` pinned to
 
 ```bash
 nvm use
-npm install
+npm ci --ignore-scripts
 npm run build
 npm run check
 npm test
@@ -20,10 +20,46 @@ npm test
 Useful local gates:
 
 ```bash
+npm run quality:pr -- --base-ref origin/main --head-ref HEAD
+npm run check:supply-chain
 npm run mock-audit
 npm run check:public
 npm run verify
 ```
+
+The pull request gate classifies changed-file risk, requires focused tests for
+sensitive subsystems, and lists the semantic review lenses that still need a
+maintainer. It does not replace human review. See
+[Pull Request Quality Gates](docs/QUALITY_GATES.md) for the merge policy and
+repeatable review workflow.
+
+The supply-chain gate protects contributors and downstream fork users. It
+forbids implicit install/Git-preparation/packaging execution, non-registry
+dependency sources, unpinned workflow actions, privileged fork CI, tracked
+symlinks, and submodules. Any new network, subprocess, filesystem, environment,
+credential, native-code, or dynamic-loading capability must be called out in
+the pull request and reviewed as a downstream runtime security change.
+
+The repository `.npmrc` disables dependency lifecycle scripts by default. Do
+not override it for unreviewed branches. If a dependency genuinely requires an
+install script, propose the smallest audited alternative and document why the
+script is safe before changing the policy.
+
+Dependencies that declare lifecycle scripts must match the exact reviewed
+entries in `supply-chain-allowlist.json`. A pull request cannot add an entry to
+authorize itself: maintainers compare it with the protected base allowlist, and
+an independently verified expansion must land first as a maintainer policy
+change. The repository still installs with scripts disabled.
+
+The same allowlist pins the exact SHA-256 bytes of every workflow. Workflow
+changes require a maintainer to pre-authorize the proposed digest in a separate
+policy change; contributor pull requests cannot add or rewrite workflows and
+authorize those bytes in the same change.
+
+The published `npm-shrinkwrap.json` pins the transitive registry graph used by
+package consumers. Every resolved artifact, including dev and optional
+dependencies, must retain its integrity hash; production dependencies use exact
+versions.
 
 `npm run check:public` scans the current tree plus the latest commit for secrets,
 local absolute paths, and machine-specific values. To make Git run the commit-only
@@ -73,6 +109,10 @@ Do not position Flounder as a scanner for one technology stack. Solidity/EVM and
 
 ## Pull Request Checklist
 
+- `npm run quality:pr -- --base-ref origin/main --head-ref HEAD` passes its
+  deterministic checks and all reported manual gates are reviewed.
+- `npm run check:supply-chain` and `npm audit --omit=dev --audit-level=high`
+  pass before dependency, workflow, packaging, or release changes land.
 - `npm run check` passes.
 - `npm test` passes, or the PR explains the environment limitation.
 - `npm run mock-audit` passes when audit behavior changed.

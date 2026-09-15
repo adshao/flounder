@@ -27,12 +27,13 @@ jobs:
 
     steps:
       - name: Checkout
-        uses: actions/checkout@v4
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
 
       - name: Setup Node
-        uses: actions/setup-node@v4
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
         with:
           node-version-file: .nvmrc
           cache: npm
@@ -53,18 +54,164 @@ jobs:
       - name: Database upgrade contract
         run: npm run check:db-upgrade:dist
 
-      - name: Installed package contract
-        run: npm run check:package:dist
+      - name: Supply-chain contract
+        run: npm run check:supply-chain
+
+      - name: Production dependency audit
+        run: npm audit --omit=dev --audit-level=high
 
       - name: Public-surface scan
         run: npm run check:public
 
-      - name: Pack artifact
-        run: npm pack
+  package-artifact:
+    name: Build immutable package candidate
+    needs: release-gate
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      npm_config_cache: .npm-cache
 
-      - name: Upload package artifact
-        uses: actions/upload-artifact@v4
+    steps:
+      # This fresh job prevents test processes and test-created files from
+      # reaching the release artifact.
+      - name: Checkout
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Create isolated artifact directories
+        run: |
+          mkdir -p "$RUNNER_TEMP/compiled-output"
+          mkdir -p "$RUNNER_TEMP/package-output"
+
+      # Candidate build code can write only the disposable build tree and the
+      # compiled-output directory. It never receives the package-output mount.
+      - name: Build compiled output without network
+        run: |
+          docker run --rm --network none --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --env HOME=/tmp/home \
+            --env npm_config_cache=/tmp/npm-cache \
+            --tmpfs /build:rw,exec,size=3g \
+            --tmpfs /tmp:rw,noexec,size=256m \
+            --volume "$GITHUB_WORKSPACE:/source:ro" \
+            --volume "$RUNNER_TEMP/compiled-output:/compiled:rw" \
+            docker.io/library/node:24.13.0-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f \
+            sh -euc '
+              mkdir -p /tmp/home /tmp/npm-cache
+              mkdir -p /build/project
+              tar -C /source --exclude=.git --exclude=dist --exclude=node_modules -cf - . | tar -C /build/project -xf -
+              cp -a /source/node_modules /build/node_modules
+              ln -s /build/node_modules /build/project/node_modules
+              cd /build/project
+              npm run build
+              test -d dist
+              test -z "$(find dist -type l -print -quit)"
+              test -z "$(find dist ! -type d ! -type f -print -quit)"
+              mkdir -p /compiled/dist
+              cp -a dist/. /compiled/dist/
+            '
+
+      # No candidate process runs in this container. npm pack receives a fresh
+      # source copy plus only the compiled dist tree from the terminated build.
+      - name: Pack fresh source and generate exact-artifact metadata
+        run: |
+          docker run --rm --network none --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --env HOME=/tmp/home \
+            --env npm_config_cache=/tmp/npm-cache \
+            --tmpfs /build:rw,exec,size=3g \
+            --tmpfs /tmp:rw,noexec,size=256m \
+            --volume "$GITHUB_WORKSPACE:/source:ro" \
+            --volume "$RUNNER_TEMP/compiled-output:/compiled:ro" \
+            --volume "$RUNNER_TEMP/package-output:/output:rw" \
+            docker.io/library/node:24.13.0-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f \
+            sh -euc '
+              mkdir -p /tmp/home /tmp/npm-cache
+              mkdir -p /build/project
+              tar -C /source --exclude=.git --exclude=dist --exclude=node_modules -cf - . | tar -C /build/project -xf -
+              test -d /compiled/dist
+              test -z "$(find /compiled/dist -type l -print -quit)"
+              test -z "$(find /compiled/dist ! -type d ! -type f -print -quit)"
+              mkdir -p /build/project/dist
+              cp -a /compiled/dist/. /build/project/dist/
+              cd /build/project
+              npm pack --ignore-scripts --pack-destination /output
+              npm sbom --package-lock-only --sbom-format cyclonedx > /output/sbom.cdx.json
+              cd /output
+              sha256sum -- *.tgz > SHA256SUMS
+            '
+
+      - name: Upload package candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
           name: npm-package
-          path: "*.tgz"
+          path: |
+            ${{ runner.temp }}/package-output/*.tgz
+            ${{ runner.temp }}/package-output/sbom.cdx.json
+            ${{ runner.temp }}/package-output/SHA256SUMS
           if-no-files-found: error
+
+  verify-package:
+    name: Verify immutable package candidate
+    needs: package-artifact
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      npm_config_cache: .npm-cache
+
+    steps:
+      - name: Checkout verification harness
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Node
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7.0.0
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+
+      - name: Install verification dependencies
+        run: npm ci --ignore-scripts
+
+      - name: Download sealed package candidate
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1
+        with:
+          name: npm-package
+          path: verified-package
+
+      - name: Verify package checksum
+        run: cd verified-package && sha256sum -c SHA256SUMS
+
+      - name: Install package candidate without scripts
+        run: |
+          mkdir -p "$RUNNER_TEMP/package-consumer"
+          cd "$RUNNER_TEMP/package-consumer"
+          npm install --ignore-scripts --omit=dev --no-audit --no-fund --package-lock=false \
+            "$GITHUB_WORKSPACE/verified-package/flounders-$(node -p \"require('$GITHUB_WORKSPACE/package.json').version\").tgz"
+
+      - name: Installed package contract
+        run: |
+          docker run --rm --network none --read-only \
+            --cap-drop ALL \
+            --security-opt no-new-privileges \
+            --env HOME=/tmp/home \
+            --tmpfs /tmp:rw,exec,size=2g \
+            --volume "$GITHUB_WORKSPACE:/source:ro" \
+            --volume "$RUNNER_TEMP/package-consumer:/consumer:rw" \
+            docker.io/library/node:24.13.0-bookworm-slim@sha256:4660b1ca8b28d6d1906fd644abe34b2ed81d15434d26d845ef0aced307cf4b6f \
+            node /source/scripts/check-package.mjs \
+              --tarball "/source/verified-package/flounders-$(node -p \"require('./package.json').version\").tgz" \
+              --installed-root /consumer/node_modules/flounders

@@ -1,0 +1,18 @@
+# Require accountable maintainer review for every public contribution. The
+# explicit entries document the highest-risk supply-chain and runtime surfaces.
+* @adshao
+/src/agent/ @adshao
+/src/db/ @adshao
+/src/llm/ @adshao
+/src/security/ @adshao
+/prompts/ @adshao
+/docker/ @adshao
+/skills/ @adshao
+/.githooks/ @adshao
+/.github/workflows/ @adshao
+/scripts/ @adshao
+/package.json @adshao
+/npm-shrinkwrap.json @adshao
+/.npmrc @adshao
+/supply-chain-allowlist.json @adshao
+/AGENTS.md @adshao
