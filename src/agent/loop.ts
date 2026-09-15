@@ -1,7 +1,7 @@
 import type { AuditorConfig } from "../config.js";
 import type { LlmClient } from "../types.js";
 import type { RunLogger } from "../trace/logger.js";
-import { extractJsonArray, extractJsonObject } from "../util/json.js";
+import { extractJsonArray, extractJsonObject, repairUnbalancedJson } from "../util/json.js";
 import { buildConfirmKickoff, buildDeepKickoff, buildAuditKickoff, buildMapKickoff, buildSynthesisKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYNTHESIS_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, MAP_SYSTEM, renderTranscript, type TranscriptStep } from "./prompts.js";
 import { describeAction, type AgentTool, type ToolContext } from "./tools.js";
 
@@ -256,7 +256,7 @@ interface ParsedAction {
 }
 
 function parseAction(raw: string): ParsedAction | undefined {
-  const parsed = extractJsonObject<Record<string, unknown>>(raw);
+  const parsed = extractJsonObject<Record<string, unknown>>(repairUnbalancedJson(raw));
   if (!parsed || typeof parsed !== "object") return undefined;
   const thought = typeof parsed.thought === "string" ? parsed.thought.trim() : "";
   if (parsed.done === true) {
