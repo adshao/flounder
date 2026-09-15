@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import type { LlmClient } from "../types.js";
@@ -19,6 +19,7 @@ export class ClaudeCodeClient implements LlmClient {
     agentic?: boolean;
   }): Promise<string> {
     if (!input.model) throw new Error("model is required");
+    assertSafeModelId(input.model);
     const tmp = await mkdtemp(path.join(os.tmpdir(), "flounder-claude-code-"));
     const system = renderSystemPrompt(input.system, input.agentic ?? false);
     // NOTE: keep these flags aligned with the installed `claude` CLI. The provider
@@ -28,14 +29,23 @@ export class ClaudeCodeClient implements LlmClient {
     // `--permission-mode default` (NOT bypassPermissions) is correct here — there are no
     // tools to approve, and host harnesses (rightly) block bypassPermissions as an unsafe
     // autonomous-agent spawn. The system prompt is appended because the CLI exposes
-    // `--append-system-prompt` (no replace flag); the appended instruction + disabled
+    // `--append-system-prompt[-file]` (no replace flag); the appended instruction + disabled
     // tools is sufficient to get a single JSON action per turn.
+    //
+    // The rendered prompt is passed BY FILE: it can be far larger than Windows' 32k
+    // CreateProcess command-line limit, which made claude.cmd exit(255) instantly with no
+    // output (upstream then surfaced that as a 15-minute timeout). Keeping it on stdin
+    // instead would collapse the system/user role boundary, so only the user turn is piped.
+    const systemPromptFile = path.join(tmp, "system-prompt.txt");
+    await writeFile(systemPromptFile, system);
     const effort = claudeCodeEffort(input.thinkingLevel);
     const args = [
       "-p",
       "--model",
       input.model,
       ...(effort ? ["--effort", effort] : []),
+      "--append-system-prompt-file",
+      systemPromptFile,
       "--output-format",
       "json",
       "--disallowedTools",
@@ -43,15 +53,9 @@ export class ClaudeCodeClient implements LlmClient {
       "--permission-mode",
       "default",
     ];
-    // Windows CreateProcess has a 32k-char command-line limit; long system
-    // prompts passed via --append-system-prompt make claude.cmd exit(255)
-    // instantly with no output (upstream then sees a timeout). Fold the
-    // rendered system prompt into stdin instead — same semantics for a pure
-    // text-completion backend.
-    const stdinPayload = `${system}\n\n---\n\n${input.user}`;
 
     try {
-      const stdout = await spawnClaude(args, stdinPayload, {
+      const stdout = await spawnClaude(args, input.user, {
         cwd: tmp,
         maxBuffer: 20 * 1024 * 1024,
         timeout: Number(process.env.FLOUNDER_CLAUDE_CODE_TIMEOUT_MS ?? 900_000),
@@ -79,22 +83,32 @@ export class ClaudeCodeClient implements LlmClient {
       });
       throw new Error(`claude-code completion failed: ${message}`);
     } finally {
-      // Windows: the spawned claude.cmd may still hold the temp cwd briefly
-      // after close (EBUSY) — retry instead of failing the whole call.
-      for (let attempt = 0; attempt < 5; attempt++) {
-        try {
-          await rm(tmp, { recursive: true, force: true });
-          break;
-        } catch (error) {
-          if (attempt === 4) {
-            if (process.platform !== "win32") throw error;
-            break;
-          }
-          await new Promise((r) => setTimeout(r, 500));
-        }
-      }
+      // Windows: the spawned claude.cmd may still hold the temp cwd briefly after
+      // close (EBUSY). fs.rm retries the transient codes itself (EBUSY/EMFILE/
+      // ENFILE/ENOTEMPTY/EPERM); a persistent failure is reported instead of
+      // thrown, so it cannot mask the completion error already propagating out.
+      await rm(tmp, { recursive: true, force: true, maxRetries: 5, retryDelay: 500 }).catch(async (error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        if (this.logger) await this.logger.event("claude_code_tmp_cleanup_failed", { dir: tmp, error: message });
+        else process.stderr.write(`[flounder] claude_code_tmp_cleanup_failed dir=${tmp} error=${message}\n`);
+      });
     }
   }
+}
+
+// The model id is the one caller-supplied value that reaches the command line;
+// reject anything cmd.exe could read as a metacharacter before it gets there.
+function assertSafeModelId(model: string): void {
+  if (!/^[A-Za-z0-9][A-Za-z0-9._:@/-]*$/.test(model)) {
+    throw new Error(`unsafe model id: ${JSON.stringify(model)}`);
+  }
+}
+
+// Windows command-line quoting (backslashes are literal except right before a
+// quote). Needed because arguments are joined into the cmd.exe command line.
+function quoteForCmd(arg: string): string {
+  if (arg.length > 0 && !/[\s"^&|<>()]/.test(arg)) return arg;
+  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
 }
 
 function claudeCodeEffort(level?: ThinkingLevel): string | undefined {
@@ -149,7 +163,17 @@ function parseClaudeOutput(stdout: string): { text: string; meta: Record<string,
 function spawnClaude(args: string[], input: string, options: { cwd: string; maxBuffer: number; timeout: number }): Promise<string> {
   return new Promise((resolve, reject) => {
     const isWindows = process.platform === "win32";
-    const child = spawn(isWindows ? "claude.cmd" : "claude", args, { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"], shell: isWindows });
+    // Windows installs the CLI as a `claude.cmd` shim, which Node can only launch
+    // through a shell, and Node refuses to escape arguments it concatenates into a
+    // shell command line (DEP0190). So the command line is assembled here with
+    // explicit cmd.exe quoting; input.model is validated before it can reach the
+    // shell (see assertSafeModelId), so no raw caller input is interpreted by it.
+    const command = isWindows ? ["claude.cmd", ...args.map(quoteForCmd)].join(" ") : "claude";
+    const child = spawn(command, isWindows ? [] : args, {
+      cwd: options.cwd,
+      stdio: ["pipe", "pipe", "pipe"],
+      shell: isWindows,
+    });
     let stdout = "";
     let stderr = "";
     let settled = false;

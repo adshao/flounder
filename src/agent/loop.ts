@@ -256,7 +256,7 @@ interface ParsedAction {
 }
 
 function parseAction(raw: string): ParsedAction | undefined {
-  const parsed = extractJsonObject<Record<string, unknown>>(repairUnbalancedObject(raw));
+  const parsed = extractJsonObject<Record<string, unknown>>(raw);
   if (!parsed || typeof parsed !== "object") return undefined;
   const thought = typeof parsed.thought === "string" ? parsed.thought.trim() : "";
   if (parsed.done === true) {
@@ -267,38 +267,4 @@ function parseAction(raw: string): ParsedAction | undefined {
   if (!tool) return undefined;
   const args = parsed.args && typeof parsed.args === "object" && !Array.isArray(parsed.args) ? (parsed.args as Record<string, unknown>) : {};
   return { thought, tool, args, done: false, summary: "" };
-}
-
-// Some models emit a large JSON action with a missing closing brace/bracket at
-// the very end (truncation-style slip inside a long escaped string payload).
-// Appending the missing closers recovers the action; anything else is left for
-// the normal parse-error path.
-function repairUnbalancedObject(text: string): string {
-  const trimmed = text.trim();
-  if (!trimmed.startsWith("{")) return trimmed;
-  const start = trimmed.indexOf("{");
-  const end = trimmed.lastIndexOf("}");
-  if (end !== trimmed.length - 1) return trimmed;
-  const body = trimmed.slice(start);
-  let depth = 0;
-  let inStr = false;
-  let esc = false;
-  const stack: string[] = [];
-  for (const ch of body) {
-    if (esc) {
-      esc = false;
-      continue;
-    }
-    if (inStr) {
-      if (ch === "\\") esc = true;
-      else if (ch === '"') inStr = false;
-      continue;
-    }
-    if (ch === '"') inStr = true;
-    else if (ch === "{" || ch === "[") stack.push(ch);
-    else if (ch === "}" || ch === "]") stack.pop();
-  }
-  if (inStr) return trimmed;
-  if (stack.length === 0) return trimmed;
-  return trimmed + stack.reverse().map((c) => (c === "{" ? "}" : "]")).join("");
 }
