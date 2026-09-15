@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { Type } from "typebox";
-import { defaultConfig, type AuditorConfig } from "../config.js";
+import { defaultConfig, THINKING_LEVELS, type AuditorConfig } from "../config.js";
 import { runPrepare } from "../agent/acquire.js";
 import { runAudit } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
@@ -49,13 +49,13 @@ function stringArray(params: ToolParams, key: string): string[] {
   return Array.isArray(value) ? value.filter((item): item is string => typeof item === "string" && item.trim().length > 0).map((item) => item.trim()) : [];
 }
 
-function applyCommonConfig(cfg: AuditorConfig, params: ToolParams): void {
+export function applyCommonConfig(cfg: AuditorConfig, params: ToolParams): void {
   cfg.targetName = str(params, "target") ?? cfg.targetName;
   cfg.provider = str(params, "provider") ?? cfg.provider;
   cfg.auditModel = str(params, "model") ?? cfg.auditModel;
   const thinking = str(params, "thinking");
-  if (thinking === "off" || thinking === "minimal" || thinking === "low" || thinking === "medium" || thinking === "high" || thinking === "xhigh") {
-    cfg.thinkingLevel = thinking;
+  if (thinking && (THINKING_LEVELS as readonly string[]).includes(thinking)) {
+    cfg.thinkingLevel = thinking as AuditorConfig["thinkingLevel"];
   }
   cfg.outputDir = str(params, "outputDir") ?? cfg.outputDir;
   const historyDir = str(params, "historyDir");
@@ -168,7 +168,7 @@ const sharedParams = {
   target: Type.String({ description: "Target name used for run artifacts and durable memory." }),
   provider: Type.Optional(Type.String({ description: "pi-ai provider, for example openai-codex." })),
   model: Type.Optional(Type.String({ description: "Model id used to drive the agent loop." })),
-  thinking: Type.Optional(Type.String({ description: "off|minimal|low|medium|high|xhigh." })),
+  thinking: Type.Optional(Type.String({ description: `${THINKING_LEVELS.join("|")}.` })),
   outputDir: Type.Optional(Type.String({ description: "Artifact output directory." })),
   historyDir: Type.Optional(Type.String({ description: "Project history directory. Defaults to outputDir/history." })),
   sandboxBackend: Type.Optional(Type.String({ description: "auto|oci|apple-container|host." })),

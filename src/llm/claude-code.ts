@@ -80,11 +80,18 @@ export class ClaudeCodeClient implements LlmClient {
   }
 }
 
-function claudeCodeEffort(level?: ThinkingLevel): string | undefined {
-  if (!level) return undefined;
-  if (level === "off" || level === "minimal" || level === "low") return "low";
-  if (level === "medium" || level === "high" || level === "xhigh") return level;
-  return undefined;
+const CLAUDE_CODE_EFFORTS: Record<ThinkingLevel, "low" | "medium" | "high" | "xhigh" | "max"> = {
+  off: "low",
+  minimal: "low",
+  low: "low",
+  medium: "medium",
+  high: "high",
+  xhigh: "xhigh",
+  max: "max",
+};
+
+export function claudeCodeEffort(level?: ThinkingLevel): string | undefined {
+  return level ? CLAUDE_CODE_EFFORTS[level] : undefined;
 }
 
 function renderSystemPrompt(system: string, agentic: boolean): string {

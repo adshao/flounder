@@ -5589,11 +5589,13 @@ test("api: provider profiles — seed + CRUD + per-phase roles; pi discovery", a
     assert.ok(opusMax, "expected opus 4.8 max starter profile");
     assert.equal(opusMax.provider, "claude-code");
     assert.equal(opusMax.model, "claude-opus-4-8");
-    assert.equal(opusMax.thinking, "xhigh");
+    assert.equal(opusMax.thinking, "max");
 
     // discovery: pi-ai's provider list (+ CLI fallbacks) and a provider's models
     const avail = (await json(await fetch(base + "/api/pi/providers"))).providers;
     assert.ok(avail.includes("openai-codex") && avail.includes("claude-code") && avail.includes("mock"));
+    const claudeModels = (await json(await fetch(base + "/api/pi/models/claude-code"))).models;
+    assert.ok(claudeModels.every((model) => model.thinkingLevels.includes("max")), "Claude Code models should expose max effort");
     const discoveredModels = (await json(await fetch(base + "/api/pi/models/openai-codex"))).models;
     assert.ok(discoveredModels.length >= 1, "expected pi model discovery");
     assert.ok(discoveredModels.every((m) => Array.isArray(m.thinkingLevels) && m.thinkingLevels.length >= 1));

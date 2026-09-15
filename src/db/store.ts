@@ -234,6 +234,13 @@ export interface ProviderProfile {
   updated_at: string;
 }
 
+export const CLAUDE_CODE_MAX_STARTER_PROFILE = {
+  name: "claude-code · opus 4.8 max",
+  provider: "claude-code",
+  model: "claude-opus-4-8",
+  thinking: "max",
+} satisfies ProviderInput;
+
 export interface FindingFilter {
   status?: string | undefined; // exact status, e.g. "confirmed-differential"
   search?: string | undefined; // substring match on title or location
@@ -1238,6 +1245,18 @@ export class MetadataStore {
 
   private runDataMigrations(): void {
     this.transaction(() => {
+      const claudeStarter = CLAUDE_CODE_MAX_STARTER_PROFILE;
+      this.db.prepare(
+        `UPDATE provider
+            SET thinking = ?, updated_at = ?
+          WHERE name = ?
+            AND provider = ?
+            AND model = ?
+            AND thinking = 'xhigh'
+            AND base_model IS NULL
+            AND roles_json IS NULL
+            AND created_at = updated_at`,
+      ).run(claudeStarter.thinking, now(), claudeStarter.name, claudeStarter.provider, claudeStarter.model);
       // `job.run_id` intentionally follows the active pipeline phase. It can only
       // prove ownership for the phase it currently references, so backfill that
       // exact row and never infer older phase ownership from timestamps or paths.

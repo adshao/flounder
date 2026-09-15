@@ -6,7 +6,7 @@ export const PROVIDER_PHASES = ["prepare", "map", "dig", "confirm"] as const;
 export const PHASES = ["prepare", "map", "dig", "synthesis", "verify", "confirm", "report"] as const;
 export type ProviderPhase = (typeof PROVIDER_PHASES)[number];
 export type ProjectPhase = (typeof PHASES)[number];
-export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh"] as const;
+export const THINKING_LEVELS = ["off", "minimal", "low", "medium", "high", "xhigh", "max"] as const;
 export const PHASE_DESC: Record<(typeof PHASES)[number], string> = {
   prepare: "Stage source and warm the build sandbox",
   map: "Build the scope inventory",

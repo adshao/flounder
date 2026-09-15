@@ -5,7 +5,7 @@ import path from "node:path";
 import test from "node:test";
 import { defaultConfig } from "../dist/config.js";
 import { createLlmClient } from "../dist/llm/client.js";
-import { ClaudeCodeClient } from "../dist/llm/claude-code.js";
+import { claudeCodeEffort, ClaudeCodeClient } from "../dist/llm/claude-code.js";
 import { buildCodexExecArgs, CodexCliClient } from "../dist/llm/codex-cli.js";
 import { PiAiClient } from "../dist/llm/pi-ai.js";
 import { RunLogger } from "../dist/trace/logger.js";
@@ -39,4 +39,8 @@ test("codex-cli fallback isolates non-interactive audit calls from user config a
   assert.ok(args.includes("--sandbox"));
   assert.equal(args[args.indexOf("--sandbox") + 1], "read-only");
   assert.doesNotMatch(args.join(" "), /danger-full-access/);
+});
+
+test("claude-code forwards max reasoning effort", () => {
+  assert.equal(claudeCodeEffort("max"), "max");
 });

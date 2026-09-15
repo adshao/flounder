@@ -62,6 +62,40 @@ test("store: legacy provider profiles gain custom-model compatibility metadata",
   store.close();
 });
 
+test("store: untouched legacy Claude max starter upgrades without rewriting customized profiles", async () => {
+  const untouched = await tempDbPath();
+  let store = new MetadataStore(untouched.dbPath);
+  const untouchedId = store.createProvider({
+    name: "claude-code · opus 4.8 max",
+    provider: "claude-code",
+    model: "claude-opus-4-8",
+    thinking: "xhigh",
+  });
+  store.close();
+
+  store = new MetadataStore(untouched.dbPath);
+  assert.equal(store.getProvider(untouchedId).thinking, "max");
+  store.close();
+
+  const customized = await tempDbPath();
+  store = new MetadataStore(customized.dbPath);
+  const customizedId = store.createProvider({
+    name: "claude-code · opus 4.8 max",
+    provider: "claude-code",
+    model: "claude-opus-4-8",
+    thinking: "xhigh",
+  });
+  store.close();
+
+  const raw = new DatabaseSync(customized.dbPath);
+  raw.prepare("UPDATE provider SET updated_at = ? WHERE id = ?").run("2099-01-01T00:00:00.000Z", customizedId);
+  raw.close();
+
+  store = new MetadataStore(customized.dbPath);
+  assert.equal(store.getProvider(customizedId).thinking, "xhigh");
+  store.close();
+});
+
 test("store: local default provider profile persists and clears with its profile", async () => {
   const { dbPath } = await tempDbPath();
   const store = new MetadataStore(dbPath);

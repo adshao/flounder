@@ -18,7 +18,7 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_AUDIT_MODEL, defaultOutputDir, defaultWorkspaceDir, normalizeCustomModels, type CustomModelDefinition } from "../config.js";
-import { MetadataStore, type RunKind, type Coverage, type DiscoveryBacklogFilter, type DiscoveryBacklogKind, type DiscoveryBacklogStatus, type ProviderInput, type ProviderProfile, type ProjectInput, type ProjectListOptions, type ProviderRoles, type RoleOverride } from "../db/store.js";
+import { CLAUDE_CODE_MAX_STARTER_PROFILE, MetadataStore, type RunKind, type Coverage, type DiscoveryBacklogFilter, type DiscoveryBacklogKind, type DiscoveryBacklogStatus, type ProviderInput, type ProviderProfile, type ProjectInput, type ProjectListOptions, type ProviderRoles, type RoleOverride } from "../db/store.js";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getProviders, getModels } from "@earendil-works/pi-ai/compat";
 import { type LaunchSpec, ActivityBus, type Activity, type ReportFindingSpec, type ConfirmSettledRow } from "./run-manager.js";
@@ -798,7 +798,7 @@ export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof 
   store.seedProviders([
     { name: `openai-codex · ${DEFAULT_AUDIT_MODEL} · xhigh`, provider: "openai-codex", model: DEFAULT_AUDIT_MODEL, thinking: "xhigh" },
     { name: "openai-codex · gpt-6-astra · medium", provider: "openai-codex", model: "gpt-6-astra", thinking: "medium" },
-    { name: "claude-code · opus 4.8 max", provider: "claude-code", model: "claude-opus-4-8", thinking: "xhigh" },
+    CLAUDE_CODE_MAX_STARTER_PROFILE,
   ]);
   const artifactReconciled = reconcileSuccessfulArtifactRuns(store);
   if (artifactReconciled > 0) console.log(`[flounder ui] reconciled ${artifactReconciled} completed run artifact${artifactReconciled === 1 ? "" : "s"}`);
@@ -4638,9 +4638,9 @@ function availableProviders(): string[] {
 function availableModels(provider: string): Array<{ id: string; name: string; reasoning: boolean; thinkingLevels: ModelThinkingLevel[] }> {
   if (provider === "claude-code") {
     return [
-      { id: "opus", name: "Opus (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh"] as ModelThinkingLevel[] },
-      { id: "sonnet", name: "Sonnet (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh"] as ModelThinkingLevel[] },
-      { id: "fable", name: "Fable (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh"] as ModelThinkingLevel[] },
+      { id: "opus", name: "Opus (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh", "max"] as ModelThinkingLevel[] },
+      { id: "sonnet", name: "Sonnet (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh", "max"] as ModelThinkingLevel[] },
+      { id: "fable", name: "Fable (latest)", reasoning: true, thinkingLevels: ["low", "medium", "high", "xhigh", "max"] as ModelThinkingLevel[] },
     ];
   }
   try {

@@ -19,7 +19,7 @@ async function loadTsModule(relativePath) {
   return import(`data:text/javascript;base64,${Buffer.from(compiled.outputText).toString("base64")}`);
 }
 
-const { activeJobCounts, bugBountyEngagementLabel, contestReviewState, decisionHasUnresolvedEvidenceConflict, hasUnresolvedEvidenceConflict, isVerifyRun, normalizeActivityBody, pendingConfirmFindings, splitActivitySummaries, phaseState, projectBadgeStatus, projectSourceState, reportableDecisions, reportableFindings, runProgress, sortConfirmDecisionsForSubmission } = await loadTsModule("../src/server/ui/src/domain.ts");
+const { activeJobCounts, bugBountyEngagementLabel, contestReviewState, decisionHasUnresolvedEvidenceConflict, hasUnresolvedEvidenceConflict, isVerifyRun, normalizeActivityBody, pendingConfirmFindings, splitActivitySummaries, phaseState, projectBadgeStatus, projectSourceState, reportableDecisions, reportableFindings, runProgress, sortConfirmDecisionsForSubmission, THINKING_LEVELS } = await loadTsModule("../src/server/ui/src/domain.ts");
 const { nextDialogFocusIndex } = await loadTsModule("../src/server/ui/src/dialog-focus.ts");
 const appSource = readFileSync(new URL("../src/server/ui/src/App.tsx", import.meta.url), "utf8");
 const stylesSource = readFileSync(new URL("../src/server/ui/src/styles.css", import.meta.url), "utf8");
@@ -118,6 +118,10 @@ test("ui: provider profiles expose custom model metadata and deliver it to the s
   assert.match(appSource, /The custom ID is sent to the provider/);
   assert.match(appSource, /provider model definition are delivered only to this daemon/);
   assert.match(appSource, /baseModel: customModel \? form\.baseModel\.trim\(\) : null/);
+});
+
+test("ui: provider profiles offer max thinking", () => {
+  assert.ok(THINKING_LEVELS.includes("max"));
 });
 
 test("ui: provider settings expose the effective local default", () => {

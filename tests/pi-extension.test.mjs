@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import extension, { applyFsaRunBudgets } from "../dist/pi/extension.js";
+import extension, { applyCommonConfig, applyFsaRunBudgets } from "../dist/pi/extension.js";
 import { defaultConfig } from "../dist/config.js";
 
 test("pi extension registers workflow tools", async () => {
@@ -38,11 +38,18 @@ test("pi extension registers workflow tools", async () => {
   assert.ok(!runParams.required.includes("sourcePaths"));
   assert.ok(runParams.properties.clue);
   assert.ok(runParams.properties.sourcePaths);
+  assert.match(runParams.properties.thinking.description, /max/);
 
   // flounder_confirm mirrors `flounder confirm`: prior run dir + target source.
   const confirmParams = tools.get("flounder_confirm").parameters;
   assert.ok(confirmParams.required.includes("runDir"));
   assert.ok(confirmParams.required.includes("sourcePaths"));
+});
+
+test("pi extension preserves max thinking", () => {
+  const cfg = defaultConfig();
+  applyCommonConfig(cfg, { thinking: "max" });
+  assert.equal(cfg.thinkingLevel, "max");
 });
 
 test("pi extension blocks live-network exploit-like bash commands", async () => {
