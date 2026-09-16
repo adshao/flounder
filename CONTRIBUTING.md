@@ -33,23 +33,30 @@ maintainer. It does not replace human review. See
 [Pull Request Quality Gates](docs/QUALITY_GATES.md) for the merge policy and
 repeatable review workflow.
 
+The maintainer review helper lives at
+`.agents/skills/flounder-pr-gate/SKILL.md`. It is repository governance, not a
+Flounder product skill: keep it outside `skills/`, the `pi.skills` discovery
+root, and the published npm artifact.
+
 The supply-chain gate protects contributors and downstream fork users. It
-forbids implicit install/Git-preparation/packaging execution, non-registry
-dependency sources, unpinned workflow actions, privileged fork CI, tracked
-symlinks, and submodules. Any new network, subprocess, filesystem, environment,
-credential, native-code, or dynamic-loading capability must be called out in
-the pull request and reviewed as a downstream runtime security change.
+forbids root install/Git-preparation/packaging hooks, unreviewed dependency
+install scripts, non-registry dependency sources, unpinned workflow actions,
+privileged fork CI, tracked symlinks, and submodules. Any new network,
+subprocess, filesystem, environment, credential, native-code, or
+dynamic-loading capability must be called out in the pull request and reviewed
+as a downstream runtime security change.
 
 The repository `.npmrc` disables dependency lifecycle scripts by default. Do
-not override it for unreviewed branches. If a dependency genuinely requires an
-install script, propose the smallest audited alternative and document why the
-script is safe before changing the policy.
+not override it for unreviewed branches. If a dependency declares an install
+script, first seek a script-free alternative; otherwise document why the exact
+locked artifact is necessary and safe before changing the allowlist.
 
 Dependencies that declare lifecycle scripts must match the exact reviewed
 entries in `supply-chain-allowlist.json`. A pull request cannot add an entry to
 authorize itself: maintainers compare it with the protected base allowlist, and
 an independently verified expansion must land first as a maintainer policy
-change. The repository still installs with scripts disabled.
+change. The repository and package-contract checks still install with scripts
+disabled.
 
 The same allowlist pins the exact SHA-256 bytes of every workflow. Workflow
 changes require a maintainer to pre-authorize the proposed digest in a separate

@@ -151,13 +151,18 @@ try {
     "docs/QUALITY_GATES.md",
     "scripts/check-supply-chain.mjs",
     "skills/flounder/SKILL.md",
-    "skills/flounder-pr-gate/SKILL.md",
     "npm-shrinkwrap.json",
     "supply-chain-allowlist.json",
     "LICENSE",
     "SECURITY.md",
   ]) {
     assert.ok(files.has(file), `missing public entrypoint or asset: ${file}`);
+  }
+  for (const file of [
+    ".agents/skills/flounder-pr-gate/SKILL.md",
+    "skills/flounder-pr-gate/SKILL.md",
+  ]) {
+    assert.ok(!files.has(file), `maintainer-only review automation leaked into package: ${file}`);
   }
 
   // Reproduce a downstream production install. Never expose the source tree's
@@ -223,7 +228,7 @@ try {
     { cwd: installed, env: childEnvironment, timeout: 30_000, maxBuffer: 1024 * 1024 },
   );
   console.log(
-    `Package contract passed (${packedManifest.version}; ${files.size} files; exact tarball, clean production install, CLI, exports, UI assets, mock audit, public surface).`,
+    `Package contract passed (${packedManifest.version}; ${files.size} files; exact tarball, script-disabled production install, CLI, exports, UI assets, mock audit, public surface).`,
   );
 } finally {
   await rm(temp, { recursive: true, force: true });

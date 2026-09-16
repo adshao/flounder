@@ -4,6 +4,11 @@ This document is the canonical merge policy for Flounder. It applies to human
 contributors and automation. A green CI run is necessary, but it is not by
 itself sufficient approval to merge.
 
+The repository-local maintainer helper is
+`.agents/skills/flounder-pr-gate/SKILL.md`. It applies this policy during review
+but is intentionally outside the product `skills/` discovery root and the
+published npm artifact.
+
 ## Decision Model
 
 Every pull request passes three independent gates:
@@ -97,10 +102,11 @@ maintainer, CI runner, or release consumer to execute it later.
 
 - Treat every executable source file, package/build script, workflow, action,
   container, skill, prompt, dependency manifest, and lockfile as high risk.
-- Reject consumer install lifecycle hooks, production dependency install
-  scripts, Git/URL/local-path dependencies, mutable GitHub Action references,
-  unprotected fork CI secrets, write permissions, self-hosted fork runners,
-  direct event-data shell interpolation, tracked symlinks, and submodules.
+- Reject root package install/Git-preparation/packaging hooks, unreviewed
+  dependency install scripts, Git/URL/local-path dependencies, mutable GitHub
+  Action references, unprotected fork CI secrets, write permissions,
+  self-hosted fork runners, direct event-data shell interpolation, tracked
+  symlinks, and submodules.
 - Forbid repository-local GitHub Actions. Their nested manifests create a
   second executable dependency graph that is easy to miss during workflow-only
   review; keep CI logic visible in the reviewed workflow and repository scripts.
@@ -115,7 +121,13 @@ maintainer, CI runner, or release consumer to execute it later.
 - Require every dependency that declares an install script, including dev and
   optional dependencies, to match an exact path, version, integrity hash, and
   rationale in `supply-chain-allowlist.json`. The allowlist documents reviewed
-  metadata; it does not enable script execution.
+  metadata; repository and CI installs still disable script execution. Seek a
+  script-free dependency first and treat any allowlist expansion as a high-risk
+  policy change.
+- Do not claim that the published package can enforce the repository `.npmrc`.
+  A consumer's ordinary npm install may execute allowlisted transitive hooks.
+  The supported no-execution path is `npm install --ignore-scripts flounders`,
+  and the package contract must validate the exact tarball through that path.
 - Require each workflow action to match an exact repository, commit SHA,
   release version, source URL, and rationale in the same allowlist. A 40-byte
   SHA proves immutability, not publisher trust.
@@ -162,6 +174,9 @@ maintainer, CI runner, or release consumer to execute it later.
 
 - Public-facing text is English.
 - Package contents contain only intentional public assets.
+- Maintainer-only agent instructions stay under `.agents/skills/`; they must
+  not be discoverable through the product `skills/` root or shipped in the npm
+  artifact.
 - No secret, credential, private URL, local username, absolute local path,
   customer data, private corpus, run output, cache, or generated report enters
   the diff, artifact, commit message, tag, or release note.

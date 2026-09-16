@@ -122,7 +122,7 @@ Use Node 24 LTS. This repository includes `.nvmrc` and `.node-version` pinned to
 
 ```bash
 nvm use
-npm install
+npm ci --ignore-scripts
 npm run build
 npm run sandbox:build
 ```

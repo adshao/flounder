@@ -53,6 +53,19 @@ mount, or artifact mutation to fail closed.
 The repository `.npmrc` disables dependency lifecycle scripts for clone and
 fork development installs. Do not override it on an unreviewed branch.
 
+An npm package cannot force a consumer's client to honor the repository
+`.npmrc`. Install the published package with lifecycle scripts disabled:
+
+```bash
+npm install --ignore-scripts flounders
+```
+
+A normal npm install may execute the exact transitive dependency hooks recorded
+in `supply-chain-allowlist.json`; the current graph includes platform selection
+and generated-code hooks inherited from pi-mono dependencies. The shrinkwrap
+and allowlist make those artifacts reviewable, but do not turn ordinary npm
+installation into a no-execution boundary.
+
 Release artifacts include `SHA256SUMS` and a CycloneDX SBOM. Consumers should
 compare the package checksum with `SHA256SUMS`, review the SBOM and source diff,
 and avoid running unreviewed fork branches with real provider credentials or

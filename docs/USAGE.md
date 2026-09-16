@@ -112,7 +112,7 @@ visible coverage gaps rather than evidence of safety.
 ## Install
 
 ```bash
-npm install
+npm ci --ignore-scripts
 npm run build
 npm test
 npm run sandbox:build  # required for real audits with the default OCI sandbox

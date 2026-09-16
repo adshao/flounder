@@ -50,37 +50,37 @@
       "path": "node_modules/@earendil-works/pi-coding-agent/node_modules/@google/genai",
       "version": "1.52.0",
       "integrity": "sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==",
-      "reason": "The published package declares a no-op preinstall script; repository installs still disable all lifecycle scripts."
+      "reason": "Exact reviewed pi-mono transitive artifact; it declares a no-op preinstall script. Repository, CI, and package-contract installs disable lifecycle scripts."
     },
     {
       "path": "node_modules/@earendil-works/pi-coding-agent/node_modules/esbuild",
       "version": "0.28.1",
       "integrity": "sha512-HrJrvZv5ayxBzPfwphOoNzkzOIIlifzk0KJrGK2c8R4+LKpMtpYLQeUdjnwjWv/LZlkH2laZk+4w78pi99D4Vw==",
-      "reason": "The package selects its platform binary in postinstall; repository installs keep lifecycle execution disabled."
+      "reason": "Exact reviewed pi-mono transitive artifact; its postinstall selects the platform binary. Repository, CI, and package-contract installs disable lifecycle scripts."
     },
     {
       "path": "node_modules/@earendil-works/pi-coding-agent/node_modules/protobufjs",
       "version": "7.6.5",
       "integrity": "sha512-/FPD0nUc9jH6rfFjji9IBqOz4pcSE3CsT1m7Ep6Mdb0LxSUMj8hgl6GomOvZzpNpAqqGaXA0P3VSrZLFzIhQrw==",
-      "reason": "The package declares its documented code-generation postinstall; repository installs keep lifecycle execution disabled."
+      "reason": "Exact reviewed pi-mono transitive artifact; it declares a documented code-generation postinstall. Repository, CI, and package-contract installs disable lifecycle scripts."
     },
     {
       "path": "node_modules/@google/genai",
       "version": "1.52.0",
       "integrity": "sha512-gwSvbpiN/17O9TbsqSsE/OzZcpv5Fo4RQjdngGgogtuB9RsyJ8ZHhX5KjHj1bp5N9snN2eK8LDGXSaWW2hof8Q==",
-      "reason": "The published package declares a no-op preinstall script; repository installs still disable all lifecycle scripts."
+      "reason": "Exact reviewed pi-mono transitive artifact; it declares a no-op preinstall script. Repository, CI, and package-contract installs disable lifecycle scripts."
     },
     {
       "path": "node_modules/fsevents",
       "version": "2.3.3",
       "integrity": "sha512-5xoDfX+fL7faATnagmWPpbFtwh/R77WmMMqqHGS65C3vvB0YHrgF+B1YmZ3441tMj5n63k0212XNoJwzlhffQw==",
-      "reason": "This optional macOS filesystem dependency declares native build metadata; repository installs keep lifecycle execution disabled."
+      "reason": "Exact reviewed optional macOS filesystem artifact; it declares native build metadata. Repository, CI, and package-contract installs disable lifecycle scripts."
     },
     {
       "path": "node_modules/protobufjs",
       "version": "7.6.6",
       "integrity": "sha512-dYDWdjSl5RNb7SgPxGQcRU+GtvP7s2fpkrY0r432PcOIaZ0/rBcxEZnQN67iJhFuQiVw754JDoPruPCNdGsbjg==",
-      "reason": "The package declares its documented code-generation postinstall; repository installs keep lifecycle execution disabled."
+      "reason": "Exact reviewed pi-mono transitive artifact; it declares a documented code-generation postinstall. Repository, CI, and package-contract installs disable lifecycle scripts."
     }
   ]
 }

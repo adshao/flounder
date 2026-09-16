@@ -100,7 +100,7 @@ test("every dependency must resolve to an exact registry artifact", () => {
   ]);
 });
 
-test("production dependency install scripts are rejected", () => {
+test("unreviewed dependency install scripts are rejected", () => {
   const lockfile = structuredClone(safeLockfile);
   lockfile.packages["node_modules/example"].hasInstallScript = true;
 

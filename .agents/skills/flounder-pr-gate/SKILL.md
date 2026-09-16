@@ -11,8 +11,10 @@ description: >
 
 # Flounder Pull Request Gate
 
-Use this skill for repository-maintainer PR review. The canonical policy is
-[`docs/QUALITY_GATES.md`](../../docs/QUALITY_GATES.md); read it before reviewing
+Use this repository-local skill for maintainer PR review. It is deliberately
+kept outside the product `skills/` directory and the published npm artifact.
+The canonical policy is
+[`docs/QUALITY_GATES.md`](../../../docs/QUALITY_GATES.md); read it before reviewing
 and do not replace its non-compensating blockers with an aggregate score.
 
 ## Establish the review snapshot
