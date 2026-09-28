@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { existsSync } from "node:fs";
 import { copyFile, lstat, mkdir, open, readdir, realpath, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import path from "node:path";
@@ -511,15 +512,57 @@ function unavailableResult(message: string): { stdout: string; stderr: string; e
 }
 
 async function runHostSandboxProcess(input: ProcessRunInput): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
+  const launch = buildHostCommand(input.command.program, input.command.args);
   return runSpawnedProcess({
-    program: input.command.program,
-    args: input.command.args,
+    program: launch.command,
+    args: launch.args,
+    shell: launch.shell,
     cwd: input.cwdAbsolute,
     env: sandboxEnv(input.workspaceAbsolute, input.tmpDir, input.cacheDir, input.command, input.options.network),
     timeoutMs: input.command.timeoutMs ?? 120_000,
     maxLogBytes: input.maxLogBytes,
     ...(input.signal ? { signal: input.signal } : {}),
   });
+}
+
+// Windows resolves an extensionless program through CreateProcess, which only
+// appends `.exe`. Package-manager shims are shipped as `.cmd`/`.bat` (npm.cmd,
+// npx.cmd, yarn.cmd), so spawn("npm", …, {shell:false}) fails with ENOENT and
+// every npm-based Prepare/Confirm plan dies before it runs. Mirror
+// llm/claude-code.ts::buildClaudeCommand: when the program is a Windows shim,
+// assemble the cmd.exe line with explicit quoting and let the shell launch it.
+export function buildHostCommand(
+  program: string,
+  args: string[],
+  platform: NodeJS.Platform = process.platform,
+  envPath: string | undefined = process.env.PATH,
+): { command: string; args: string[]; shell: boolean } {
+  if (platform !== "win32") return { command: program, args, shell: false };
+  if (!launchesViaWindowsShell(program, envPath)) return { command: program, args, shell: false };
+  return { command: [program, ...args.map(quoteForCmd)].join(" "), args: [], shell: true };
+}
+
+function launchesViaWindowsShell(program: string, envPath: string | undefined): boolean {
+  if (/\.(?:cmd|bat)$/i.test(program)) return true;
+  if (path.extname(program)) return false; // explicit .exe/.com and the like
+  const extensions = (process.env.PATHEXT ?? ".COM;.EXE;.BAT;.CMD").split(";").filter(Boolean);
+  const dirs = (envPath ?? "").split(path.delimiter).filter(Boolean);
+  for (const dir of dirs) {
+    for (const ext of extensions) {
+      if (!existsSync(path.join(dir, program + ext.toLowerCase()))) continue;
+      // An .exe/.com can be spawned directly; a .bat/.cmd needs the shell.
+      return /^\.(?:cmd|bat)$/i.test(ext);
+    }
+    if (existsSync(path.join(dir, program))) return false; // extensionless launcher (POSIX-style)
+  }
+  return true; // not found — let cmd.exe surface the failure
+}
+
+// Windows command-line quoting (backslashes are literal except right before a
+// quote). Needed because arguments are joined into the cmd.exe command line.
+function quoteForCmd(arg: string): string {
+  if (arg.length > 0 && !/[\s"^&|<>()]/.test(arg)) return arg;
+  return `"${arg.replace(/(\\*)"/g, '$1$1\\"').replace(/(\\+)$/, "$1$1")}"`;
 }
 
 async function runOciSandboxProcess(input: ProcessRunInput): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean }> {
@@ -662,7 +705,7 @@ async function runAppleContainerSandboxProcess(input: ProcessRunInput): Promise<
   return result;
 }
 
-async function runSpawnedProcess(input: { program: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxLogBytes: number; onTimeout?: () => void; onAbort?: () => void; timeoutKillDelayMs?: number; signal?: AbortSignal }): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; aborted: boolean }> {
+async function runSpawnedProcess(input: { program: string; args: string[]; cwd: string; env: NodeJS.ProcessEnv; timeoutMs: number; maxLogBytes: number; shell?: boolean; onTimeout?: () => void; onAbort?: () => void; timeoutKillDelayMs?: number; signal?: AbortSignal }): Promise<{ stdout: string; stderr: string; exitCode: number | null; timedOut: boolean; aborted: boolean }> {
   let stdout = "";
   let stderr = "";
   let timedOut = false;
@@ -673,7 +716,7 @@ async function runSpawnedProcess(input: { program: string; args: string[]; cwd: 
   let terminationStarted = false;
   const child = spawn(input.program, input.args, {
     cwd: input.cwd,
-    shell: false,
+    shell: input.shell ?? false,
     env: input.env,
   });
   const terminateChild = (): void => {
