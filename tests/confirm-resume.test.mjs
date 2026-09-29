@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdtemp, mkdir, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { assertCompleteConfirmDecisionCoverage, assertConfirmCompletion, enforceBountySubmitReadiness, enforceConfirmExecutionProvenance, loadSettledFromPriorConfirm } from "../dist/agent/confirm.js";
+import { assertCompleteConfirmDecisionCoverage, assertConfirmCompletion, enforceBountySubmitReadiness, enforceConfirmExecutionProvenance, loadSettledFromPriorConfirm, parseConfirmDecisionRows } from "../dist/agent/confirm.js";
 import { publicPath } from "../dist/util/paths.js";
 
 function validTechnicalClaimGates() {
@@ -154,6 +154,52 @@ test("confirm completion rejects a decision sheet that omits selected finding id
     ]),
     /decision sheet omitted 1 selected finding id.*finding-c/,
   );
+});
+
+test("confirm decision parser preserves linked ids from a structured model checkpoint without promoting unsupported claims", () => {
+  const rows = parseConfirmDecisionRows({ decisions: [
+    { member_id: "finding-a", title: "Issue A", execution_verdict: "not_reproduced_against_live_artifacts", final_bounty_decision: "exclude" },
+    { member_id: "finding-b", title: "Issue B", execution_verdict: "reproduced", command_run_id: "cmd7", execution_evidence: { observation: "local fork changed state" }, final_bounty_decision: "exclude_documented_risk" },
+    { member_id: "finding-c", title: "Issue C", execution_verdict: "claimed", final_bounty_decision: "submit" },
+  ] });
+  assert.doesNotThrow(() => assertCompleteConfirmDecisionCoverage(
+    [{ id: "finding-a" }, { id: "finding-b" }, { id: "finding-c" }], rows,
+  ));
+  assert.deepEqual(rows.map((row) => [row.members, row.reproduced, row.recommendation]), [
+    [["finding-a"], "no", "drop"],
+    [["finding-b"], "yes", "drop"],
+    [["finding-c"], "unknown", "unknown"],
+  ]);
+  assert.equal(rows[1].reproCommandId, "cmd7");
+  assert.match(rows[1].reproEvidence, /local fork changed state/);
+  assert.equal(enforceConfirmExecutionProvenance([rows[1]], [])[0].recommendation, "needs-human");
+});
+
+test("confirm resume recovers linked rows from the raw checkpoint when a failed artifact lost their ids", async () => {
+  const out = await mkdtemp(path.join(os.tmpdir(), "flounder-confirm-raw-checkpoint-"));
+  const input = "/some/input-run";
+  const dir = await mkConfirmRun(out, "tgt-confirm-20260101T000000Z", input, [
+    { bug: "Issue A", members: [], reproduced: "unknown" },
+    { bug: "Issue B", members: [], reproduced: "unknown" },
+    { bug: "Issue C", members: [], reproduced: "unknown" },
+  ]);
+  const workspace = path.join(dir, "confirm", "workspace");
+  await mkdir(workspace, { recursive: true });
+  await writeFile(path.join(workspace, "confirm_decision.json"), JSON.stringify({ decisions: [
+    { member_id: "finding-a", title: "Issue A", execution_verdict: "not_reproduced_against_live_artifacts", final_bounty_decision: "exclude" },
+    { member_id: "finding-b", title: "Issue B", execution_verdict: "reproduced", command_run_id: "cmd7", final_bounty_decision: "exclude_documented_risk" },
+    { member_id: "finding-c", title: "Issue C", execution_verdict: "reproduced", command_run_id: "cmd8", final_bounty_decision: "exclude_documented_risk" },
+  ] }));
+  await writeFile(path.join(dir, "events.jsonl"), [
+    JSON.stringify({ kind: "audit_command_run", runId: "cmd7", purpose: "confirm", passed: true }),
+    JSON.stringify({ kind: "audit_command_run", runId: "cmd8", purpose: "confirm", passed: false }),
+  ].join("\n"));
+
+  const settled = await loadSettledFromPriorConfirm(out, "tgt", input, path.join(out, "tgt-confirm-current"));
+  assert.deepEqual(settled.map((row) => row.members[0]).sort(), ["finding-a", "finding-b", "finding-c"]);
+  assert.deepEqual(settled.map((row) => row.recommendation), ["drop", "drop", "drop"]);
+  assert.equal(settled.find((row) => row.members[0] === "finding-b").reproduced, "yes");
+  assert.equal(settled.find((row) => row.members[0] === "finding-c").reproduced, "unknown");
 });
 
 test("confirm completion preserves the provider session error ahead of decision coverage", () => {
