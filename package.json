@@ -104,13 +104,13 @@
     ]
   },
   "peerDependencies": {
-    "@earendil-works/pi-ai": ">=0.85.1 <0.86",
-    "@earendil-works/pi-coding-agent": ">=0.85.1 <0.86",
+    "@earendil-works/pi-ai": ">=0.87.1 <0.88",
+    "@earendil-works/pi-coding-agent": ">=0.87.1 <0.88",
     "typebox": "*"
   },
   "devDependencies": {
-    "@earendil-works/pi-ai": "0.85.1",
-    "@earendil-works/pi-coding-agent": "0.85.1",
+    "@earendil-works/pi-ai": "0.87.1",
+    "@earendil-works/pi-coding-agent": "0.87.1",
     "@types/node": "^24.13.0",
     "@types/react": "^19.2.17",
     "@types/react-dom": "^19.2.3",

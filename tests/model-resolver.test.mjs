@@ -25,6 +25,17 @@ test("custom model aliases fail closed when their compatibility base is unknown"
 });
 
 for (const provider of ["openai", "openai-codex"]) {
+  for (const modelId of ["gpt-6-sol", "gpt-6-luna"]) {
+    test(`${modelId} resolves natively for ${provider}`, () => {
+      const model = resolvePiModel(provider, modelId);
+      assert.ok(model);
+      assert.equal(model.id, modelId);
+      assert.equal(model.provider, provider);
+      assert.equal(model.api, provider === "openai" ? "openai-responses" : "openai-codex-responses");
+      assert.equal(model.reasoning, true);
+    });
+  }
+
   test(`Astra resolves natively with the correct transport for ${provider}`, () => {
     const model = resolvePiModel(provider, "gpt-6-astra");
     assert.ok(model);
