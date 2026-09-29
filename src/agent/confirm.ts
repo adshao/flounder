@@ -674,6 +674,13 @@ function readConfirmDecision(session: AgentSession): ConfirmDecisionRow[] {
   } catch {
     return [];
   }
+  return parseConfirmDecisionRows(raw);
+}
+
+/** Accept the declared array contract and a model-authored decisions wrapper.
+ * Alternate field names are normalized conservatively below; missing evidence
+ * must never turn into a positive submission recommendation. */
+export function parseConfirmDecisionRows(raw: unknown): ConfirmDecisionRow[] {
   const items = Array.isArray(raw)
     ? raw
     : raw && typeof raw === "object" && Array.isArray((raw as Record<string, unknown>).decisions)
@@ -746,11 +753,20 @@ export function enforceConfirmExecutionProvenance<T extends ConfirmDecisionLike>
 
 function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow {
   const str = (value: unknown): string => (typeof value === "string" ? value.trim() : value === undefined || value === null ? "" : JSON.stringify(value));
-  const members = Array.isArray(raw.members) ? raw.members.map((m) => str(m)).filter(Boolean) : str(raw.members) ? [str(raw.members)] : [];
-  const reproduced = ((value: string): ConfirmDecisionRow["reproduced"] => (value === "yes" || value === "no" || value === "could-not-set-up" ? value : "unknown"))(str(raw.reproduced).toLowerCase());
+  const explicitMembers = Array.isArray(raw.members) ? raw.members.map((m) => str(m)).filter(Boolean) : str(raw.members) ? [str(raw.members)] : [];
+  const members = explicitMembers.length > 0 ? explicitMembers : str(raw.member_id) ? [str(raw.member_id)] : [];
+  const verdict = str(raw.reproduced).toLowerCase();
+  const alternateVerdict = str(raw.execution_verdict).toLowerCase();
+  const reproduced = ((value: string): ConfirmDecisionRow["reproduced"] => (value === "yes" || value === "no" || value === "could-not-set-up" ? value : "unknown"))(
+    verdict || (alternateVerdict === "reproduced" ? "yes" : alternateVerdict === "not_reproduced_against_live_artifacts" ? "no" : ""),
+  );
+  const declaredRecommendation = str(raw.recommendation).toLowerCase();
+  const alternateDecision = str(raw.final_bounty_decision).toLowerCase();
   const recommendation = ((value: string): ConfirmDecisionRow["recommendation"] =>
-    value === "submit-candidate" || value === "needs-human" || value === "drop" ? value : "unknown")(str(raw.recommendation).toLowerCase());
-  const reproCommandId = str(raw.repro_command_id) || str(raw.reproCommandId);
+    value === "submit-candidate" || value === "needs-human" || value === "drop" ? value : "unknown")(
+    declaredRecommendation || (alternateDecision === "exclude" || alternateDecision.startsWith("exclude_") ? "drop" : ""),
+  );
+  const reproCommandId = str(raw.repro_command_id) || str(raw.reproCommandId) || str(raw.command_run_id);
   const evidenceLevel = str(raw.evidence_level) || str(raw.evidenceLevel);
   const submissionConfidence = str(raw.submission_confidence) || str(raw.submissionConfidence);
   const fixPatch = parseFixPatch(raw.fix_patch ?? raw.fixPatch);
@@ -762,9 +778,9 @@ function normalizeDecisionRow(raw: Record<string, unknown>): ConfirmDecisionRow 
     members,
     distinctFix: str(raw.distinct_fix) || str(raw.distinctFix),
     reproduced,
-    reproEvidence: str(raw.repro_evidence) || str(raw.reproEvidence),
-    corroboration: str(raw.corroboration),
-    novelty: str(raw.novelty),
+    reproEvidence: str(raw.repro_evidence) || str(raw.reproEvidence) || str(raw.execution_evidence),
+    corroboration: str(raw.corroboration) || str(raw.mechanism_assessment),
+    novelty: str(raw.novelty) || str(raw.novelty_review),
     humanGates: str(raw.human_gates) || str(raw.humanGates),
     ...(engagementProfile ? { engagementProfile } : {}),
     ...(adjudication ? { adjudication } : {}),
@@ -871,11 +887,44 @@ export async function loadSettledFromPriorConfirm(outputDir: string, targetName:
       const prov = JSON.parse(await readFile(path.join(dir, "confirm_provenance.json"), "utf8")) as { inputRunDir?: unknown; runDirs?: unknown };
       const inputs = provenanceInputs(prov);
       if (inputs.length === 0 || !inputs.every((candidate) => wantedInputs.has(candidate))) continue;
-      const raw: unknown = JSON.parse(await readFile(path.join(dir, "confirm_decision.json"), "utf8"));
-      const items = Array.isArray(raw) ? raw : [];
-      const settled = items
-        .filter((item): item is Record<string, unknown> => Boolean(item) && typeof item === "object" && !Array.isArray(item))
-        .map(normalizeDecisionRow);
+      const readRows = async (file: string): Promise<ConfirmDecisionRow[]> => {
+        try {
+          return parseConfirmDecisionRows(JSON.parse(await readFile(file, "utf8")));
+        } catch {
+          return [];
+        }
+      };
+      const persisted = await readRows(path.join(dir, "confirm_decision.json"));
+      // A failed run may have saved a lossy normalized artifact before rejecting
+      // the decision sheet. Recover the model's original workspace checkpoint when
+      // it contains more linked finding ids, without editing the historical run.
+      const checkpoint = await readRows(path.join(dir, "confirm", "workspace", "confirm_decision.json"));
+      const memberCount = (candidateRows: ConfirmDecisionRow[]): number =>
+        new Set(candidateRows.flatMap((row) => row.members.map((member) => member.trim().toLowerCase()).filter(Boolean))).size;
+      const recoverCheckpoint = memberCount(checkpoint) > memberCount(persisted);
+      let settled = recoverCheckpoint ? checkpoint : persisted;
+      if (recoverCheckpoint) {
+        // The raw checkpoint never passed the normal execution-provenance gate.
+        // Restore a positive verdict only when its cited command was actually
+        // recorded as confirmation-eligible in that run's event log.
+        const passed = new Set<string>();
+        try {
+          for (const line of (await readFile(path.join(dir, "events.jsonl"), "utf8")).split("\n")) {
+            if (!line.trim()) continue;
+            const event = JSON.parse(line) as Record<string, unknown>;
+            if (event.kind === "audit_command_run" && event.purpose === "confirm" && event.passed === true && typeof event.runId === "string") passed.add(event.runId);
+          }
+        } catch {
+          // No usable command record means the positive claim stays unproven.
+        }
+        settled = checkpoint.map((row) => {
+          if (row.reproduced !== "yes" || (row.reproCommandId && passed.has(row.reproCommandId))) return row;
+          const downgraded = { ...row, reproduced: "unknown" as const };
+          delete downgraded.reproCommandId;
+          delete downgraded.evidenceLevel;
+          return downgraded;
+        });
+      }
       for (const row of settled.filter((entry) => isResumeSettledDecision(entry))) {
         const keys = memberKeys(row);
         if (keys.length > 0 && keys.every((key) => covered.has(key))) continue;
