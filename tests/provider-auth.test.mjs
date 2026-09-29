@@ -11,7 +11,7 @@ test("provider auth imports an existing pi provider credential into the Flounder
   const flounderAgent = path.join(root, "flounder-agent");
   const piAgent = path.join(root, "pi-agent");
   await mkdir(piAgent, { recursive: true });
-  const credential = { type: "oauth", subject: "example-user" };
+  const credential = { type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 3_600_000, accountId: "fixture-account" };
   await writeFile(path.join(piAgent, "auth.json"), JSON.stringify({ "openai-codex": credential, anthropic: { type: "oauth", subject: "other" } }), "utf8");
 
   const oldFlounderAgentDir = process.env.FLOUNDER_AGENT_DIR;
@@ -29,6 +29,51 @@ test("provider auth imports an existing pi provider credential into the Flounder
     const copied = JSON.parse(await readFile(authPath, "utf8"));
     assert.deepEqual(copied, { "openai-codex": credential });
     assert.equal((await stat(authPath)).mode & 0o777, 0o600);
+  } finally {
+    restoreEnv("FLOUNDER_AGENT_DIR", oldFlounderAgentDir);
+    restoreEnv("PI_AGENT_DIR", oldPiAgentDir);
+  }
+});
+
+test("provider status rejects an unusable stored OAuth credential", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "flounder-provider-auth-invalid-"));
+  const flounderAgent = path.join(root, "flounder-agent");
+  await mkdir(flounderAgent, { recursive: true });
+  await writeFile(path.join(flounderAgent, "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth", expires: 0 } }), "utf8");
+
+  const oldFlounderAgentDir = process.env.FLOUNDER_AGENT_DIR;
+  const oldDisablePiImport = process.env.FLOUNDER_DISABLE_PI_AUTH_IMPORT;
+  process.env.FLOUNDER_AGENT_DIR = flounderAgent;
+  process.env.FLOUNDER_DISABLE_PI_AUTH_IMPORT = "1";
+  try {
+    const status = await providerAuthStatus("openai-codex");
+    assert.equal(status.configured, false);
+  } finally {
+    restoreEnv("FLOUNDER_AGENT_DIR", oldFlounderAgentDir);
+    restoreEnv("FLOUNDER_DISABLE_PI_AUTH_IMPORT", oldDisablePiImport);
+  }
+});
+
+test("provider status replaces an unusable Flounder credential with usable pi auth", async () => {
+  const root = await mkdtemp(path.join(os.tmpdir(), "flounder-provider-auth-recover-"));
+  const flounderAgent = path.join(root, "flounder-agent");
+  const piAgent = path.join(root, "pi-agent");
+  await mkdir(flounderAgent, { recursive: true });
+  await mkdir(piAgent, { recursive: true });
+  await writeFile(path.join(flounderAgent, "auth.json"), JSON.stringify({ "openai-codex": { type: "oauth", expires: 0 } }), "utf8");
+  const credential = { type: "oauth", access: "fixture-access", refresh: "fixture-refresh", expires: Date.now() + 3_600_000, accountId: "fixture-account" };
+  await writeFile(path.join(piAgent, "auth.json"), JSON.stringify({ "openai-codex": credential }), "utf8");
+
+  const oldFlounderAgentDir = process.env.FLOUNDER_AGENT_DIR;
+  const oldPiAgentDir = process.env.PI_AGENT_DIR;
+  process.env.FLOUNDER_AGENT_DIR = flounderAgent;
+  process.env.PI_AGENT_DIR = piAgent;
+  try {
+    const status = await providerAuthStatus("openai-codex");
+    assert.equal(status.configured, true);
+    assert.match(status.sourceLabel ?? "", /imported from/);
+    const copied = JSON.parse(await readFile(providerAuthPath(), "utf8"));
+    assert.deepEqual(copied, { "openai-codex": credential });
   } finally {
     restoreEnv("FLOUNDER_AGENT_DIR", oldFlounderAgentDir);
     restoreEnv("PI_AGENT_DIR", oldPiAgentDir);
