@@ -6,6 +6,7 @@ import { createInterface } from "node:readline";
 import { findEnvKeys, getEnvApiKey, getProviders } from "@earendil-works/pi-ai/compat";
 import type { AuthPrompt } from "@earendil-works/pi-ai";
 import { builtinProviders } from "@earendil-works/pi-ai/providers/all";
+import { ModelRuntime } from "@earendil-works/pi-coding-agent";
 import { flounderHomeDir } from "./config.js";
 
 const authProviders = new Map(builtinProviders().map((provider) => [provider.id, provider]));
@@ -105,8 +106,10 @@ export async function providerAuthStatus(provider: string): Promise<ProviderAuth
   const stored = await hasStoredAuth(normalized, authPath);
   if (stored) return { ...base, required: true, configured: true, source: "stored", sourceLabel: authPath };
 
-  const importedFrom = await importDefaultPiAuth(normalized, authPath);
-  if (importedFrom) return { ...base, required: true, configured: true, source: "stored", sourceLabel: `${authPath} (imported from ${importedFrom})` };
+  const importedFrom = await importDefaultPiAuth(normalized, authPath, { overwrite: true });
+  if (importedFrom && await hasStoredAuth(normalized, authPath)) {
+    return { ...base, required: true, configured: true, source: "stored", sourceLabel: `${authPath} (imported from ${importedFrom})` };
+  }
 
   const envKeys = findEnvKeys(normalized);
   if (envKeys?.length) {
@@ -198,7 +201,15 @@ export async function printProviderCheck(provider: string): Promise<boolean> {
 async function hasStoredAuth(provider: string, authPath: string): Promise<boolean> {
   if (!existsSync(authPath)) return false;
   const auth = await readAuthFile(authPath);
-  return Boolean(auth[provider]);
+  if (!auth[provider]) return false;
+  try {
+    // Resolve auth as a real pi session does. An expired OAuth credential may
+    // refresh here; a failed refresh must not advertise the daemon as ready.
+    const runtime = await ModelRuntime.create({ authPath, modelsPath: null, refreshOnCreate: false });
+    return Boolean(await runtime.getAuth(provider));
+  } catch {
+    return false;
+  }
 }
 
 async function importDefaultPiAuth(
