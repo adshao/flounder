@@ -30,6 +30,7 @@ import {
   type StorageOverview,
 } from "./api";
 import { Button, Card, Counter, IconButton, Modal, StateBadge, StatusBadge, useDialogFocus } from "./components";
+import { normalizePrepareMatchStatus } from "../../../prepare-match.js";
 import { EvaluationsWorkspace } from "./EvaluationsView";
 import {
   activeFindings,
@@ -4305,18 +4306,18 @@ function ProjectSetupTab({ detail }: { detail: ProjectDetail }) {
 
 function prepareMatchBadge(match?: string): { label: string; className: string; title: string } {
   const raw = (match ?? "").trim();
-  const normalized = raw.toLowerCase();
+  const normalized = normalizePrepareMatchStatus(raw);
   if (!normalized) {
     return { label: "unreported", className: "s-discharged", title: "The prepare manifest did not report source/deployment match status." };
   }
-  if (["n/a", "na", "none", "not_applicable", "not-applicable"].includes(normalized)) {
+  if (normalized === "n/a") {
     return { label: "n/a", className: "s-discharged", title: "No deployed target match is required for this source-only component." };
   }
-  if (normalized === "matched" || normalized.includes("verified") || normalized.includes("sourcify") || normalized.includes("matched")) {
+  if (normalized === "matched") {
     return { label: "verified", className: "s-confirmed-source", title: `Verified source/deployment evidence: ${raw}` };
   }
-  if (normalized.includes("unverified") || normalized.includes("partial") || normalized.includes("mixed")) {
-    return { label: normalized.includes("mixed") ? "mixed" : normalized.includes("partial") ? "partial" : "unverified", className: "s-suspected", title: `Trust boundary: ${raw}` };
+  if (normalized === "unverified") {
+    return { label: "unverified", className: "s-suspected", title: `Trust boundary: ${raw}` };
   }
   return { label: raw, className: "s-discharged", title: `Reported source/deployment match status: ${raw}` };
 }
