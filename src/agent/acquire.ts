@@ -12,6 +12,7 @@ import { buildTools, newSession, type AgentSession, type ToolContext } from "./t
 import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
 import type { RunStatus } from "../db/store.js";
 import { preparedWorkspaceMaterialFingerprint } from "../util/prepared-material-fingerprint.js";
+import { normalizePrepareMatchStatus } from "../prepare-match.js";
 
 // `flounder prepare` — the open-world ACQUISITION phase that runs BEFORE map. Given a clue
 // (a tx, an address, a project, a package, a repo, a link), it resolves the complete dependency
@@ -296,15 +297,6 @@ function validatePrepareManifest(manifest: unknown, matchDeployed: boolean): Pre
   }
   validateRealTargetPlan(manifestRow, { issues, deployedComponents });
   return out;
-}
-
-function normalizePrepareMatchStatus(value: string): string {
-  const raw = value.trim().toLowerCase();
-  if (!raw) return "";
-  if (raw === "na" || raw === "none" || raw.startsWith("n/a") || raw.includes("not_applicable") || raw.includes("not-applicable")) return "n/a";
-  if (raw.includes("unverified") || raw.includes("not_verified") || raw.includes("no_match")) return "unverified";
-  if (raw === "matched" || raw.includes("verified") || raw.includes("matched") || raw.includes("sourcify")) return "matched";
-  return raw;
 }
 
 function isDeploymentPlatform(platform: string): boolean {

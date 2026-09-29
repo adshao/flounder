@@ -18,6 +18,7 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_AUDIT_MODEL, defaultOutputDir, defaultWorkspaceDir, normalizeCustomModels, type CustomModelDefinition } from "../config.js";
+import { normalizePrepareMatchStatus } from "../prepare-match.js";
 import { MetadataStore, type RunKind, type Coverage, type DiscoveryBacklogFilter, type DiscoveryBacklogKind, type DiscoveryBacklogStatus, type ProviderInput, type ProviderProfile, type ProjectInput, type ProjectListOptions, type ProviderRoles, type RoleOverride } from "../db/store.js";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getProviders, getModels } from "@earendil-works/pi-ai/compat";
@@ -2099,15 +2100,6 @@ function isDeploymentPlatform(platform: string): boolean {
     "l1",
     "l2",
   ].some((needle) => platform.includes(needle));
-}
-
-function normalizePrepareMatchStatus(value: string): string {
-  const raw = value.trim().toLowerCase();
-  if (!raw) return "";
-  if (raw === "na" || raw === "none" || raw.startsWith("n/a") || raw.includes("not_applicable") || raw.includes("not-applicable")) return "n/a";
-  if (raw.includes("unverified") || raw.includes("not_verified") || raw.includes("no_match")) return "unverified";
-  if (raw === "matched" || raw.includes("verified") || raw.includes("matched") || raw.includes("sourcify")) return "matched";
-  return raw;
 }
 
 function pendingPrepareComponentPlaceholderFields(component: Record<string, unknown>, summary: Record<string, unknown>): string[] {

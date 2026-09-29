@@ -3339,7 +3339,7 @@ test("api: queued project work explains that an earlier run is holding the proje
   });
 });
 
-test("api: prepare summary normalizes verified deployment evidence", async () => {
+test("api: prepare summary distinguishes exact and similar deployment evidence", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -3401,6 +3401,24 @@ test("api: prepare summary normalizes verified deployment evidence", async () =>
             deployment_match: { status: "unverified" },
             in_scope: true,
           },
+          {
+            id: "exact-match-target",
+            type: "ethereum_contract_implementation",
+            address: "0x123",
+            path: "sources/repo/Target.sol",
+            provenance: { source_pin: "sources/repo/Target.sol@abc123" },
+            deployment_match: { status: "exact" },
+            in_scope: true,
+          },
+          {
+            id: "similar-match-dependency",
+            type: "ethereum_contract_implementation",
+            address: "0x456",
+            path: "sources/repo/Dependency.sol",
+            provenance: { source_pin: "sources/repo/Dependency.sol@abc123" },
+            deployment_match: { status: "verified_similar" },
+            in_scope: false,
+          },
         ],
         gaps: [{ id: "external-registry-unverified", description: "Registry source is unverified." }],
       }),
@@ -3415,10 +3433,10 @@ test("api: prepare summary normalizes verified deployment evidence", async () =>
     }
 
     const detail = await json(await fetch(base + "/api/projects/" + created.uuid));
-    assert.equal(detail.prepareSummary.componentsTotal, 3);
-    assert.equal(detail.prepareSummary.matched, 1);
-    assert.equal(detail.prepareSummary.unverified, 1);
-    assert.equal(detail.prepareSummary.sourcePinned, 3);
+    assert.equal(detail.prepareSummary.componentsTotal, 5);
+    assert.equal(detail.prepareSummary.matched, 2);
+    assert.equal(detail.prepareSummary.unverified, 2);
+    assert.equal(detail.prepareSummary.sourcePinned, 5);
     assert.equal(detail.prepareSummary.realTarget.mode, "deployed");
     assert.equal(detail.prepareSummary.realTarget.guidance.recommendedMethod, "Use read-only RPC calls or a local fork; never broadcast.");
     assert.equal(detail.prepareSummary.realTarget.groundTruth[0].kind, "chain");
@@ -3428,10 +3446,10 @@ test("api: prepare summary normalizes verified deployment evidence", async () =>
     assert.equal(detail.prepareSummary.blocked, false);
     assert.deepEqual(detail.prepareSummary.blockingIssues, []);
     assert.deepEqual(detail.prepareSummary.caveats, [
-      "1 deployed component(s) are unverified and should be treated as trust boundaries",
+      "2 deployed component(s) are unverified and should be treated as trust boundaries",
       "external-registry-unverified: Registry source is unverified.",
     ]);
-    assert.deepEqual(detail.prepareSummary.issues, ["1 deployed component(s) are unverified and should be treated as trust boundaries"]);
+    assert.deepEqual(detail.prepareSummary.issues, ["2 deployed component(s) are unverified and should be treated as trust boundaries"]);
   });
 });
 
