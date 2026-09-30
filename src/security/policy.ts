@@ -1054,6 +1054,24 @@ function isAllowedLocalInspectionCommand(program: string, args: string[]): boole
   if (name === "pwd") return args.length === 0;
   if (name === "which") return args.length > 0 && args.every(isPlainToolName);
   if (isAllowedVersionInspection(name, args)) return true;
+  // Computing an ABI function selector is offline and read-only. Accept only
+  // one canonical signature, with no Cast flags or network-capable subcommands.
+  if (name === "cast" && args[0] === "sig") {
+    const signature = args[1];
+    return args.length === 2 && typeof signature === "string" && signature.length <= 2048 &&
+      /^[A-Za-z_][A-Za-z0-9_]*\([A-Za-z0-9_,()[\]]*\)$/.test(signature);
+  }
+  if (name === "cmp") {
+    const files = args[0] === "-s" ? args.slice(1) : args;
+    return files.length === 2 && files.every((arg) => isLocalInspectionFileArg(name, arg));
+  }
+  if (name === "shasum") {
+    return args[0] === "-a" && ["256", "384", "512"].includes(args[1] ?? "") &&
+      args.length >= 3 && args.length <= 34 && args.slice(2).every((arg) => isLocalInspectionFileArg(name, arg));
+  }
+  if (name === "sha256sum") {
+    return args.length >= 1 && args.length <= 32 && args.every((arg) => isLocalInspectionFileArg(name, arg));
+  }
   // `cargo tree` only resolves and prints dependency metadata. Auditors use it
   // to diagnose version skew in an already prepared Rust workspace, so keep it
   // on the read-only inspection surface and ineligible for confirmation.
@@ -1151,6 +1169,11 @@ function isSafeInspectionArg(program: string, arg: string): boolean {
   if (program === "sed" && (lowered === "-i" || lowered.startsWith("-i." ) || lowered === "--in-place" || lowered.startsWith("--in-place="))) return false;
   if (arg.includes("\0") || /[\r\n]/.test(arg)) return false;
   return true;
+}
+
+function isLocalInspectionFileArg(program: string, arg: string): boolean {
+  return arg.length > 0 && !arg.startsWith("-") && !looksLikePathEscape(arg) &&
+    !looksLikeRemoteUrl(arg) && /^[A-Za-z0-9._/@+ -]+$/.test(arg) && isSafeInspectionArg(program, arg);
 }
 
 function isAllowedCmakeBuild(args: string[]): boolean {
