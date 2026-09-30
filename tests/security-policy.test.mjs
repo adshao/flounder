@@ -154,6 +154,11 @@ test("agent bash allows readonly tool discovery, version, and local JSON inspect
     cmd("forge", "--version"),
     cmd("cast", "sig", "sample(bytes,bytes)"),
     cmd("cast", "sig", "lookup()"),
+    cmd("cmp", "sources/first.sol", "sources/second.sol"),
+    cmd("cmp", "-s", "sources/first.sol", "sources/second.sol"),
+    cmd("shasum", "-a", "256", "sources/first.sol", "sources/second.sol"),
+    cmd("shasum", "-a", "384", "sources/first.sol"),
+    cmd("sha256sum", "sources/first.sol"),
     cmd("cargo", "tree", "-i", "solana-program"),
     cmd("cargo", "+1.86.0", "tree", "--duplicates", "--manifest-path", "sources/protocol/Cargo.toml"),
     cmd("jq", ".", "provenance/mainnet_rpc_state_20260614.json"),
@@ -176,6 +181,25 @@ test("agent bash limits offline Cast inspection to a single function signature",
     cmd("cast", "sig", "foo()", "--rpc-url", "http://localhost:8545"),
     cmd("cast", "sig", "foo(); touch marker"),
     cmd("cast", "sig", "foo()\nbar()"),
+  ]) {
+    assert.equal(analyzeAgentBashCommandSafety(c).blocked, true, `${c.program} ${c.args.join(" ")} must be blocked`);
+    assert.equal(isAgentInspectionCommand(c), false);
+  }
+});
+
+test("agent bash limits local file comparison and hashing to read-only file arguments", () => {
+  for (const c of [
+    cmd("cmp", "sources/first.sol"),
+    cmd("cmp", "--ignore-initial=1", "sources/first.sol", "sources/second.sol"),
+    cmd("cmp", "/etc/passwd", "sources/second.sol"),
+    cmd("shasum", "-c", "checksums.txt"),
+    cmd("shasum", "-a", "1", "sources/first.sol"),
+    cmd("shasum", "-a", "256", "--binary", "sources/first.sol"),
+    cmd("shasum", "-a", "256", "-"),
+    cmd("sha256sum", "--check", "checksums.txt"),
+    cmd("sha256sum", "../outside.sol"),
+    cmd("shasum", "-a", "256", "|echo unexpected"),
+    cmd("cmp", "https://example.com/file", "sources/second.sol"),
   ]) {
     assert.equal(analyzeAgentBashCommandSafety(c).blocked, true, `${c.program} ${c.args.join(" ")} must be blocked`);
     assert.equal(isAgentInspectionCommand(c), false);
