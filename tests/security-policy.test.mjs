@@ -152,6 +152,8 @@ test("agent bash allows readonly tool discovery, version, and local JSON inspect
     cmd("tolk-js", "--version"),
     cmd("tact", "--version"),
     cmd("forge", "--version"),
+    cmd("cast", "sig", "sample(bytes,bytes)"),
+    cmd("cast", "sig", "lookup()"),
     cmd("cargo", "tree", "-i", "solana-program"),
     cmd("cargo", "+1.86.0", "tree", "--duplicates", "--manifest-path", "sources/protocol/Cargo.toml"),
     cmd("jq", ".", "provenance/mainnet_rpc_state_20260614.json"),
@@ -165,6 +167,19 @@ test("agent bash allows readonly tool discovery, version, and local JSON inspect
 
   assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "tree", "--manifest-path", "../outside/Cargo.toml")).blocked, true);
   assert.equal(analyzeAgentBashCommandSafety(cmd("cargo", "metadata")).blocked, true);
+});
+
+test("agent bash limits offline Cast inspection to a single function signature", () => {
+  for (const c of [
+    cmd("cast", "send", "0x1234"),
+    cmd("cast", "call", "0x1234"),
+    cmd("cast", "sig", "foo()", "--rpc-url", "http://localhost:8545"),
+    cmd("cast", "sig", "foo(); touch marker"),
+    cmd("cast", "sig", "foo()\nbar()"),
+  ]) {
+    assert.equal(analyzeAgentBashCommandSafety(c).blocked, true, `${c.program} ${c.args.join(" ")} must be blocked`);
+    assert.equal(isAgentInspectionCommand(c), false);
+  }
 });
 
 test("agent bash allows readonly file-existence inspection tests only", () => {

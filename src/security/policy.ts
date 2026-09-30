@@ -1054,6 +1054,13 @@ function isAllowedLocalInspectionCommand(program: string, args: string[]): boole
   if (name === "pwd") return args.length === 0;
   if (name === "which") return args.length > 0 && args.every(isPlainToolName);
   if (isAllowedVersionInspection(name, args)) return true;
+  // Computing an ABI function selector is offline and read-only. Accept only
+  // one canonical signature, with no Cast flags or network-capable subcommands.
+  if (name === "cast" && args[0] === "sig") {
+    const signature = args[1];
+    return args.length === 2 && typeof signature === "string" && signature.length <= 2048 &&
+      /^[A-Za-z_][A-Za-z0-9_]*\([A-Za-z0-9_,()[\]]*\)$/.test(signature);
+  }
   // `cargo tree` only resolves and prints dependency metadata. Auditors use it
   // to diagnose version skew in an already prepared Rust workspace, so keep it
   // on the read-only inspection surface and ineligible for confirmation.
