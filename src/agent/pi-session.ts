@@ -11,6 +11,7 @@ import { describeAction, readScratchScopes, scratchHasFindings, scratchHasFindin
 import { SCOPE_OUTCOME_FILE, scratchHasScopeOutcome } from "./scope-outcomes.js";
 import { flounderAgentDir } from "../provider-auth.js";
 import { resolvePiModel } from "../llm/model-resolver.js";
+import { syncConfirmWorkspaceArtifacts } from "./confirm-artifacts.js";
 
 // Continuous-session driver (point 5). Instead of re-driving a stateless
 // complete() once per step — which re-sends the whole transcript every turn and
@@ -262,6 +263,7 @@ export async function runAuditSession(input: {
   // so an interrupted `flounder confirm` keeps the rows reproduced so far (raw; the end-of-run
   // write replaces them with the consolidated set).
   const checkpointConfirm = async (): Promise<void> => {
+    await syncConfirmWorkspaceArtifacts(input.cwd, input.ctx.session.scratchFiles);
     let raw: string | undefined;
     for (const [key, value] of input.ctx.session.scratchFiles) {
       if (key === "confirm_decision.json" || key.endsWith("/confirm_decision.json")) {
@@ -272,10 +274,15 @@ export async function runAuditSession(input: {
     if (raw !== undefined) {
       try {
         const parsed: unknown = JSON.parse(raw);
-        if (Array.isArray(parsed)) {
-          await input.logger.artifact("confirm_decision.json", parsed);
+        const decisions = Array.isArray(parsed)
+          ? parsed
+          : parsed && typeof parsed === "object" && Array.isArray((parsed as Record<string, unknown>).decisions)
+            ? (parsed as { decisions: unknown[] }).decisions
+            : undefined;
+        if (decisions) {
+          await input.logger.artifact("confirm_decision.json", decisions);
           try {
-            input.onConfirmCheckpoint?.(parsed);
+            input.onConfirmCheckpoint?.(decisions);
           } catch {
             // live projection is best-effort
           }
@@ -299,6 +306,7 @@ export async function runAuditSession(input: {
       // partial / mid-write JSON — skip this checkpoint
     }
   };
+  let confirmCheckpointQueue = Promise.resolve();
   // Accumulate the model's streaming reasoning/output and log each block when it ends, so
   // a UI can tail events.jsonl and show the LLM's thinking + output live (block-level, not
   // token-by-token — readable and cheap). pi surfaces deltas via message_update's
@@ -325,7 +333,11 @@ export async function runAuditSession(input: {
     } else if (event.type === "turn_end") {
       const error = assistantMessageError((event as { message?: unknown }).message);
       if (error && !sessionError) sessionError = error;
-      if (input.confirm) void checkpointConfirm();
+      if (input.confirm) {
+        confirmCheckpointQueue = confirmCheckpointQueue.then(checkpointConfirm).catch(() => {
+          // Checkpoints are best-effort; final artifact parsing remains authoritative.
+        });
+      }
       if (finalizing) {
         finalizeTurns += 1;
         if (finalizeTurns >= MAX_FINALIZE_TURNS && !finalizeAborted) {
@@ -516,6 +528,12 @@ export async function runAuditSession(input: {
     return { steps, stoppedReason: verifyMissingVerdict ? "error" : budgetAborted ? "step-budget" : "finished" };
   } finally {
     unsubscribe();
+    if (input.confirm) {
+      await confirmCheckpointQueue;
+      await checkpointConfirm().catch(() => {
+        // A failed checkpoint must not mask the session's actual result.
+      });
+    }
     await shutdownSession(session);
   }
 }

@@ -10,6 +10,7 @@ import type { Doc } from "../types.js";
 import { publicPath } from "../util/paths.js";
 import { enforceSubmissionReadiness, isResumeSettledDecision, isTechnicallyReproducedDecision, submissionDecisionSummary } from "../util/submission-readiness.js";
 import { consolidateByFixEquivalence, type FixEquivEdge, type FixEquivItem } from "./consolidate.js";
+import { syncConfirmWorkspaceArtifacts } from "./confirm-artifacts.js";
 import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
 import { findingContentKey } from "../util/finding-key.js";
 import { matchConfirmSelector, parseConfirmSelectors } from "../util/confirm-selector.js";
@@ -230,6 +231,7 @@ export async function runConfirm(
   // fix-equivalence matrix (apply one row's fix to pristine source, re-run another's
   // PoC) and merge rows a single fix neutralizes. This is the framework's call, not the
   // model's — "distinct bugs" is decided by execution, not by the model's grouping alone.
+  await syncConfirmWorkspaceArtifacts(workspace.absolute, session.scratchFiles);
   let rows = readConfirmDecision(session);
   const impactInventory = readImpactInventory(session);
   // Resume safety net: guarantee every prior-settled row survives even if the model
