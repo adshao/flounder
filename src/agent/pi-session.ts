@@ -11,7 +11,7 @@ import { describeAction, readScratchScopes, scratchHasFindings, scratchHasFindin
 import { SCOPE_OUTCOME_FILE, scratchHasScopeOutcome } from "./scope-outcomes.js";
 import { flounderAgentDir } from "../provider-auth.js";
 import { resolvePiModel } from "../llm/model-resolver.js";
-import { syncConfirmWorkspaceArtifacts } from "./confirm-artifacts.js";
+import { missingConfirmDecisionIds, syncConfirmWorkspaceArtifacts } from "./confirm-artifacts.js";
 
 // Continuous-session driver (point 5). Instead of re-driving a stateless
 // complete() once per step — which re-sends the whole transcript every turn and
@@ -171,6 +171,8 @@ export async function runAuditSession(input: {
   synthesize?: string;
   /** Confirm mode: the open-world reproduce/consolidate/decide pass over a prior run's findings. */
   confirm?: string;
+  /** Frozen selected finding ids that every Confirm decision sheet must cover. */
+  confirmFindingIds?: string[];
   /** Operator-supplied venue/policy metadata. It is a lead that Confirm must verify. */
   engagement?: Record<string, unknown>;
   /** Report mode: generate formal submission reports from reproduced confirm decisions. */
@@ -251,7 +253,7 @@ export async function runAuditSession(input: {
   // aborted) without ever writing scopes.json, leaving a 0-scope map (observed on
   // a 60-turn run). After the main budget is spent we grant a few extra turns and
   // explicitly ask for the artifact the model already has the material to produce.
-  const MAX_FINALIZE_TURNS = 3;
+  const MAX_FINALIZE_TURNS = input.confirm ? 9 : 3;
   const finalizePromptTimeoutMs = resolveFinalizePromptTimeoutMs();
   let turns = 0;
   let budgetAborted = false;
@@ -383,15 +385,23 @@ export async function runAuditSession(input: {
       return;
     }
     if (input.confirm) {
-      if (hasScratch("confirm_decision.json")) return;
+      await syncConfirmWorkspaceArtifacts(input.cwd, input.ctx.session.scratchFiles);
+      let decisionRaw = input.ctx.session.scratchFiles.get("confirm_decision.json");
+      let missing = missingConfirmDecisionIds(decisionRaw, input.confirmFindingIds ?? []);
+      if (decisionRaw !== undefined && missing.length === 0) return;
       finalizing = true;
-      await input.logger.event("audit_confirm_finalize", { reason: "no confirm_decision.json before stop" });
-      try {
-        await runFinalizePrompt(CONFIRM_FINALIZE_PROMPT, "audit_confirm_finalize_timeout");
-      } catch {
-        // best-effort
+      for (let attempt = 1; attempt <= 3 && (decisionRaw === undefined || missing.length > 0); attempt += 1) {
+        await input.logger.event("audit_confirm_finalize", { reason: "missing or incomplete decision sheet before stop", missing: missing.length, attempt });
+        try {
+          await runFinalizePrompt(buildConfirmFinalizePrompt(missing), "audit_confirm_finalize_timeout");
+        } catch {
+          // best-effort; final coverage validation remains authoritative
+        }
+        await syncConfirmWorkspaceArtifacts(input.cwd, input.ctx.session.scratchFiles);
+        decisionRaw = input.ctx.session.scratchFiles.get("confirm_decision.json");
+        missing = missingConfirmDecisionIds(decisionRaw, input.confirmFindingIds ?? []);
       }
-      await input.logger.event("audit_confirm_finalize_done", { hasDecision: hasScratch("confirm_decision.json") });
+      await input.logger.event("audit_confirm_finalize_done", { hasDecision: hasScratch("confirm_decision.json"), missing: missing.length });
       return;
     }
     if (input.report) {
@@ -850,7 +860,13 @@ ${input.memoryHint && input.memoryHint.trim().length > 0 ? input.memoryHint.trim
 Begin: resolve the clue, stage the target/security-critical source and any project-owned answer-free docs you can find, mainnet-match or source-pin each source component, write prepare_manifest.json early, record real_target confirmation requirements, record gaps honestly, and stop only after the manifest has nonempty component rows for staged source plus either concrete real-target ground_truth or a source-only not_required_reason. Missing docs/specs are best-effort caveats, not blockers.`;
 }
 
-const CONFIRM_FINALIZE_PROMPT = `Your budget is spent. Do NOT read, fork, fetch, or run anything else. Based ONLY on what you have already reproduced, finish the confirm artifacts now. If official terms require deployment/live-exposure evidence and it already exists in scratch, first write/update impact_inventory.json; otherwise write confirm_decision.json as your next action.
+function buildConfirmFinalizePrompt(missing: readonly string[]): string {
+  return `Confirm is ending, but confirm_decision.json has not satisfied its required output contract. Do NOT perform new reproduction or web research. Use only evidence already gathered. The workspace file may contain useful work in an unsupported shape; inspect it if needed, but rewrite confirm_decision.json as the declared JSON ARRAY of decision rows. Preserve completed decisions and their evidence. Every selected finding id must occur in exactly one row's members array; these ids are still missing: ${missing.length ? missing.join(", ") : "(the file is missing or has an unsupported shape)"}. Do not claim reproduction without a recorded passing command. If evidence is unresolved, say so and choose needs-human or drop as justified. Do not silently omit a finding.
+
+${CONFIRM_FINALIZE_CONTRACT}`;
+}
+
+const CONFIRM_FINALIZE_CONTRACT = `Based ONLY on what you have already reproduced, finish the confirm artifacts now. If official terms require deployment/live-exposure evidence and it already exists in scratch, first write/update impact_inventory.json; otherwise write confirm_decision.json as your next action.
 
 The confirm_decision.json content is a JSON array, one row per DISTINCT bug: {"bug","members":[...],"distinct_fix","reproduced":"yes"|"no"|"could-not-set-up","evidence_level":"source-only-local-confirmed|local-integration-reproduced|local-fork-reproduced|real-target-reproduced|not-reproduced|could-not-set-up","repro_evidence","repro_command_id","fix_patch":{"path","old","new"},"patched_success_patterns":[...],"corroboration","novelty","human_gates","engagement_profile":{"policy_kind":"bug_bounty|contest|private_audit|incident|source_review|unknown|custom","selected_by","confidence","policy_sources":[...],"evidence_requirement":"real_target|source_only|local_integration","required_gates":[...]},"adjudication":{"gates":[{"id","status","evidence"}],"risk_assessment":{"exploitability_class":"permissionless|user-configurable|privileged|external-condition|future-configuration|not-currently-reachable|unknown","current_state":"active|inactive|mixed|unknown","required_principals":[{"role","identity","control_model","attacker_access","evidence"}],"change_controls":[{"control","strength","evidence"}],"likelihood":"very-low|low|medium|high|unknown","impact_ceiling":"info|low|medium|high|critical|unknown","residual_severity":"info|low|medium|high|critical|unknown","confidence":"high|medium|low|unknown","basis":"current-state and trust/control evidence"},"scope_status","live_impact_status","known_issue_status","payout_estimate":{"status":"not-applicable|unknown|estimated","eligible_min_usd","eligible_max_usd","expected_collectible_usd","confidence","basis"}},"recommendation":"submit-candidate"|"needs-human"|"drop"}.
 
