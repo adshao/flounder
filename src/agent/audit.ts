@@ -895,6 +895,8 @@ export async function runAudit(
     if (merged.added > 0) {
       const inventoryDir = projectHistoryDir(historyLocation(cfg));
       await saveScopeInventory(inventoryDir, scopeInventory);
+      // Keep the live run checkpoint in step with the durable inventory during post-dig work.
+      await logger.artifact("audit_scopes.json", scopeInventory);
       recorder.scopes(scopeInventory);
       await logger.event("audit_followup_scopes_added", { proposed: followupScopes.length, added: merged.added });
     }

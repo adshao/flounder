@@ -1,5 +1,6 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
@@ -392,6 +393,34 @@ class OutcomeOnlySynthesisLlmClient {
       return JSON.stringify({ done: true, summary: "scope complete" });
     }
     return JSON.stringify({ done: true, summary: "no action" });
+  }
+}
+
+class FollowupScopeSynthesisLlmClient extends OutcomeOnlySynthesisLlmClient {
+  constructor() {
+    super();
+    this.wroteFollowup = false;
+  }
+
+  async complete(input) {
+    if (input.system.includes("SYNTHESIS mode") && !this.wroteFollowup) {
+      this.wroteFollowup = true;
+      return JSON.stringify({
+        thought: "Persist a related scope identified during synthesis.",
+        tool: "write",
+        args: {
+          path: "followup_scopes.json",
+          content: JSON.stringify({ followup_scopes: [{
+            parent_scope_id: "S1",
+            obligation: "The consumer preserves the producer's principal binding.",
+            region: "shared-boundary-marker",
+            score: 75,
+            why: "The shared boundary needs its own coverage record.",
+          }] }),
+        },
+      });
+    }
+    return super.complete(input);
   }
 }
 
@@ -2246,6 +2275,50 @@ test("zero-finding dig outcomes still trigger complete cross-scope synthesis", a
     assert.equal(outcomes[0].coverageComplete, true, JSON.stringify(outcomes));
     const runHealth = JSON.parse(await readFile(path.join(runDir, "run_health.json"), "utf8"));
     assert.equal(runHealth.signals.scopeOutcomesIncomplete, 0);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("synthesis follow-up scopes refresh the live run checkpoint before finalization", async () => {
+  const dir = await tempDir();
+  try {
+    const cfg = defaultConfig();
+    cfg.targetName = "followup-live-checkpoint";
+    cfg.sourcePaths = [fixtures];
+    cfg.outputDir = path.join(dir, "runs");
+    cfg.auditDeep = true;
+    cfg.auditMaxScopes = 1;
+    cfg.auditChallengeDischarges = false;
+    cfg.auditRefute = false;
+
+    let runDir;
+    let checkpointAtFollowup;
+    const tracker = {
+      runDbId: undefined,
+      scopes(scopes) {
+        if (!checkpointAtFollowup && scopes.length > 2) {
+          checkpointAtFollowup = JSON.parse(readFileSync(path.join(runDir, "audit_scopes.json"), "utf8"));
+        }
+      },
+      runScopes() {},
+      findings() {},
+      stage() {},
+      confirmDecisions() {},
+      finish() {},
+    };
+    const result = await runAudit(cfg, {
+      llm: new FollowupScopeSynthesisLlmClient(),
+      makeTracker: (_cfg, activeRunDir) => {
+        runDir = activeRunDir;
+        return tracker;
+      },
+    });
+    assert.ok(checkpointAtFollowup, "synthesis must add a follow-up scope");
+    const liveCheckpoint = checkpointAtFollowup;
+    assert.equal(liveCheckpoint.length, 3, "the live checkpoint includes the follow-up before finalization");
+    assert.equal(liveCheckpoint.filter((scope) => scope.source === "followup").length, 1);
+    assert.equal(result.scopeCoverage.total, 3);
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
