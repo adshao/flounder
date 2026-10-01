@@ -1,9 +1,9 @@
 import path from "node:path";
-import { copyFile, lstat, mkdir, readdir, realpath, stat } from "node:fs/promises";
+import { copyFile, lstat, mkdir, readFile, readdir, realpath, stat } from "node:fs/promises";
 import { flounderHomeDir, type AuditorConfig } from "../config.js";
 import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
 import { loadCorpus, loadSource } from "../ingest/source.js";
-import { listWorkspaceFiles, prepareSandboxWorkspace } from "../security/sandbox.js";
+import { listWorkspaceFiles, normalizeRelativePath, prepareSandboxWorkspace, resolveWorkspacePathForRead } from "../security/sandbox.js";
 import { projectHistoryDir } from "../trace/history.js";
 import { writeLastRunPointer } from "../trace/last-run.js";
 import { RunLogger } from "../trace/logger.js";
@@ -309,6 +309,9 @@ export async function stageReportEvidence(
       source: path.join(runReal, name),
       relative: name,
     }));
+    for (const entry of await reportEvidenceWrittenFiles(runReal)) {
+      candidates.push({ source: entry.source, relative: path.posix.join("workspace", entry.relative) });
+    }
     const scratchRoot = path.join(runReal, "confirm", "workspace", "scratch");
     for (const entry of await reportEvidenceScratchFiles(scratchRoot)) {
       candidates.push({ source: entry.source, relative: path.posix.join("scratch", entry.relative) });
@@ -332,6 +335,36 @@ export async function stageReportEvidence(
     }
   }
   return staged;
+}
+
+async function reportEvidenceWrittenFiles(runDir: string): Promise<Array<{ source: string; relative: string }>> {
+  const transcriptPath = path.join(runDir, "confirm_transcript.json");
+  const info = await stat(transcriptPath).catch(() => undefined);
+  if (!info?.isFile() || info.size > REPORT_EVIDENCE_MAX_FILE_BYTES) return [];
+  let steps: unknown;
+  try {
+    steps = (JSON.parse(await readFile(transcriptPath, "utf8")) as { steps?: unknown }).steps;
+  } catch {
+    return [];
+  }
+  if (!Array.isArray(steps)) return [];
+
+  const workspaceRoot = path.join(runDir, "confirm", "workspace");
+  const out = new Map<string, string>();
+  for (const step of steps) {
+    if (!step || typeof step !== "object") continue;
+    const item = step as { tool?: unknown; args?: { path?: unknown }; observation?: unknown };
+    if (item.tool !== "write" && item.tool !== "edit") continue;
+    if (typeof item.args?.path !== "string" || typeof item.observation !== "string") continue;
+    if (!item.observation.startsWith(item.tool === "write" ? "wrote " : "edited ")) continue;
+    const relative = normalizeRelativePath(item.args.path);
+    if (!relative || !REPORT_EVIDENCE_EXTENSIONS.has(path.extname(relative).toLowerCase())) continue;
+    if (out.has(relative)) continue;
+    const source = await resolveWorkspacePathForRead(workspaceRoot, relative).catch(() => undefined);
+    if (source) out.set(relative, source);
+    if (out.size >= REPORT_EVIDENCE_MAX_FILES) break;
+  }
+  return [...out].map(([relative, source]) => ({ source, relative }));
 }
 
 async function reportEvidenceScratchFiles(root: string): Promise<Array<{ source: string; relative: string }>> {
