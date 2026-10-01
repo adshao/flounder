@@ -1164,15 +1164,27 @@ test("report stages bounded Confirm artifacts and PoC source under relative evid
   try {
     const confirmRun = path.join(out, "target-confirm-run");
     const scratch = path.join(confirmRun, "confirm", "workspace", "scratch", "fork-poc");
+    const confirmTest = path.join(confirmRun, "confirm", "workspace", "test", "confirm");
     const workspace = path.join(out, "report-workspace");
     await mkdir(path.join(scratch, "test"), { recursive: true });
     await mkdir(path.join(scratch, "cache"), { recursive: true });
+    await mkdir(confirmTest, { recursive: true });
     await mkdir(workspace, { recursive: true });
     await writeFile(path.join(confirmRun, "confirm_decision.json"), '[{"reproduced":"yes","repro_command_id":"cmd9"}]');
-    await writeFile(path.join(confirmRun, "confirm_transcript.json"), '{"cmd9":{"command":"forge test --fork-block-number 123"}}');
+    await writeFile(path.join(confirmRun, "confirm_transcript.json"), JSON.stringify({ steps: [
+      { tool: "write", args: { path: "test/confirm/NeutralPoC.t.sol" }, observation: "wrote test/confirm/NeutralPoC.t.sol in sandbox workspace" },
+      { tool: "edit", args: { path: "test/confirm/NeutralPoC.t.sol" }, observation: "edited test/confirm/NeutralPoC.t.sol in sandbox workspace" },
+      { tool: "write", args: { path: "test/confirm/Blocked.t.sol" }, observation: "blocked: write denied" },
+      { tool: "write", args: { path: "../outside.sol" }, observation: "wrote ../outside.sol in sandbox workspace" },
+      { tool: "write", args: { path: "test/confirm/Escape.t.sol" }, observation: "wrote test/confirm/Escape.t.sol in sandbox workspace" },
+    ] }));
     await writeFile(path.join(scratch, "foundry.toml"), "[profile.default]\n");
     await writeFile(path.join(scratch, "test", "ForkPoC.t.sol"), "contract ForkPoC {}\n");
     await writeFile(path.join(scratch, "cache", "solidity-files-cache.json"), "{}");
+    await writeFile(path.join(confirmTest, "NeutralPoC.t.sol"), "contract NeutralPoC {}\n");
+    await writeFile(path.join(confirmTest, "Blocked.t.sol"), "contract Blocked {}\n");
+    await writeFile(path.join(out, "outside.sol"), "contract Outside {}\n");
+    await symlink(path.join(out, "outside.sol"), path.join(confirmTest, "Escape.t.sol"));
 
     const staged = await stageReportEvidence([{
       decisionId: 9,
@@ -1185,9 +1197,12 @@ test("report stages bounded Confirm artifacts and PoC source under relative evid
     assert.ok(staged.includes("report-evidence/decision-9/confirm_transcript.json"));
     assert.ok(staged.includes("report-evidence/decision-9/scratch/fork-poc/foundry.toml"));
     assert.ok(staged.includes("report-evidence/decision-9/scratch/fork-poc/test/ForkPoC.t.sol"));
+    assert.ok(staged.includes("report-evidence/decision-9/workspace/test/confirm/NeutralPoC.t.sol"));
     assert.ok(!staged.some((entry) => entry.includes("cache")));
+    assert.ok(!staged.some((entry) => entry.includes("Blocked.t.sol") || entry.includes("outside.sol") || entry.includes("Escape.t.sol")));
     assert.ok(staged.every((entry) => !path.isAbsolute(entry)));
     assert.match(await readFile(path.join(workspace, "report-evidence", "decision-9", "scratch", "fork-poc", "test", "ForkPoC.t.sol"), "utf8"), /ForkPoC/);
+    assert.match(await readFile(path.join(workspace, "report-evidence", "decision-9", "workspace", "test", "confirm", "NeutralPoC.t.sol"), "utf8"), /NeutralPoC/);
 
     const manifest = renderReportFileManifest([], [], [{ decisionId: 9, findingKey: "k9", title: "Bug" }], staged);
     assert.match(manifest, /Read-only Confirm evidence staged/);
