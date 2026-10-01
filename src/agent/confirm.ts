@@ -205,6 +205,7 @@ export async function runConfirm(
     cwd: workspace.absolute,
     fileManifest: renderConfirmFileManifest(baselineFiles, corpusManifest),
     confirm: seed,
+    confirmFindingIds: priorFindings.map((finding) => finding.id).filter((id): id is string => typeof id === "string" && id.trim().length > 0),
     ...(options.engagement ? { engagement: options.engagement } : {}),
     // Project the decision rows to SQLite each turn so a UI shows live reproduction
     // progress (reproduced X / N) during the run, not only at the end.

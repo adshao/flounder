@@ -3,7 +3,15 @@ import test from "node:test";
 import { mkdtemp, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { syncConfirmWorkspaceArtifacts } from "../dist/agent/confirm-artifacts.js";
+import { missingConfirmDecisionIds, syncConfirmWorkspaceArtifacts } from "../dist/agent/confirm-artifacts.js";
+
+test("Confirm completion requires declared decision rows covering every selected id", () => {
+  const ids = ["k-one", "k-two"];
+  assert.deepEqual(missingConfirmDecisionIds(undefined, ids), ids);
+  assert.deepEqual(missingConfirmDecisionIds('{"rows":[{"finding_id":"k-one"}]}', ids), ids);
+  assert.deepEqual(missingConfirmDecisionIds(JSON.stringify([{ bug: "first", members: ["k-one"] }]), ids), ["k-two"]);
+  assert.deepEqual(missingConfirmDecisionIds(JSON.stringify({ decisions: [{ bug: "both", members: ["K-ONE", "k-two"] }] }), ids), []);
+});
 
 test("Confirm uses decisions and impact inventory produced by sandbox commands", async () => {
   const workspace = await mkdtemp(path.join(os.tmpdir(), "flounder-confirm-artifacts-"));
