@@ -6,7 +6,7 @@ import os from "node:os";
 import path from "node:path";
 import { promisify } from "node:util";
 import { startUiServer } from "../dist/server/app.js";
-import { completeDaemonJobHandoff, createSerializedClaimLoop, daemonJobTerminalState, ensureDaemonDirectories, loadVerifyArtifactReplay, requestUntilAccepted } from "../dist/server/daemon.js";
+import { completeDaemonJobHandoff, createSerializedClaimLoop, daemonJobTerminalState, ensureDaemonDirectories, loadVerifyArtifactReplay, normalizeRunScopesTarget, requestUntilAccepted } from "../dist/server/daemon.js";
 import { MetadataStore } from "../dist/db/store.js";
 import { DAEMON_PROTOCOL_VERSION } from "../dist/server/protocol.js";
 
@@ -69,6 +69,15 @@ test("daemon: job terminal state reflects every persisted run phase", () => {
   assert.equal(daemonJobTerminalState(["done", "error", "done"]), "error");
   assert.equal(daemonJobTerminalState(["done", "killed"]), "canceled");
   assert.equal(daemonJobTerminalState(["done"], true), "canceled");
+});
+
+test("daemon: preserves a zero live scope target", () => {
+  assert.equal(normalizeRunScopesTarget(0), 0);
+  assert.equal(normalizeRunScopesTarget(0.9), 0);
+  assert.equal(normalizeRunScopesTarget(2.9), 2);
+  assert.equal(normalizeRunScopesTarget(-1), 0);
+  assert.equal(normalizeRunScopesTarget(Number.POSITIVE_INFINITY), undefined);
+  assert.equal(normalizeRunScopesTarget("0"), undefined);
 });
 
 test("daemon: concurrent claim nudges share one drain and respect executor capacity", async () => {

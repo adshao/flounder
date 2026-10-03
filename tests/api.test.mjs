@@ -5576,6 +5576,37 @@ test("api: running run standard coverage adjustment targets 30 cumulative audite
   });
 });
 
+test("api: running run can target completed coverage to stop after the current scope", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const patch = (p, body) => fetch(base + p, { method: "PATCH", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await json(await post("/api/projects", { name: "adjust-run-finished-coverage", sourcePaths: ["./src"] }));
+    const runDir = await mkdtemp(path.join(out, "adjust-run-finished-coverage-"));
+    let runId;
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, Array.from({ length: 40 }, (_, index) => ({
+        scopeId: `SCOPE-${index + 1}`,
+        title: `Scope ${index + 1}`,
+        status: index < 21 ? "audited" : "pending",
+        score: 100 - index,
+      })));
+      runId = store.startRun({ projectId: created.id, kind: "run", runDir });
+      store.updateRunScopes(runId, 0, 1);
+      store.updateRunCoverage(runId, { total: 40, audited: 21, pending: 19, deferred: 0 });
+    } finally {
+      store.close();
+    }
+
+    const res = await patch(`/api/runs/${runId}`, { coverageTarget: 21 });
+    assert.equal(res.status, 200);
+    assert.equal((await json(res)).runScopesTarget, 0);
+    const run = await json(await fetch(base + `/api/runs/${runId}`));
+    assert.equal(run.run.run_scopes_target, 0);
+  });
+});
+
 test("api: daemon lists return provider-auth summaries by default", async () => {
   await withServer(async (base) => {
     const json = (r) => r.json();
