@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { createHash } from "node:crypto";
 import { readFileSync } from "node:fs";
-import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, readdir, readFile, rm, stat, symlink, truncate, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
 import test from "node:test";
@@ -1341,6 +1341,36 @@ test("read, write, edit, and bash operate on loaded material and the copied work
     const events = (await readFile(path.join(logger.runDir, "events.jsonl"), "utf8")).trim().split("\n").map(JSON.parse);
     assert.equal(events.filter((event) => event.kind === "audit_command_start").every((event) => event.streamId === "scope-a"), true);
     assert.equal(events.filter((event) => event.kind === "audit_command_run").every((event) => event.streamId === "scope-a"), true);
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
+test("read bounds workspace files and observations before decoding large or binary inputs", async () => {
+  const dir = await tempDir();
+  try {
+    const workspace = path.join(dir, "workspace");
+    await mkdir(workspace);
+    await writeFile(path.join(workspace, "small.txt"), "first\nsecond\n");
+    await writeFile(path.join(workspace, "binary.dat"), Buffer.from([65, 0, 66]));
+    await writeFile(path.join(workspace, "large.txt"), "");
+    await truncate(path.join(workspace, "large.txt"), 8 * 1024 * 1024 + 1);
+    await writeFile(path.join(workspace, "long-line.txt"), "x".repeat(300 * 1024));
+
+    const cfg = defaultConfig();
+    cfg.sourcePaths = [fixtures];
+    const logger = await tempLogger(dir);
+    const session = newSession();
+    session.workspace = { absolute: workspace, relative: "workspace" };
+    const ctx = { cfg, source: [], corpus: [], memory: new ProjectMemory(path.join(dir, "memory.jsonl")), logger, session };
+    const read = tool("read");
+
+    assert.match((await read.run({ path: "small.txt", start: 2, end: 2 }, ctx)).observation, /2\tsecond/);
+    assert.match((await read.run({ path: "binary.dat" }, ctx)).observation, /binary file/i);
+    assert.match((await read.run({ path: "large.txt" }, ctx)).observation, /8 MiB read limit/i);
+    const longLine = (await read.run({ path: "long-line.txt" }, ctx)).observation;
+    assert.match(longLine, /read output truncated/i);
+    assert.ok(longLine.length < 270 * 1024, "a long line must not become an unbounded model observation");
   } finally {
     await rm(dir, { recursive: true, force: true });
   }
