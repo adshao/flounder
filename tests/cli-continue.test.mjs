@@ -16,6 +16,7 @@ test("cli continue builds the project run pipeline body", () => {
     "--mock-llm",
   ]), {
     verb: "run",
+    pipeline: true,
     verifyFromStart: true,
     mockLlm: true,
     continueCoverage: true,
@@ -31,9 +32,11 @@ test("cli continue builds the project run pipeline body", () => {
 test("cli continue leaves coverage closed by default", () => {
   assert.deepEqual(buildProjectContinueBody(["--project", "demo"]), {
     verb: "run",
+    pipeline: true,
   });
   assert.deepEqual(buildProjectContinueBody(["--project", "demo", "--continue-coverage"]), {
     verb: "run",
+    pipeline: true,
     continueCoverage: true,
   });
 });

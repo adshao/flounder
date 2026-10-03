@@ -89,11 +89,25 @@ if (findings.length > 0) {
 }
 
 async function scanCurrentTree() {
-  for (const file of await listFiles(root)) {
+  for (const file of await currentPublishableFiles()) {
     if (!isTextFile(file)) continue;
     const body = await readFile(file, "utf8");
     const relative = toPosix(path.relative(root, file));
     scanBody(relative, body, [...localPathPatterns, ...secretPatterns]);
+  }
+}
+
+async function currentPublishableFiles() {
+  try {
+    const { stdout } = await execFileAsync("git", ["ls-files", "--cached", "--others", "--exclude-standard", "-z"], {
+      cwd: root,
+      encoding: "buffer",
+      maxBuffer: 50 * 1024 * 1024,
+    });
+    return stdout.toString("utf8").split("\0").filter(Boolean).map((file) => path.join(root, file));
+  } catch {
+    // Keep the standalone scanner usable outside a Git checkout.
+    return listFiles(root);
   }
 }
 
