@@ -1015,6 +1015,49 @@ test("api: standard pipeline continue finishes pending verify work before openin
   });
 });
 
+test("api: pending Verify takes precedence over unmet Standard coverage, including explicit continuation", async () => {
+  await withServer(async (base, out) => {
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await (await post("/api/projects", {
+      name: "standard-unsettled-batch",
+      sourcePaths: ["./src"],
+      config: { scopeCoverageMode: "standard" },
+    })).json();
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        ...Array.from({ length: 21 }, (_, i) => ({ scopeId: `audited-${i}`, title: `Audited ${i}`, status: "audited", score: 70 - i })),
+        ...Array.from({ length: 49 }, (_, i) => ({ scopeId: `pending-${i}`, title: `Pending ${i}`, status: "pending", score: 49 - i })),
+      ]);
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir: path.join(out, "standard-unsettled-batch-run") });
+      store.updateRunScopes(runId, 21, 21);
+      store.upsertFindings(created.id, runId, [{
+        findingKey: "pending-proof",
+        title: "Needs execution verification",
+        location: "src/A.sol:1",
+        severity: "high",
+        status: "suspected",
+        evidence: "candidate",
+      }]);
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    for (const continueCoverage of [false, true]) {
+      const launched = await (await post(`/api/projects/${created.uuid}/runs`, { verb: "run", pipeline: true, continueCoverage })).json();
+      assert.equal(launched.queued, true);
+      const job = (await (await fetch(base + "/api/jobs/" + launched.jobId)).json()).job;
+      const spec = JSON.parse(job.spec_json);
+      assert.equal(spec.coverageTarget, 30);
+      assert.equal(spec.maxScopes, 0);
+      assert.equal(spec.pipelineStart, "settle");
+      assert.equal(spec.remap, false);
+    }
+  });
+});
+
 test("api: Verify from start skips an empty Dig even when the ordinary pipeline round is settled", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

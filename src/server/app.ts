@@ -2640,6 +2640,22 @@ async function runLaunch(c: Ctx): Promise<void> {
     spec.nextActions = nextActions;
     applyNextActionRunDefaults(spec, nextActions, progress);
   }
+  if (
+    spec.verb === "run"
+    && spec.pipeline
+    && !spec.remap
+    && !spec.appendMap
+    && !spec.quick
+    && !spec.scope
+    && !spec.region
+    && latestInterruptedCoverageBatchRemainder(runs) === 0
+    && pipelinePostAuditWorkPending(c.store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation)
+  ) {
+    // Settle evidence from the current scope batch before opening another one.
+    // A cumulative coverage target can still be unmet while Verify/Confirm/Report
+    // has pending work; that target must not turn Continue into another Dig.
+    spec.maxScopes = 0;
+  }
   if ((spec.verb === "run" || spec.verb === "audit") && currentResultRunIds.size > 0) {
     spec.synthesisContext = reportableFindings(c.store.listFindings(projectId)
       .filter((finding) => rowBelongsToCurrentMaterial(finding, currentResultRunIds, materialBoundary)))

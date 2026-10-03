@@ -1,7 +1,7 @@
 const COVERAGE_MODES = new Set(["focused", "standard", "half", "full", "custom"]);
 
 export function buildProjectContinueBody(args: readonly string[]): Record<string, unknown> {
-  const body: Record<string, unknown> = { verb: "run" };
+  const body: Record<string, unknown> = { verb: "run", pipeline: true };
   if (args.includes("--verify-from-start")) body.verifyFromStart = true;
   if (args.includes("--remap")) body.remap = true;
   if (args.includes("--append-map") || args.includes("--expand-map")) body.appendMap = true;
