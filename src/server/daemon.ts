@@ -295,8 +295,9 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
             const ev = JSON.parse(line.slice(5).trim()) as { type: string; jobId?: number; target?: number };
             if (ev.type === "poll") void claimLoop();
             else if (ev.type === "cancel" && ev.jobId !== undefined) inflight.get(ev.jobId)?.abort();
-            else if (ev.type === "set-run-scopes-target" && ev.jobId !== undefined && typeof ev.target === "number" && Number.isFinite(ev.target)) {
-              runScopeTargets.set(ev.jobId, Math.max(1, Math.floor(ev.target)));
+            else if (ev.type === "set-run-scopes-target" && ev.jobId !== undefined) {
+              const target = normalizeRunScopesTarget(ev.target);
+              if (target !== undefined) runScopeTargets.set(ev.jobId, target);
             }
           } catch {
             // ignore malformed frame
@@ -308,6 +309,12 @@ export async function runDaemon(opts: DaemonOptions): Promise<void> {
     }
     await new Promise((resolve) => setTimeout(resolve, 2000));
   }
+}
+
+/** Zero ends an auto-selected DIG batch at its next scope boundary. */
+export function normalizeRunScopesTarget(value: unknown): number | undefined {
+  if (typeof value !== "number" || !Number.isFinite(value)) return undefined;
+  return Math.max(0, Math.floor(value));
 }
 
 export function initializeDaemonProcessEnvironment(env: NodeJS.ProcessEnv = process.env): void {
