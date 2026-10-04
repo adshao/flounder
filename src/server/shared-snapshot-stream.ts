@@ -15,7 +15,7 @@ export class SharedSnapshotStream<T> {
   private running = false;
 
   constructor(
-    private readonly build: () => T,
+    private readonly build: () => T | Promise<T>,
     private readonly refreshMs: number,
   ) {}
 
@@ -41,20 +41,40 @@ export class SharedSnapshotStream<T> {
     this.timer = undefined;
     if (this.running || this.listeners.size === 0) return;
     this.running = true;
+    let deferred = false;
     try {
-      const snapshot = this.build();
-      this.latest = snapshot;
-      this.hasLatest = true;
-      for (const listener of [...this.listeners]) this.deliver(listener, snapshot);
+      const result = this.build();
+      if (result && typeof (result as Promise<T>).then === "function") {
+        deferred = true;
+        void Promise.resolve(result)
+          .then((snapshot) => this.publish(snapshot))
+          .catch(() => {
+            // A transient producer failure should not stop later refreshes.
+          })
+          .finally(() => this.finish());
+      } else {
+        this.publish(result as T);
+      }
     } catch {
       // A transient store read failure must not crash the control plane or
       // permanently disable updates for every connected dashboard.
     } finally {
-      this.running = false;
-      if (this.listeners.size > 0) {
-        this.timer = setTimeout(() => this.tick(), Math.max(0, this.refreshMs));
-        this.timer.unref?.();
-      }
+      if (!deferred) this.finish();
+    }
+  }
+
+  private publish(snapshot: T): void {
+    if (this.listeners.size === 0) return;
+    this.latest = snapshot;
+    this.hasLatest = true;
+    for (const listener of [...this.listeners]) this.deliver(listener, snapshot);
+  }
+
+  private finish(): void {
+    this.running = false;
+    if (this.listeners.size > 0) {
+      this.timer = setTimeout(() => this.tick(), Math.max(0, this.refreshMs));
+      this.timer.unref?.();
     }
   }
 
