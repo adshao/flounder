@@ -5975,13 +5975,26 @@ type LiveSnapshot = {
 
 const projectSnapshotStreams = new WeakMap<MetadataStore, SharedSnapshotStream<LiveSnapshot>>();
 
+async function projectSnapshotsForStream(store: MetadataStore): Promise<Array<Record<string, unknown>>> {
+  const count = Math.min(store.countProjects(), PROJECT_STREAM_LIMIT);
+  const snapshots: Array<Record<string, unknown>> = [];
+  for (let offset = 0; offset < count; offset += 1) {
+    // Building a large project's snapshot uses synchronous SQLite reads. Give
+    // daemon heartbeats and other API requests a turn between projects.
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    const snapshot = projectSnapshots(store, { limit: 1, offset })[0];
+    if (snapshot) snapshots.push(snapshot);
+  }
+  return snapshots;
+}
+
 function sharedProjectSnapshotStream(store: MetadataStore, plane: ControlPlane): SharedSnapshotStream<LiveSnapshot> {
   const existing = projectSnapshotStreams.get(store);
   if (existing) return existing;
-  const stream = new SharedSnapshotStream(() => {
+  const stream = new SharedSnapshotStream(async () => {
     reconcileLostExecutorJobs(store, plane);
     return {
-      projects: projectSnapshots(store, { limit: PROJECT_STREAM_LIMIT }),
+      projects: await projectSnapshotsForStream(store),
       active: activeRuns(store, plane),
     };
   }, 1200);

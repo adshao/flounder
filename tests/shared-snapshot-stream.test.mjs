@@ -33,3 +33,43 @@ test("shared snapshot stream computes once for all subscribers and stops when id
   assert.deepEqual(resumed, [{ sequence: stoppedAt + 1 }]);
   unsubscribeResumed();
 });
+
+test("asynchronous snapshots leave the event loop available and never overlap", async () => {
+  let builds = 0;
+  let complete;
+  const stream = new SharedSnapshotStream(() => {
+    builds += 1;
+    return new Promise((resolve) => { complete = resolve; });
+  }, 20);
+  const first = [];
+  const second = [];
+  const unsubscribeFirst = stream.subscribe((snapshot) => first.push(snapshot));
+  const unsubscribeSecond = stream.subscribe((snapshot) => second.push(snapshot));
+
+  await delay(35);
+  assert.equal(builds, 1, "a pending build must not start another refresh");
+  assert.deepEqual(first, [], "subscribers must not receive an incomplete snapshot");
+
+  complete({ sequence: 1 });
+  await delay(1);
+  assert.deepEqual(first, [{ sequence: 1 }]);
+  assert.deepEqual(second, first);
+  unsubscribeFirst();
+  unsubscribeSecond();
+});
+
+test("a failed asynchronous snapshot retries while subscribers remain", async () => {
+  let builds = 0;
+  const stream = new SharedSnapshotStream(() => {
+    builds += 1;
+    return builds === 1 ? Promise.reject(new Error("transient")) : Promise.resolve({ sequence: builds });
+  }, 10);
+  const received = [];
+  const unsubscribe = stream.subscribe((snapshot) => received.push(snapshot));
+
+  await delay(35);
+  assert.ok(builds >= 2);
+  assert.ok(received.length > 0);
+  assert.equal(received[0].sequence, 2);
+  unsubscribe();
+});
