@@ -825,6 +825,47 @@ test("api: normal bug bounty projects keep real-target confirm before reports", 
   });
 });
 
+test("api: project snapshots reuse finding rows when counting pending work", async () => {
+  await withServer(async (base, out) => {
+    const created = await (await fetch(base + "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "snapshot-read-bounds", sourcePaths: ["./src"], config: { engagement: { kind: "bug-bounty" } } }),
+    })).json();
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir: path.join(out, "snapshot-read-bounds-run") });
+      store.upsertFindings(created.id, runId, Array.from({ length: 40 }, (_, index) => ({
+        findingKey: `ksnapshot${index}`,
+        title: `Finding ${index}`,
+        location: `src/A.sol:${index + 1}`,
+        severity: "medium",
+        status: index % 2 === 0 ? "confirmed-executable" : "suspected",
+        evidence: "local evidence",
+      })));
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const originalGetFinding = MetadataStore.prototype.getFinding;
+    let findingReads = 0;
+    MetadataStore.prototype.getFinding = function (id) {
+      findingReads += 1;
+      return originalGetFinding.call(this, id);
+    };
+    try {
+      const response = await (await fetch(base + "/api/projects")).json();
+      const snapshot = response.projects.find((project) => project.uuid === created.uuid);
+      assert.equal(snapshot.verifyPendingFindings, 20);
+      assert.equal(snapshot.confirmPendingFindings, 20);
+      assert.ok(findingReads < 20, `snapshot performed ${findingReads} individual finding reads`);
+    } finally {
+      MetadataStore.prototype.getFinding = originalGetFinding;
+    }
+  });
+});
+
 test("api: project completion uses current phase work and cumulative standard coverage", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
