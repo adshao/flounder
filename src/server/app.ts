@@ -3032,17 +3032,22 @@ function confirmWorkRows(
   currentResultRunIds: Set<number>,
   materialBoundary: Record<string, unknown> | undefined,
   currentDecisions: Array<Record<string, unknown>>,
+  projectFindings?: Array<Record<string, unknown>>,
 ): Array<Record<string, unknown>> {
+  const findingsById = new Map((projectFindings ?? store.listFindings(projectId)).map((row) => [Number(row.id), row]));
+  const fullFinding = (row: Record<string, unknown>): Record<string, unknown> | undefined =>
+    findingsById.get(Number(row.id)) ?? store.getFinding(Number(row.id));
   const settledKeys = confirmDecisionKeySet(currentDecisions.filter((row) => !needsConfirmEvidenceWork(row)));
   const pending = store.pendingConfirmable(projectId)
-    .filter((row) => !findingTrackingBlocksProgress(store.getFinding(Number(row.id))))
-    .filter((row) => !findingIndependentReviewBlocksProgress(store.getFinding(Number(row.id))))
+    .filter((row) => !findingTrackingBlocksProgress(fullFinding(row)))
+    .filter((row) => !findingIndependentReviewBlocksProgress(fullFinding(row)))
     .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
     .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary))
     .filter((row) => !findingRowCoveredByDecision(row as unknown as Record<string, unknown>, settledKeys));
   const readinessKeys = new Set(currentDecisions.filter((row) => needsConfirmEvidenceWork(row)).flatMap(confirmDecisionMemberKeys));
-  const readiness = readinessKeys.size === 0 ? [] : store.confirmableContext(projectId)
-    .filter((row) => !findingTrackingBlocksProgress(store.getFinding(Number(row.id))))
+  const context = store.confirmableContext(projectId);
+  const readiness = readinessKeys.size === 0 ? [] : context
+    .filter((row) => !findingTrackingBlocksProgress(fullFinding(row)))
     .filter((row) => !findingIndependentReviewBlocksProgress(row))
     .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
     .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary))
@@ -3050,14 +3055,14 @@ function confirmWorkRows(
       const key = stringValue((row as Record<string, unknown>).finding_key).toLowerCase();
       return Boolean(key && readinessKeys.has(key));
     });
-  const explicitRetries = store.confirmableContext(projectId)
-    .filter((row) => !findingTrackingBlocksProgress(store.getFinding(Number(row.id))))
+  const explicitRetries = context
+    .filter((row) => !findingTrackingBlocksProgress(fullFinding(row)))
     .filter((row) => store.hasFindingPhaseRetry(projectId, "finding", Number(row.id), "confirm"))
     .filter((row) => !findingIndependentReviewBlocksProgress(row) || row.refutation_status === "conflict")
     .filter((row) => confirmableRunDir(row as unknown as Record<string, unknown>))
     .filter((row) => rowBelongsToCurrentMaterial(row as unknown as Record<string, unknown>, currentResultRunIds, materialBoundary));
   return uniqueRowsByFindingKey([...pending, ...readiness, ...explicitRetries]).filter((row) => {
-    const inputFingerprint = findingPhaseFingerprint(store, row, "confirm", materialBoundary);
+    const inputFingerprint = findingPhaseFingerprint(store, fullFinding(row) ?? row, "confirm", materialBoundary);
     return store.phaseEligible(projectId, "finding", Number(row.id), "confirm", inputFingerprint);
   });
 }
@@ -5550,7 +5555,22 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
 }
 
 function verifyWorklist(store: MetadataStore, projectId: number, currentResultRunIds: Set<number>, materialBoundary?: Record<string, unknown>, fromStart = false): unknown[] {
-  return reportableFindings(store.listFindings(projectId)
+  return verifyWorkRows(store, projectId, currentResultRunIds, materialBoundary, fromStart)
+    .map(({ row, inputFingerprint }) => ({
+      ...(normalizeProjectVerifyFindings(store, projectId, findingDetailRow(row)) as Record<string, unknown>),
+      _phaseAttempt: { subjectType: "finding", subjectId: Number(row.id), inputFingerprint },
+    }));
+}
+
+function verifyWorkRows(
+  store: MetadataStore,
+  projectId: number,
+  currentResultRunIds: Set<number>,
+  materialBoundary?: Record<string, unknown>,
+  fromStart = false,
+  projectFindings?: Array<Record<string, unknown>>,
+): Array<{ row: Record<string, unknown>; inputFingerprint: string }> {
+  return reportableFindings((projectFindings ?? store.listFindings(projectId))
     .filter((row) => rowBelongsToCurrentMaterial(row, currentResultRunIds, materialBoundary))
     .filter((row) => !isIgnoredFinding(row))
     .filter((row) => !findingTrackingBlocksProgress(row)))
@@ -5566,15 +5586,12 @@ function verifyWorklist(store: MetadataStore, projectId: number, currentResultRu
       const inputFingerprint = findingPhaseFingerprint(store, row, "verify", materialBoundary);
       return { row, inputFingerprint };
     })
-    .filter(({ row, inputFingerprint }) => store.phaseEligible(projectId, "finding", Number(row.id), "verify", inputFingerprint))
-    .map(({ row, inputFingerprint }) => ({
-      ...(normalizeProjectVerifyFindings(store, projectId, findingDetailRow(row)) as Record<string, unknown>),
-      _phaseAttempt: { subjectType: "finding", subjectId: Number(row.id), inputFingerprint },
-    }));
+    .filter(({ row, inputFingerprint }) => store.phaseEligible(projectId, "finding", Number(row.id), "verify", inputFingerprint));
 }
 
 function findingPhaseFingerprint(store: MetadataStore, row: Record<string, unknown>, phase: "verify" | "confirm" | "report", boundary?: Record<string, unknown>): string {
-  const full = Number.isFinite(Number(row.id)) ? store.getFinding(Number(row.id)) ?? row : row;
+  const hasFullFinding = Object.hasOwn(row, "updated_at") && Object.hasOwn(row, "status");
+  const full = !hasFullFinding && Number.isFinite(Number(row.id)) ? store.getFinding(Number(row.id)) ?? row : row;
   const runId = Number(full.run_id);
   const run = Number.isFinite(runId) ? store.getRun(runId) : undefined;
   return phaseInputFingerprint({
@@ -5909,9 +5926,8 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
     const currentResultRows = currentResultRuns(currentRuns, scopeBoundary);
     const currentRunIds = runIdSet(currentResultRows);
     const scopeView = currentScopeView(store, id, currentRuns, activePrepareRefresh, scopeBoundary, !materialBoundary);
-    const allFindings = activePrepareRefresh
-      ? []
-      : reportableFindings(store.listFindings(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
+    const projectFindings = activePrepareRefresh ? [] : store.listFindings(id);
+    const allFindings = reportableFindings(projectFindings.filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const findings = allFindings.filter((finding) => !isIgnoredFinding(finding));
     const counts = findingCounts(findings);
     const confirmDecisions = activePrepareRefresh
@@ -5919,10 +5935,10 @@ function projectSnapshots(store: MetadataStore, options: ProjectListOptions = {}
       : currentConfirmDecisions(store.listConfirmDecisions(id).filter((row) => rowBelongsToCurrentMaterial(row, currentRunIds, materialBoundary)));
     const reproducedBugs = confirmDecisions.filter(isTechnicallyReproducedDecision).length;
     const auditConfirmedFindings = countAuditConfirmedFindings(findings);
-    const verifyPendingFindings = verifyWorklist(store, id, currentRunIds, materialBoundary).length;
+    const verifyPendingFindings = verifyWorkRows(store, id, currentRunIds, materialBoundary, false, projectFindings).length;
     const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, allRuns);
     const confirmPendingFindings = requiresRealTargetConfirmation
-      ? confirmWorkRows(store, id, currentRunIds, materialBoundary, confirmDecisions).length
+      ? confirmWorkRows(store, id, currentRunIds, materialBoundary, confirmDecisions, projectFindings).length
       : 0;
     return {
       id,
