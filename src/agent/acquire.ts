@@ -165,13 +165,16 @@ export async function runPrepare(
 }
 
 export function prepareValidationBlockingIssues(validation: PrepareValidation): string[] {
-  return uniqueStrings(
-    validation.issues.filter((issue) => {
-      const raw = issue.toLowerCase();
-      return raw.includes("no prepare_manifest.json")
-        || raw.includes("manifest lists no components");
-    }),
-  );
+  const issues = validation.issues.filter((issue) => {
+    const raw = issue.toLowerCase();
+    return raw.includes("no prepare_manifest.json")
+      || raw.includes("manifest lists no components");
+  });
+  const auditableComponents = validation.matched + validation.unverified + validation.sourcePinned;
+  if (validation.components > 0 && auditableComponents === 0) {
+    issues.push("prepare manifest has no auditable component with pinned source or deployment evidence");
+  }
+  return uniqueStrings(issues);
 }
 
 export function normalizePrepareManifest(manifest: unknown, validation: PrepareValidation): unknown {

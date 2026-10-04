@@ -1929,6 +1929,9 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
     }
   }
   if (unverified > 0) issues.push(`${unverified} deployed component(s) are unverified and should be treated as trust boundaries`);
+  if (inScope > 0 && matched + unverified + sourcePinned === 0) {
+    issues.push("prepare manifest has no auditable in-scope component with pinned source or deployment evidence");
+  }
   if (openPrepareGaps) issues.push("prepare manifest has unresolved material gaps");
 
   const rawManifestState = stringValue(manifest?.status);
@@ -2035,6 +2038,7 @@ function isBlockingPrepareIssue(issue: string): boolean {
     || raw.includes("prepare_manifest.json is not a json object")
     || raw.includes("manifest lists no components")
     || raw.includes("prepared workspace is empty")
+    || raw.includes("no auditable in-scope component with pinned source or deployment evidence")
     || raw.includes("prepare run ended with status");
 }
 

@@ -1096,6 +1096,15 @@ test("prepare validation treats missing source components as a hard blocker", ()
   });
   assert.deepEqual(noComponents, ["manifest lists no components"]);
 
+  const unresolvedOnly = prepareValidationBlockingIssues({
+    components: 1,
+    matched: 0,
+    unverified: 0,
+    sourcePinned: 0,
+    issues: ["official source: unresolved prepare placeholder(s): revision"],
+  });
+  assert.deepEqual(unresolvedOnly, ["prepare manifest has no auditable component with pinned source or deployment evidence"]);
+
   const sourceReadyWithCaveat = prepareValidationBlockingIssues({
     components: 1,
     matched: 0,

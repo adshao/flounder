@@ -4281,7 +4281,7 @@ test("api: terminal prepare with no components is not audit ready", async () => 
   });
 });
 
-test("api: terminal prepare manifests with unresolved placeholders display as limited partial materials", async () => {
+test("api: terminal prepare manifests with no auditable source are not audit ready", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
     const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
@@ -4333,11 +4333,13 @@ test("api: terminal prepare manifests with unresolved placeholders display as li
     }
 
     const detail = await json(await fetch(base + "/api/projects/" + created.uuid));
-    assert.equal(detail.prepareSummary.quality, "limited");
+    assert.equal(detail.prepareSummary.quality, "needs-review");
+    assert.equal(detail.prepareSummary.auditReady, false);
+    assert.equal(detail.prepareSummary.blocked, true);
     assert.equal(detail.prepareSummary.manifestState, "partial");
     assert.equal(detail.prepareSummary.sourcePinned, 0);
     assert.match(detail.prepareSummary.issues.join("\n"), /unresolved prepare placeholder/);
-    assert.match(detail.prepareSummary.issues.join("\n"), /staged materials are usable but partial/);
+    assert.match(detail.prepareSummary.blockingIssues.join("\n"), /no auditable in-scope component/);
   });
 });
 
