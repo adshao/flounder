@@ -20,7 +20,7 @@ import { differentialNetworkForExploitRun, runDifferentialConfirmation } from ".
 import { runDischargeChallenge, runRefutation } from "../dist/agent/refutation.js";
 import { renderReportFileManifest, stageReportEvidence } from "../dist/agent/report.js";
 import { stagePackageSource } from "../dist/agent/package-source.js";
-import { assistantMessageError, auditSessionHasDurableHandoff, buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, toolSchemas, withDetailedCodexReasoningSummary } from "../dist/agent/pi-session.js";
+import { assistantMessageError, auditSessionHasDurableHandoff, buildSessionPrompt, createIsolatedResourceLoader, FINDINGS_FINALIZE_PROMPT, isPiSessionProvider, mapCheckpointDirective, mapThinkingLevel, prepareCheckpointDirective, promptWithWallClockAbort, resolveFinalizePromptTimeoutMs, sessionErrorAfterTurn, toolSchemas, withDetailedCodexReasoningSummary } from "../dist/agent/pi-session.js";
 import { MockAuditLlmClient } from "../dist/llm/mock.js";
 import { RunLogger } from "../dist/trace/logger.js";
 import { renderDisclosure } from "../dist/reports/disclosure.js";
@@ -1997,6 +1997,14 @@ test("pi session provider failures preserve their upstream error message", () =>
     "provider returned stopReason=aborted",
   );
   assert.equal(assistantMessageError({ role: "assistant", content: [], stopReason: "stop" }), undefined);
+});
+
+test("pi session clears a recovered turn error but retains a final failure", () => {
+  const failed = sessionErrorAfterTurn("", { role: "assistant", stopReason: "error", errorMessage: "context overflow" });
+  assert.equal(failed, "context overflow");
+  assert.equal(sessionErrorAfterTurn(failed, { role: "toolResult" }), failed);
+  assert.equal(sessionErrorAfterTurn(failed, { role: "assistant", stopReason: "stop" }), "");
+  assert.equal(sessionErrorAfterTurn("", { role: "assistant", stopReason: "error", errorMessage: "provider failed" }), "provider failed");
 });
 
 test("forced finalize: a run that never writes findings.json still captures hypotheses", async () => {

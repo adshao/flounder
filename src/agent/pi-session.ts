@@ -333,8 +333,7 @@ export async function runAuditSession(input: {
     } else if (event.type === "tool_execution_end" && event.isError) {
       void input.logger.event("audit_tool_error", { tool: event.toolName, ...activityMeta });
     } else if (event.type === "turn_end") {
-      const error = assistantMessageError((event as { message?: unknown }).message);
-      if (error && !sessionError) sessionError = error;
+      sessionError = sessionErrorAfterTurn(sessionError, (event as { message?: unknown }).message);
       if (input.confirm) {
         confirmCheckpointQueue = confirmCheckpointQueue.then(checkpointConfirm).catch(() => {
           // Checkpoints are best-effort; final artifact parsing remains authoritative.
@@ -1132,6 +1131,15 @@ export function assistantMessageError(message: unknown): string | undefined {
   if (row.role !== "assistant" || (row.stopReason !== "error" && row.stopReason !== "aborted")) return undefined;
   if (typeof row.errorMessage === "string" && row.errorMessage.trim()) return row.errorMessage.trim();
   return `provider returned stopReason=${String(row.stopReason)}`;
+}
+
+/** pi may recover a failed turn through retry or context compaction. Only the
+ * final assistant turn determines whether the completed session failed. */
+export function sessionErrorAfterTurn(previousError: string, message: unknown): string {
+  if (!message || typeof message !== "object" || Array.isArray(message) || (message as { role?: unknown }).role !== "assistant") {
+    return previousError;
+  }
+  return assistantMessageError(message) ?? "";
 }
 
 function extractMessageText(content: unknown): string {
