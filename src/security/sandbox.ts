@@ -134,7 +134,7 @@ export async function compactSandboxWorkspace(
       if (!entry.isDirectory()) continue;
       const relative = relativeDir ? `${relativeDir}/${entry.name}` : entry.name;
       const absolute = path.join(absoluteDir, entry.name);
-      if (isRebuildableSandboxDirectory(entry.name) && !hasBaselineDescendant(baselineFiles, relative)) {
+      if (isRebuildableSandboxDirectory(entry.name, relative) && !hasBaselineDescendant(baselineFiles, relative)) {
         await rm(absolute, { recursive: true, force: true });
         removed.push(relative);
         continue;
@@ -1217,8 +1217,11 @@ const REBUILDABLE_SANDBOX_DIRECTORIES = new Set([
   "zig-out",
 ]);
 
-function isRebuildableSandboxDirectory(name: string): boolean {
-  return REBUILDABLE_SANDBOX_DIRECTORIES.has(name.toLowerCase());
+function isRebuildableSandboxDirectory(name: string, relative: string): boolean {
+  // pnpm defaults to HOME/.local/share/pnpm when no store is configured. Older
+  // workspaces can contain this generated store even after the usual build
+  // output is compacted; only prune that exact cache location.
+  return relative === ".local/share/pnpm" || REBUILDABLE_SANDBOX_DIRECTORIES.has(name.toLowerCase());
 }
 
 function hasBaselineDescendant(baselineFiles: ReadonlySet<string>, directory: string): boolean {
@@ -1523,6 +1526,7 @@ function sandboxEnv(workspace: string, tmpDir: string, cacheDir?: string, comman
     GOCACHE: path.join(pkgCache, "go-build-cache"),
     GOMODCACHE: path.join(pkgCache, "go-mod-cache"),
     NPM_CONFIG_CACHE: path.join(pkgCache, "npm-cache"),
+    npm_config_store_dir: path.join(pkgCache, "pnpm-store"),
     YARN_GLOBAL_FOLDER: path.join(pkgCache, "yarn-berry"),
   };
   out.PATH = sandboxToolPath(process.env.PATH);

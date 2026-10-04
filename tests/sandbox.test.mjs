@@ -37,11 +37,13 @@ test("completed sandbox workspaces discard rebuildable output but retain source 
     await mkdir(path.join(workspace, "out"), { recursive: true });
     await mkdir(path.join(workspace, "target", "debug"), { recursive: true });
     await mkdir(path.join(workspace, "node_modules", "pkg"), { recursive: true });
+    await mkdir(path.join(workspace, ".local", "share", "pnpm", "store"), { recursive: true });
     await mkdir(path.join(workspace, "notes"), { recursive: true });
     await writeFile(path.join(workspace, "src", "lib.rs"), "pub fn audited() {}\n");
     await writeFile(path.join(workspace, "out", "checked-in.json"), "{}\n");
     await writeFile(path.join(workspace, "target", "debug", "large-binary"), "rebuildable\n");
     await writeFile(path.join(workspace, "node_modules", "pkg", "index.js"), "module.exports = {};\n");
+    await writeFile(path.join(workspace, ".local", "share", "pnpm", "store", "package.tgz"), "rebuildable\n");
     await writeFile(path.join(workspace, "notes", "trace.txt"), "keep non-build output\n");
     await writeFile(path.join(workspace, "target", "poc.rs"), "#[test] fn poc() {}\n");
 
@@ -51,7 +53,7 @@ test("completed sandbox workspaces discard rebuildable output but retain source 
       new Map([["target/poc.rs", "#[test] fn poc() {}\n"]]),
     );
 
-    assert.equal(result.removedDirectories, 2);
+    assert.equal(result.removedDirectories, 3);
     assert.equal(result.restoredScratchFiles, 1);
     assert.equal(await readFile(path.join(workspace, "src", "lib.rs"), "utf8"), "pub fn audited() {}\n");
     assert.equal(await readFile(path.join(workspace, "out", "checked-in.json"), "utf8"), "{}\n");
@@ -59,6 +61,27 @@ test("completed sandbox workspaces discard rebuildable output but retain source 
     assert.equal(await readFile(path.join(workspace, "notes", "trace.txt"), "utf8"), "keep non-build output\n");
     await assert.rejects(readFile(path.join(workspace, "target", "debug", "large-binary")), /ENOENT/);
     await assert.rejects(readFile(path.join(workspace, "node_modules", "pkg", "index.js")), /ENOENT/);
+    await assert.rejects(readFile(path.join(workspace, ".local", "share", "pnpm", "store", "package.tgz")), /ENOENT/);
+  } finally {
+    await rm(workspace, { recursive: true, force: true });
+  }
+});
+
+test("workspace compaction retains a pnpm directory when it contains baseline source", async () => {
+  const workspace = await tempDir("flounder-sandbox-pnpm-baseline-");
+  try {
+    const baseline = path.join(workspace, ".local", "share", "pnpm", "fixture.txt");
+    await mkdir(path.dirname(baseline), { recursive: true });
+    await writeFile(baseline, "checked in\n");
+
+    const result = await compactSandboxWorkspace(
+      workspace,
+      new Set([".local/share/pnpm/fixture.txt"]),
+      new Map(),
+    );
+
+    assert.equal(result.removedDirectories, 0);
+    assert.equal(await readFile(baseline, "utf8"), "checked in\n");
   } finally {
     await rm(workspace, { recursive: true, force: true });
   }
@@ -679,7 +702,7 @@ test("sandbox host backend is explicit and still uses isolated HOME and caches",
     const result = await runSandboxCommand(
       {
         program: process.execPath,
-        args: ["-e", "console.log(process.env.HOME); console.log(process.env.TMPDIR); console.log(process.env.CARGO_HOME); console.log(process.env.SCARB_CACHE);"],
+        args: ["-e", "const path = require('node:path'); console.log(process.env.HOME); console.log(process.env.TMPDIR); console.log(process.env.CARGO_HOME); console.log(process.env.SCARB_CACHE); console.log('pnpm-store-shared=' + (process.env.npm_config_store_dir === path.join(process.env.CARGO_HOME, '..', 'pnpm-store')));"],
         timeoutMs: 10_000,
       },
       workspace,
@@ -691,6 +714,7 @@ test("sandbox host backend is explicit and still uses isolated HOME and caches",
 
     assert.equal(result.exitCode, 0);
     assert.match(result.stdout, /<local-path>/);
+    assert.match(result.stdout, /pnpm-store-shared=true/);
     assert.doesNotMatch(result.stdout, new RegExp(workspace.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
     assert.doesNotMatch(result.stdout, new RegExp(cache.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")));
   } finally {
