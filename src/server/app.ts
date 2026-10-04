@@ -63,6 +63,7 @@ const PERSISTED_ACTIVITY_TAIL_BYTES = 16 * 1024 * 1024;
 const BUG_BOUNTY_CONTEST_KIND = "bug-bounty-contest";
 const DEFAULT_CONTEST_BATCH_SCOPES = 10;
 const DEFAULT_CONTEST_DIG_CONCURRENCY = 5;
+const MAX_PIPELINE_CONFIRM_FINDINGS_PER_SESSION = 4;
 const VERIFY_ARTIFACT_RECONCILIATION_VERSION = 3;
 const VERIFY_ARTIFACT_RECONCILIATION_LIMIT = 50;
 const MAX_VERIFY_ARTIFACT_REPLAY_ROWS = 1_000;
@@ -5518,7 +5519,10 @@ async function daemonPipelineWorklist(c: Ctx): Promise<void> {
     if (pending.length === 0) {
       return sendJson(c.res, 200, { phase, requiresRealTargetConfirmation, inputRunDirs: [], confirmKeys: [] });
     }
-    const rows = pending;
+    // Each Confirm session must settle every selected finding before it can finish. Keep the
+    // session worklist small, then let the daemon request the next durable batch. Prior settled
+    // rows are still supplied below so later batches can compare against earlier decisions.
+    const rows = pending.slice(0, MAX_PIPELINE_CONFIRM_FINDINGS_PER_SESSION);
     const conflictRetryKeys = new Set(rows
       .filter((row) => row.refutation_status === "conflict")
       .map((row) => stringValue((row as Record<string, unknown>).finding_key).toLowerCase())

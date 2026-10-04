@@ -1519,6 +1519,69 @@ test("api: daemon pipeline worklist exposes verify candidates before confirm", a
   });
 });
 
+test("api: pipeline Confirm drains a large worklist in durable batches with prior decisions", async () => {
+  await withServer(async (base, out) => {
+    const project = await (await fetch(base + "/api/projects", {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ name: "batched-confirm-worklist", sourcePaths: ["./src"] }),
+    })).json();
+    const store = MetadataStore.openForOutput(out);
+    let token;
+    let jobId;
+    try {
+      const daemon = store.createDaemonToken("batched-confirm-daemon");
+      token = daemon.token;
+      const sourceRun = store.startRun({ projectId: project.id, kind: "run", runDir: path.join(out, "batched-source-run") });
+      for (let index = 0; index < 6; index += 1) {
+        store.upsertFindings(project.id, sourceRun, [{
+          findingKey: `kfinding${index}`,
+          title: `Independent finding ${index}`,
+          location: `src/Module.sol:${index + 1}`,
+          severity: "high",
+          status: "confirmed-executable",
+          confidence: 0.9,
+        }], "differential");
+      }
+      jobId = store.enqueueJob("batched-confirm-worklist", { verb: "run", pipeline: true }, daemon.id);
+      assert.equal(store.claimJob(daemon.id)?.id, jobId);
+    } finally {
+      store.close();
+    }
+
+    const load = async () => (await fetch(base + "/api/daemon/pipeline-worklist", {
+      method: "POST",
+      headers: { "content-type": "application/json", authorization: `Bearer ${token}` },
+      body: JSON.stringify({ jobId, project: "batched-confirm-worklist", phase: "confirm" }),
+    })).json();
+    const first = await load();
+    assert.equal(first.confirmFindings.length, 4);
+    assert.equal(first.confirmKeys.length, 8, "each finding carries its content and origin selectors");
+
+    const storeAfter = MetadataStore.openForOutput(out);
+    try {
+      const confirmRun = storeAfter.startRun({ projectId: project.id, kind: "confirm", runDir: path.join(out, "batched-confirm-run") });
+      storeAfter.upsertConfirmDecisions(project.id, confirmRun, first.confirmFindings.map((finding) => ({
+        bug: finding.title,
+        members: [finding.id],
+        reproduced: "no",
+        evidenceLevel: "not-reproduced",
+        reproEvidence: "The local reproduction did not exhibit the claimed effect.",
+        recommendation: "drop",
+      })));
+      assert.deepEqual(first.confirmFindings.map((finding) => storeAfter.resolveFindingByKey(project.id, finding.id)?.confirm_status),
+        Array(4).fill("not-reproduced"));
+      storeAfter.finishRun(confirmRun, "done");
+    } finally {
+      storeAfter.close();
+    }
+
+    const second = await load();
+    assert.deepEqual(second.confirmFindings.map((finding) => finding.id), ["kfinding4", "kfinding5"]);
+    assert.equal(second.confirmSettledRows.length, 4, "later batches retain earlier decisions for consolidation");
+  });
+});
+
 test("api: current confirm decisions hide older rows superseded by newer member decisions", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();
