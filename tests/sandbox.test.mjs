@@ -4,11 +4,31 @@ import os from "node:os";
 import path from "node:path";
 import test from "node:test";
 import { defaultConfig, sandboxExecutionOptions, sandboxNetworkForPurpose } from "../dist/config.js";
-import { analyzeSandboxFileSafety, autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, compactSandboxWorkspace, DEFAULT_SANDBOX_BUILD_MIN_FREE_DISK_MB, defaultAppleContainerMemoryMb, runSandboxCommand, sandboxMinFreeDiskMb, sandboxToolPath } from "../dist/security/sandbox.js";
+import { analyzeSandboxFileSafety, autoPrefersAppleContainer, checkSandboxReadiness, clearSandboxAvailabilityCache, compactSandboxWorkspace, DEFAULT_SANDBOX_BUILD_MIN_FREE_DISK_MB, defaultAppleContainerMemoryMb, prepareSandboxWorkspace, runSandboxCommand, sandboxMinFreeDiskMb, sandboxToolPath } from "../dist/security/sandbox.js";
 
 async function tempDir(prefix) {
   return mkdtemp(path.join(os.tmpdir(), prefix));
 }
+
+test("large source copies remain complete and independently writable", async () => {
+  const root = await tempDir("flounder-sandbox-source-copy-");
+  try {
+    const source = path.join(root, "source");
+    const runDir = path.join(root, "run");
+    await mkdir(source);
+    const original = Buffer.alloc(9 * 1024 * 1024, 0x41);
+    await writeFile(path.join(source, "large.bin"), original);
+
+    const workspace = await prepareSandboxWorkspace([source], runDir, "audit/sample/workspace");
+    const copy = path.join(workspace.absolute, "large.bin");
+    assert.deepEqual(await readFile(copy), original);
+
+    await writeFile(copy, Buffer.alloc(original.length, 0x42));
+    assert.deepEqual(await readFile(path.join(source, "large.bin")), original);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
 
 test("completed sandbox workspaces discard rebuildable output but retain source and scratch evidence", async () => {
   const workspace = await tempDir("flounder-sandbox-compact-");

@@ -1,5 +1,6 @@
 import { spawn } from "node:child_process";
 import { randomBytes } from "node:crypto";
+import { constants as fsConstants } from "node:fs";
 import { copyFile, lstat, mkdir, open, readdir, realpath, rename, rm, stat, statfs, writeFile } from "node:fs/promises";
 import { totalmem } from "node:os";
 import path from "node:path";
@@ -33,6 +34,7 @@ const APPLE_CONTAINER_CLEANUP_GRACE_MS = 750;
 const CACHE_TEMP_PREFIX = ".flounder-cache-";
 const APPLE_CONTAINER_DEFAULT_MEMORY_CAP_MB = 8192;
 const APPLE_CONTAINER_DEFAULT_MEMORY_FLOOR_MB = 1024;
+const SOURCE_CLONE_MIN_BYTES = 8 * 1024 * 1024;
 
 export interface SandboxExecutionOptions {
   backend?: SandboxBackend;
@@ -1144,7 +1146,30 @@ async function copySourcePath(sourcePath: string, targetPath: string): Promise<v
   }
   if (!info.isFile()) return;
   await mkdir(path.dirname(targetPath), { recursive: true });
-  await copyFile(normalizedSource, targetPath);
+  if (info.size >= SOURCE_CLONE_MIN_BYTES && process.platform === "darwin" &&
+      await cloneSourceFileOnMac(normalizedSource, targetPath)) return;
+  // Linux filesystems can use a reflink here; Node falls back to an ordinary
+  // copy when the source and destination do not support one.
+  await copyFile(normalizedSource, targetPath, fsConstants.COPYFILE_FICLONE);
+}
+
+async function cloneSourceFileOnMac(sourcePath: string, targetPath: string): Promise<boolean> {
+  // Node's copyFile clone flag is unavailable on some macOS builds even when
+  // the host filesystem supports copy-on-write clones. The fixed host command
+  // uses no shell or model-supplied arguments beyond the already-validated paths.
+  const tempPath = path.join(path.dirname(targetPath), `${CACHE_TEMP_PREFIX}${process.pid}-${randomBytes(8).toString("hex")}.tmp`);
+  try {
+    const cloned = await new Promise<boolean>((resolve) => {
+      const child = spawn("/bin/cp", ["-c", "-p", sourcePath, tempPath], { stdio: "ignore" });
+      child.once("error", () => resolve(false));
+      child.once("close", (code) => resolve(code === 0));
+    });
+    if (!cloned) return false;
+    await rename(tempPath, targetPath);
+    return true;
+  } finally {
+    await rm(tempPath, { force: true });
+  }
 }
 
 async function isDirectory(input: string): Promise<boolean> {
