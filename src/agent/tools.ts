@@ -1,4 +1,4 @@
-import { mkdir, readFile, rm } from "node:fs/promises";
+import { mkdir, open, rm } from "node:fs/promises";
 import path from "node:path";
 import { sandboxExecutionOptions, sandboxNetworkForPurpose, type AuditorConfig } from "../config.js";
 import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, isAgentWorkspaceSetupCommand, openWorldCommandNeedsNetwork } from "../security/policy.js";
@@ -274,6 +274,9 @@ export function ingestFindingsFromScratch(session: AgentSession): { parsed: numb
   return { parsed: findings.length, errors };
 }
 
+const MAX_WORKSPACE_READ_BYTES = 8 * 1024 * 1024;
+const MAX_READ_OBSERVATION_CHARS = 256 * 1024;
+
 const readTool: AgentTool = {
   name: "read",
   description:
@@ -284,6 +287,7 @@ const readTool: AgentTool = {
     if (!normalizeToolPath(target)) return { observation: 'error: "path" must be a safe relative path.' };
     const readable = await findReadable(ctx, target);
     if (!readable) return { observation: `error: no authorized source, corpus, build metadata, or scratch file matches "${target}".` };
+    if (readable.error) return { observation: readable.error };
     const allLines = readable.content.split(/\r?\n/);
     const total = allLines.length;
     const start = clampInt(args.start, 1, Math.max(1, total), 1);
@@ -291,8 +295,11 @@ const readTool: AgentTool = {
     const end = clampInt(args.end, start, Math.max(start, total), defaultEnd);
     const slice = allLines.slice(start - 1, end);
     const numbered = slice.map((line, idx) => `${start + idx}\t${line}`).join("\n");
+    const output = numbered.length > MAX_READ_OBSERVATION_CHARS
+      ? `${numbered.slice(0, MAX_READ_OBSERVATION_CHARS)}\n[read output truncated; use a narrower line range or a bounded inspection command]`
+      : numbered;
     return {
-      observation: `${readable.path} lines ${start}-${end} of ${total} (${readable.kind})\n${numbered}`,
+      observation: `${readable.path} lines ${start}-${end} of ${total} (${readable.kind})\n${output}`,
       meta: { path: readable.path, start, end, total, kind: readable.kind },
     };
   },
@@ -957,7 +964,7 @@ async function ensureWorkspace(ctx: ToolContext): Promise<SandboxWorkspace | und
   return workspace;
 }
 
-async function findReadable(ctx: ToolContext, target: string): Promise<{ path: string; content: string; kind: string } | undefined> {
+async function findReadable(ctx: ToolContext, target: string): Promise<{ path: string; content: string; kind: string; error?: string } | undefined> {
   const normalized = normalizeToolPath(target);
   if (!normalized) return undefined;
   if (ctx.session.scratchFiles.has(normalized)) {
@@ -999,7 +1006,8 @@ async function prepareInspectionWorkspace(ctx: ToolContext, workspace: SandboxWo
   for (const filePath of ctx.session.baselineFiles ?? []) {
     if (!isBuildMetadataPath(filePath) || visible.has(filePath)) continue;
     try {
-      visible.set(filePath, await readFile(await resolveWorkspacePathForRead(workspace.absolute, filePath), "utf8"));
+      const result = await readBoundedWorkspaceText(await resolveWorkspacePathForRead(workspace.absolute, filePath));
+      if (result.content !== undefined) visible.set(filePath, result.content);
     } catch {
       // Binary or unreadable metadata is not needed for source inspection.
     }
@@ -1013,19 +1021,47 @@ function isBuildMetadataPath(filePath: string): boolean {
   return /^(?:Cargo\.(?:toml|lock)|go\.(?:mod|sum)|package(?:-lock)?\.json|pnpm-lock\.yaml|yarn\.lock|bun\.lock|foundry\.toml|remappings\.txt|rust-toolchain(?:\.toml)?|pyproject\.toml|uv\.lock|requirements[^/]*\.txt|Makefile|CMakeLists\.txt|\.gitmodules|tsconfig[^/]*\.json|hardhat\.config\.[cm]?[jt]s)$/.test(name);
 }
 
-async function readWorkspaceCandidate(ctx: ToolContext, target: string): Promise<{ path: string; content: string } | undefined> {
+async function readWorkspaceCandidate(ctx: ToolContext, target: string): Promise<{ path: string; content: string; error?: string } | undefined> {
   const workspace = ctx.session.workspace;
   if (!workspace) return undefined;
   for (const candidate of workspacePathCandidates(ctx, target)) {
     if (ctx.session.scratchFiles.has(candidate)) return { path: candidate, content: ctx.session.scratchFiles.get(candidate) as string };
     try {
-      const content = await readFile(await resolveWorkspacePathForRead(workspace.absolute, candidate), "utf8");
-      return { path: candidate, content };
+      const result = await readBoundedWorkspaceText(await resolveWorkspacePathForRead(workspace.absolute, candidate));
+      return { path: candidate, content: result.content ?? "", ...(result.error ? { error: `error: ${candidate}: ${result.error}` } : {}) };
     } catch {
       // Try the next candidate.
     }
   }
   return undefined;
+}
+
+async function readBoundedWorkspaceText(filePath: string): Promise<{ content?: string; error?: string }> {
+  const file = await open(filePath, "r");
+  try {
+    const info = await file.stat();
+    if (!info.isFile()) throw new Error("not a regular file");
+    if (info.size > MAX_WORKSPACE_READ_BYTES) {
+      return { error: `file exceeds the ${MAX_WORKSPACE_READ_BYTES / (1024 * 1024)} MiB read limit; use a bounded inspection command` };
+    }
+    const chunks: Buffer[] = [];
+    let total = 0;
+    while (total <= MAX_WORKSPACE_READ_BYTES) {
+      const chunk = Buffer.allocUnsafe(Math.min(64 * 1024, MAX_WORKSPACE_READ_BYTES + 1 - total));
+      const { bytesRead } = await file.read(chunk, 0, chunk.length, total);
+      if (bytesRead === 0) break;
+      const data = chunk.subarray(0, bytesRead);
+      if (data.includes(0)) return { error: "binary file; use a bounded inspection command" };
+      chunks.push(data);
+      total += bytesRead;
+    }
+    if (total > MAX_WORKSPACE_READ_BYTES) {
+      return { error: `file exceeds the ${MAX_WORKSPACE_READ_BYTES / (1024 * 1024)} MiB read limit; use a bounded inspection command` };
+    }
+    return { content: Buffer.concat(chunks, total).toString("utf8") };
+  } finally {
+    await file.close();
+  }
 }
 
 function workspacePathCandidates(ctx: ToolContext, target: string): string[] {
