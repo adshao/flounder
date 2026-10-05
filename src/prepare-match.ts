@@ -10,6 +10,8 @@ export function normalizePrepareMatchStatus(value: string): string {
     || /\b(not verified|not matched|not exact|no match)\b/.test(words)) return "unverified";
   if (words === "matched" || words === "exact" || /\bexact match\b/.test(words)
     || /\bverified exact\b/.test(words)
+    || /\bverified(?: [a-z0-9]+){0,6} exact\b/.test(words)
+    || /\b(?:runtime|bytecode|source) exact\b/.test(words)
     || /\bfull match\b/.test(words)
     || /\bfull sourcify\b/.test(words)) return "matched";
   return raw;
