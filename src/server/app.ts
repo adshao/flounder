@@ -1970,16 +1970,24 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
 
   const summaryIssues = uniqueStrings(issues).slice(0, 12);
   const summaryGaps = summarizePrepareGaps(manifest?.gaps);
+  const blockingGaps = summaryGaps.filter(isBlockingPrepareGap);
+  const blockingIssues = uniqueStrings([
+    ...summaryIssues.filter(isBlockingPrepareIssue),
+    ...blockingGaps,
+  ]);
   const quality = prepareSummaryQuality({
     runStatus,
     manifestStatus,
     manifestState,
     issues: summaryIssues,
     gaps: summaryGaps,
+    blockingIssues,
   });
-  const blockingIssues = summaryIssues.filter(isBlockingPrepareIssue);
   const softIssues = summaryIssues.filter((issue) => !isBlockingPrepareIssue(issue));
-  const caveats = uniqueStrings([...softIssues, ...summaryGaps]).slice(0, 16);
+  const caveats = uniqueStrings([
+    ...softIssues,
+    ...summaryGaps.filter((gap) => !isBlockingPrepareGap(gap)),
+  ]).slice(0, 16);
   const auditReady = quality === "ready" || quality === "limited";
 
   return {
@@ -2017,12 +2025,13 @@ function prepareSummaryQuality(input: {
   manifestState: string;
   issues: string[];
   gaps: string[];
+  blockingIssues: string[];
 }): "ready" | "limited" | "preparing" | "needs-review" | "missing" | "invalid" {
   if (input.manifestStatus === "invalid") return "invalid";
   if (input.manifestStatus === "missing") return input.runStatus === "running" ? "preparing" : "missing";
   if (input.runStatus === "running") return "preparing";
   const state = input.manifestState.trim().toLowerCase();
-  if (input.issues.some(isBlockingPrepareIssue)) return "needs-review";
+  if (input.blockingIssues.length > 0) return "needs-review";
   if (state === "partial" || input.issues.length > 0 || input.gaps.length > 0) return "limited";
   return "ready";
 }
@@ -2040,6 +2049,15 @@ function isBlockingPrepareIssue(issue: string): boolean {
     || raw.includes("prepared workspace is empty")
     || raw.includes("no auditable in-scope component with pinned source or deployment evidence")
     || raw.includes("prepare run ended with status");
+}
+
+function isBlockingPrepareGap(gap: string): boolean {
+  const id = gap.split(":", 1)[0]?.trim().toLowerCase() ?? "";
+  return id.startsWith("hard-gate-")
+    || id.startsWith("hard_gate_")
+    || id === "hard gate"
+    || id === "blocker"
+    || id === "blocking";
 }
 
 function summarizePrepareComponent(component: Record<string, unknown>): Record<string, unknown> {
