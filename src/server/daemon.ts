@@ -8,7 +8,7 @@ import path from "node:path";
 import os from "node:os";
 import { randomUUID } from "node:crypto";
 import { mkdir, mkdtemp, readFile, realpath, rm, stat, writeFile } from "node:fs/promises";
-import { runAudit } from "../agent/audit.js";
+import { runAudit, type AuditRunResult } from "../agent/audit.js";
 import { runConfirm } from "../agent/confirm.js";
 import { runReport } from "../agent/report.js";
 import { runPrepare } from "../agent/acquire.js";
@@ -374,7 +374,7 @@ async function runPipelineJob(
   if (spec.pipelineStart !== "settle") {
     const auditCfg = specToConfig(auditSpec, ctx.out, ctx.workspace);
     await requireSandboxReady(auditCfg, "run", ctx);
-    await runAudit(auditCfg, {
+    const auditResult = await runAudit(auditCfg, {
       kind: "run",
       signal: ctx.signal,
       makeTracker: ctx.makeTracker,
@@ -383,6 +383,7 @@ async function runPipelineJob(
       ...(ctx.mockLlm ? { llm: new MockAuditLlmClient() } : {}),
     });
     await ctx.flushTracker();
+    requireCompletedPipelineAudit(auditResult, "Audit");
   }
 
   const verify = await pipelineWorklist(base, headers, ctx.jobId, ctx.trackingProject, "verify", spec.verifyFromStart === true);
@@ -398,22 +399,25 @@ async function runPipelineJob(
     };
     const verifyCfg = specToConfig(verifySpec, ctx.out, ctx.workspace);
     const verifyTempDir = await mkdtemp(path.join(os.tmpdir(), `flounder-verify-${ctx.jobId}-`));
-    try {
-      const vf = path.join(verifyTempDir, "findings.json");
-      await writeFile(vf, JSON.stringify(verify.verifyFindings), "utf8");
-      verifyCfg.auditVerify = vf;
-      await requireSandboxReady(verifyCfg, "audit", ctx);
-      await runAudit(verifyCfg, {
-        kind: "verify",
-        signal: ctx.signal,
-        makeTracker: ctx.makeTracker,
-        onActivity: ctx.onActivity,
-        ...(ctx.mockLlm ? { llm: new MockAuditLlmClient() } : {}),
-      });
-    } finally {
-      await rm(verifyTempDir, { recursive: true, force: true });
-    }
+    const verifyResult = await (async (): Promise<AuditRunResult> => {
+      try {
+        const vf = path.join(verifyTempDir, "findings.json");
+        await writeFile(vf, JSON.stringify(verify.verifyFindings), "utf8");
+        verifyCfg.auditVerify = vf;
+        await requireSandboxReady(verifyCfg, "audit", ctx);
+        return await runAudit(verifyCfg, {
+          kind: "verify",
+          signal: ctx.signal,
+          makeTracker: ctx.makeTracker,
+          onActivity: ctx.onActivity,
+          ...(ctx.mockLlm ? { llm: new MockAuditLlmClient() } : {}),
+        });
+      } finally {
+        await rm(verifyTempDir, { recursive: true, force: true });
+      }
+    })();
     await ctx.flushTracker();
+    requireCompletedPipelineAudit(verifyResult, "Verify");
   }
 
   await drainPipelineConfirmWork(
@@ -470,6 +474,12 @@ async function runPipelineJob(
       onActivity: ctx.onActivity,
       ...(spec.maxSteps !== undefined ? { maxSteps: spec.maxSteps } : {}),
     });
+  }
+}
+
+export function requireCompletedPipelineAudit(result: Pick<AuditRunResult, "status">, phase: "Audit" | "Verify"): void {
+  if (result.status !== "done") {
+    throw new Error(`pipeline ${phase} ended ${result.status}; resume its durable work before advancing`);
   }
 }
 

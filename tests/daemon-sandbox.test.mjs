@@ -3,7 +3,7 @@ import test from "node:test";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
-import { daemonVisibleSandboxReadiness, drainPipelineConfirmWork, initializeDaemonProcessEnvironment, resolvePipelineMaterials } from "../dist/server/daemon.js";
+import { daemonVisibleSandboxReadiness, drainPipelineConfirmWork, initializeDaemonProcessEnvironment, requireCompletedPipelineAudit, resolvePipelineMaterials } from "../dist/server/daemon.js";
 import { DEFAULT_SANDBOX_IMAGE } from "../dist/security/sandbox.js";
 
 test("daemon: missing default sandbox image is an auto-recoverable capability", () => {
@@ -106,4 +106,10 @@ test("daemon: pipeline confirm drains readiness work until the worklist stops ch
 
   assert.equal(runs, 2);
   assert.deepEqual(ran, [["finding-a", "finding-b"], ["finding-b"]]);
+});
+
+test("daemon: pipeline does not advance after a failed audit or Verify phase", () => {
+  assert.doesNotThrow(() => requireCompletedPipelineAudit({ status: "done" }, "Verify"));
+  assert.throws(() => requireCompletedPipelineAudit({ status: "error" }, "Verify"), /pipeline Verify ended error/);
+  assert.throws(() => requireCompletedPipelineAudit({ status: "killed" }, "Audit"), /pipeline Audit ended killed/);
 });
