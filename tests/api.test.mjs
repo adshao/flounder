@@ -1241,6 +1241,51 @@ test("api: standard pipeline continue resumes an interrupted batch before pendin
   });
 });
 
+test("api: explicit zero-scope continuation settles evidence without resuming interrupted Dig", async () => {
+  await withServer(async (base, out) => {
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+    const created = await (await post("/api/projects", {
+      name: "explicit-zero-scope-continuation",
+      sourcePaths: ["./src"],
+      config: { scopeCoverageMode: "standard" },
+    })).json();
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      store.upsertScopes(created.id, [
+        { scopeId: "audited", title: "Audited", status: "audited", score: 10 },
+        { scopeId: "pending", title: "Pending", status: "pending", score: 9 },
+      ]);
+      const runId = store.startRun({ projectId: created.id, kind: "run", runDir: path.join(out, "interrupted-dig") });
+      store.updateRunScopes(runId, 0, 1);
+      store.upsertFindings(created.id, runId, [{
+        findingKey: "pending-proof",
+        title: "Needs execution verification",
+        location: "src/A.sol:1",
+        severity: "high",
+        status: "suspected",
+        evidence: "candidate",
+      }]);
+      store.finishRun(runId, "error");
+    } finally {
+      store.close();
+    }
+
+    for (const override of [
+      { scopeCoverageMode: "custom", maxScopes: 0 },
+      { overrides: { config: { scopeCoverageMode: "custom", maxScopes: 0 } } },
+    ]) {
+      const launched = await (await post(`/api/projects/${created.uuid}/runs`, { verb: "run", pipeline: true, ...override })).json();
+      assert.equal(launched.queued, true);
+      const job = (await (await fetch(base + `/api/jobs/${launched.jobId}`)).json()).job;
+      const spec = JSON.parse(job.spec_json);
+      assert.equal(spec.maxScopes, 0);
+      assert.equal(spec.pipelineStart, "settle");
+      assert.equal(spec.remap, false);
+    }
+  });
+});
+
 test("api: successful later coverage clears stale interrupted remainder without rerunning an unchanged blocked confirm", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

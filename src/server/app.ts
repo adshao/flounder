@@ -2637,13 +2637,14 @@ async function runLaunch(c: Ctx): Promise<void> {
   const prepared = applyPreparedWorkspaceIfNeeded(spec, runs);
   if (!prepared.ok) return sendJson(c.res, 400, { error: prepared.error });
   const requiresRealTargetConfirmation = projectRequiresRealTargetConfirmation(project, runs);
+  const explicitZeroScopeRun = runBodyHasConfigOverride(body, "maxScopes") && spec.maxScopes === 0;
   applyContestRunDefaults(spec, project, body, progress, c.store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation, runs);
-  resumeInterruptedCoverageBatch(spec, progress, runs);
+  resumeInterruptedCoverageBatch(spec, progress, runs, explicitZeroScopeRun);
   promoteSettledPipelineCoverageBatch(spec, c.store, projectId, progress, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation);
   const nextActions = projectNextActions(c.store, projectId);
   if (nextActions.length > 0) {
     spec.nextActions = nextActions;
-    applyNextActionRunDefaults(spec, nextActions, progress);
+    if (!explicitZeroScopeRun) applyNextActionRunDefaults(spec, nextActions, progress);
   }
   if (
     spec.verb === "run"
@@ -2680,7 +2681,7 @@ async function runLaunch(c: Ctx): Promise<void> {
     && spec.pipeline
     && spec.maxScopes === 0
     && (
-      spec.verifyFromStart
+      explicitZeroScopeRun || spec.verifyFromStart
       || pipelinePostAuditWorkPending(c.store, projectId, currentResultRunIds, materialBoundary, requiresRealTargetConfirmation)
     )
   ) {
@@ -2909,8 +2910,9 @@ function runBodyHasMaterialOverride(body: Record<string, unknown>): boolean {
   return overrides?.sourcePaths !== undefined || overrides?.buildRoot !== undefined || overrides?.corpusPaths !== undefined;
 }
 
-function resumeInterruptedCoverageBatch(spec: LaunchSpec, progress: Coverage, runs: Array<Record<string, unknown>>): void {
+function resumeInterruptedCoverageBatch(spec: LaunchSpec, progress: Coverage, runs: Array<Record<string, unknown>>, explicitZeroScopeRun = false): void {
   if (spec.verb !== "run" && spec.verb !== "audit") return;
+  if (explicitZeroScopeRun) return;
   if (spec.scope || spec.region || spec.verifyFindings !== undefined) return;
   if (spec.maxScopes !== 0) return;
   const pending = Math.max(0, Math.floor(progress.pending));
@@ -6234,7 +6236,7 @@ interface ResolvedCoverage {
 }
 
 function resolveCoverage(cfg: Record<string, unknown>, progress?: Coverage, explicitFirst = false): ResolvedCoverage {
-  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? Math.max(1, Math.floor(v)) : undefined);
+  const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? (v === 0 ? 0 : Math.max(1, Math.floor(v))) : undefined);
   const explicit = num(cfg.maxScopes);
   if (explicitFirst && explicit !== undefined) return { mode: "custom", maxScopes: explicit };
   const mode = normalizeCoverageMode(cfg.scopeCoverageMode, explicit);
