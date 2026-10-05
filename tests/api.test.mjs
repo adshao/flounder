@@ -547,6 +547,35 @@ test("api: explicit standard coverage leaves map/dig turns unbounded while cappi
   });
 });
 
+test("api: bug bounty project Run continues from staged source through the full pipeline by default", async () => {
+  await withServer(async (base) => {
+    const json = (response) => response.json();
+    const post = (requestPath, body) => fetch(base + requestPath, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify(body),
+    });
+    const created = await json(await post("/api/projects", {
+      name: "autonomous-bounty-run",
+      sourcePaths: ["./src"],
+      config: {
+        scopeCoverageMode: "standard",
+        engagement: { kind: "bug-bounty" },
+      },
+    }));
+
+    const launched = await json(await post(`/api/projects/${created.uuid}/runs`, { verb: "run" }));
+    assert.equal(launched.queued, true);
+    const job = (await json(await fetch(base + "/api/jobs/" + launched.jobId))).job;
+    const spec = JSON.parse(job.spec_json);
+
+    assert.equal(spec.pipeline, true);
+    assert.equal(spec.coverageMode, "standard");
+    assert.equal(spec.maxScopes, 30);
+    assert.equal(spec.sandboxConfirmNetwork, "enabled");
+  });
+});
+
 test("api: standard coverage fills the project up to 30 audited scopes instead of adding 30 per run", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

@@ -82,6 +82,11 @@ can run short batches, skip real-target confirmation when the rules are
 source-only, settle reports before opening the next batch, and append novel
 scopes when the inventory is exhausted.
 
+For a tracked `bug-bounty` or `bug-bounty-contest` project, the primary
+Run/Continue action drives the complete project pipeline even when source paths
+are already staged. Direct `flounder run --source` remains the sealed
+map/dig/verify workflow for source-only use cases.
+
 These modes are workflow and evidence gates, not audit strategy. The model still
 chooses what to inspect and test; Flounder preserves coverage, duplicate state,
 resource blockers, and report readiness so the operator can move quickly without

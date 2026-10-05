@@ -534,6 +534,10 @@ work will be judged:
   when the venue rules do not require live-target reproduction, but suspected
   findings still must be verified/refuted before submission.
 
+The project-level Run/Continue action is end to end for both bounty modes,
+including when the project already has staged source and a build root. Direct
+`flounder run --source` remains sealed discovery for source-only use cases.
+
 A contest Continue run first settles missing verify/report work. After the
 current mapped inventory is exhausted, append-map expansion preserves audited
 scope status, submitted or duplicate finding state, and prior coverage while
