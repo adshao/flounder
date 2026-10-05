@@ -3074,6 +3074,8 @@ function ProjectDetailView(props: {
             const stat = phase === "prepare" ? prepareInfo.stat : phases[phase].stat;
             const detailText = phase === "prepare"
               ? prepareInfo.detail
+              : phase === "verify" && phases.verify.status === "error"
+                ? "Last Verify failed; unresolved candidates need another run"
               : phase === "confirm" && !requiresConfirmation
                 ? "Skipped for source-only local evidence"
                 : PHASE_DESC[phase];

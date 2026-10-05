@@ -621,3 +621,35 @@ test("ui: verify card treats external-evidence leads as reviewed, not waiting", 
   assert.equal(phases.verify.stat, "1 locally verified · 2 need evidence");
   assert.equal(phases.confirm.stat, "1 waiting for real-target confirmation");
 });
+
+test("ui: Verify card separates failed run progress from unresolved backlog", () => {
+  const detail = {
+    runs: [{
+      id: 10,
+      kind: "verify",
+      status: "error",
+      started_at: "2026-06-30T00:00:00.000Z",
+      ended_at: "2026-06-30T02:00:00.000Z",
+      run_scopes_done: 8,
+      run_scopes_target: 12,
+    }],
+    material: {},
+    scopes: [],
+    activeScopeCount: 0,
+    findingsTotal: 4,
+    statusCounts: { suspected: 4 },
+    allFindings: Array.from({ length: 4 }, (_, index) => ({ id: index + 1, status: "suspected" })),
+    confirmDecisions: [],
+  };
+  const coverage = { total: 0, audited: 0, deferred: 0, pending: 0 };
+  const failed = phaseState(detail, coverage).verify;
+  assert.equal(failed.status, "error");
+  assert.equal(failed.stat, "8/12 checked · 4 unresolved");
+  assert.equal(failed.dur, "Last run 2h 0m");
+  assert.match(appSource, /Last Verify failed; unresolved candidates need another run/);
+
+  detail.runs[0].status = "done";
+  assert.equal(phaseState(detail, coverage).verify.status, "partial");
+  detail.runs = [];
+  assert.equal(phaseState(detail, coverage).verify.stat, "4 candidates waiting");
+});
