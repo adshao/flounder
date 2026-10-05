@@ -2609,22 +2609,29 @@ async function runLaunch(c: Ctx): Promise<void> {
   if (currentMaterialFingerprint) spec.materialFingerprint = currentMaterialFingerprint;
   const preparedWorkspace = latestPreparedWorkspace(allRuns);
   if (spec.verb === "run") {
+    const pipelineDefault = projectRunDefaultsToPipeline({
+      requestedPipeline: spec.pipeline === true,
+      hasPreparedWorkspace: Boolean(preparedWorkspace && !runBodyHasMaterialOverride(body)),
+      hasSourcePaths: spec.sourcePaths.length > 0,
+      engagement: projectConfigRecord(project).engagement,
+    });
     if (preparedWorkspace && !runBodyHasMaterialOverride(body)) {
       applyProjectPrepareDefaults(spec, project, runs);
-      spec.pipeline = true;
+      spec.pipeline = pipelineDefault;
       applyPreparedWorkspaceToSpec(spec, preparedWorkspace);
     } else if (spec.sourcePaths.length > 0) {
       applyProjectSourceDefaults(spec, project);
-      if (!spec.pipeline) spec.pipeline = false;
+      spec.pipeline = pipelineDefault;
     } else {
       applyProjectPrepareDefaults(spec, project, runs);
-      spec.pipeline = true;
+      spec.pipeline = pipelineDefault;
       if (preparedWorkspace) {
         applyPreparedWorkspaceToSpec(spec, preparedWorkspace);
       } else if (spec.clue && spec.sourcePaths.length === 0) {
         resetPipelineCoverageForUnknownInventory(spec);
       }
     }
+    if (spec.pipeline && spec.sandboxConfirmNetwork === undefined) spec.sandboxConfirmNetwork = "enabled";
   } else if (spec.verb === "prepare") {
     applyProjectPrepareDefaults(spec, project, runs);
   }
@@ -3426,6 +3433,20 @@ function latestPrepareRequiresRealTargetConfirmation(runs: Array<Record<string, 
 function projectConfigRecord(project: Record<string, unknown>): Record<string, unknown> {
   const cfg = safeParse(project.config_json);
   return cfg && typeof cfg === "object" && !Array.isArray(cfg) ? cfg as Record<string, unknown> : {};
+}
+
+export function projectRunDefaultsToPipeline(input: {
+  requestedPipeline: boolean;
+  hasPreparedWorkspace: boolean;
+  hasSourcePaths: boolean;
+  engagement?: unknown;
+}): boolean {
+  if (input.requestedPipeline || input.hasPreparedWorkspace) return true;
+  const engagement = objectValue(input.engagement);
+  const kind = stringValue(engagement?.kind ?? engagement?.type).trim().toLowerCase().replaceAll("_", "-");
+  if (["bug-bounty", "bounty", BUG_BOUNTY_CONTEST_KIND, "contest"].includes(kind)) return true;
+  if (input.hasSourcePaths) return false;
+  return true;
 }
 
 function bugBountyContestEngagement(cfg: Record<string, unknown>): Record<string, unknown> | undefined {

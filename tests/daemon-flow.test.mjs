@@ -569,7 +569,8 @@ test("daemon: project run uses configured source before prepare clues", async ()
 
     assert.equal(sourceClaim.job.id, sourceLaunch.jobId);
     assert.equal(sourceClaim.job.spec.verb, "run");
-    assert.equal(sourceClaim.job.spec.pipeline, false);
+    assert.equal(sourceClaim.job.spec.pipeline, true);
+    assert.equal(sourceClaim.job.spec.sandboxConfirmNetwork, "enabled");
     assert.equal(sourceClaim.job.spec.clue, undefined);
     assert.deepEqual(sourceClaim.job.spec.sourcePaths, ["./src"]);
     assert.equal(sourceClaim.job.spec.scopeNote, "Audit the configured source");
