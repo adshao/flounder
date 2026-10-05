@@ -12,7 +12,7 @@ import { buildTools, newSession, type AgentSession, type ToolContext } from "./t
 import { RunRecorder, type RunTrackerFactory } from "../db/record.js";
 import type { RunStatus } from "../db/store.js";
 import { preparedWorkspaceMaterialFingerprint } from "../util/prepared-material-fingerprint.js";
-import { normalizePrepareMatchStatus } from "../prepare-match.js";
+import { isUnresolvedPrepareScopeDeclaration, normalizePrepareMatchStatus } from "../prepare-match.js";
 
 // `flounder prepare` — the open-world ACQUISITION phase that runs BEFORE map. Given a clue
 // (a tx, an address, a project, a package, a repo, a link), it resolves the complete dependency
@@ -42,6 +42,12 @@ export interface PrepareValidation {
   sourcePinned: number;
   /** tier-routing violations: a deployed component left un-classified, or a non-deployed one with no pinned origin */
   issues: string[];
+  /** true when the operator required exact deployed-source provenance for this Prepare */
+  deploymentMatchRequired: boolean;
+  /** deployed ground-truth records whose staged source is not proven to match */
+  unmatchedGroundTruth: number;
+  /** true when the manifest explicitly says the authoritative scope is still unresolved */
+  unresolvedScopeDeclaration: boolean;
 }
 
 export async function runPrepare(
@@ -174,6 +180,15 @@ export function prepareValidationBlockingIssues(validation: PrepareValidation): 
   if (validation.components > 0 && auditableComponents === 0) {
     issues.push("prepare manifest has no auditable component with pinned source or deployment evidence");
   }
+  if (validation.deploymentMatchRequired) {
+    const unmatchedRecords = validation.unverified + validation.unmatchedGroundTruth;
+    if (unmatchedRecords > 0) {
+      issues.push(`prepare requires deployed-source matching but ${unmatchedRecords} deployed target record${unmatchedRecords === 1 ? "" : "s"} remain${unmatchedRecords === 1 ? "s" : ""} unverified`);
+    }
+    if (validation.unresolvedScopeDeclaration) {
+      issues.push("prepare requires an authoritative scope declaration but the scope remains unresolved");
+    }
+  }
   return uniqueStrings(issues);
 }
 
@@ -244,9 +259,18 @@ export function readPrepareManifest(session: Pick<AgentSession, "scratchFiles">,
 // This validates the model's manifest against those two tiers — it does not re-run the match
 // (the model cites its own evidence, like confirm); it checks every component is correctly
 // classified + pinned and surfaces any tier-routing violation.
-function validatePrepareManifest(manifest: unknown, matchDeployed: boolean): PrepareValidation {
+export function validatePrepareManifest(manifest: unknown, matchDeployed: boolean): PrepareValidation {
   const issues: string[] = [];
-  const out: PrepareValidation = { components: 0, matched: 0, unverified: 0, sourcePinned: 0, issues };
+  const out: PrepareValidation = {
+    components: 0,
+    matched: 0,
+    unverified: 0,
+    sourcePinned: 0,
+    issues,
+    deploymentMatchRequired: matchDeployed,
+    unmatchedGroundTruth: 0,
+    unresolvedScopeDeclaration: false,
+  };
   if (!manifest || typeof manifest !== "object") {
     issues.push("no prepare_manifest.json (or not a JSON object) was produced");
     return out;
@@ -298,7 +322,9 @@ function validatePrepareManifest(manifest: unknown, matchDeployed: boolean): Pre
   if (matchDeployed && out.unverified > 0) {
     issues.push(`${out.unverified} deployed component(s) UNVERIFIED — staged source not proven to match the live code; the audit should treat each as a trust boundary`);
   }
-  validateRealTargetPlan(manifestRow, { issues, deployedComponents });
+  out.unresolvedScopeDeclaration = matchDeployed && isUnresolvedPrepareScopeDeclaration(manifestRow.scope_declaration ?? manifestRow.scopeDeclaration);
+  if (out.unresolvedScopeDeclaration) issues.push("scope declaration remains partially resolved");
+  out.unmatchedGroundTruth = validateRealTargetPlan(manifestRow, { issues, deployedComponents, matchDeployed });
   return out;
 }
 
@@ -322,17 +348,20 @@ function isDeploymentPlatform(platform: string): boolean {
   ].some((needle) => platform.includes(needle));
 }
 
-function validateRealTargetPlan(manifest: Record<string, unknown>, ctx: { issues: string[]; deployedComponents: number }): void {
+function validateRealTargetPlan(
+  manifest: Record<string, unknown>,
+  ctx: { issues: string[]; deployedComponents: number; matchDeployed: boolean },
+): number {
   const realTarget = objectRecord(manifest.real_target) ?? objectRecord(manifest.realTarget);
   if (!realTarget) {
     ctx.issues.push("prepare manifest missing real_target verification plan");
-    return;
+    return 0;
   }
 
   const requiredRaw = realTarget.requires_confirmation ?? realTarget.requiresConfirmation ?? realTarget.requires_real_target_confirmation;
   if (typeof requiredRaw !== "boolean") {
     ctx.issues.push("real_target.requires_confirmation must be true or false");
-    return;
+    return 0;
   }
 
   const explicitMode = str(realTarget.mode).toLowerCase();
@@ -354,6 +383,7 @@ function validateRealTargetPlan(manifest: Record<string, unknown>, ctx: { issues
   }
 
   if (requiredRaw) {
+    let unmatchedGroundTruth = 0;
     if (groundTruth.length === 0) ctx.issues.push("real_target requires confirmation but has no ground_truth entries");
     groundTruth.forEach((entry, index) => {
       const row = objectRecord(entry);
@@ -374,9 +404,15 @@ function validateRealTargetPlan(manifest: Record<string, unknown>, ctx: { issues
         if (row.chain_id === undefined && row.chainId === undefined) ctx.issues.push(`real_target.ground_truth[${index}] chain entry missing chain_id`);
         if (!address) ctx.issues.push(`real_target.ground_truth[${index}] chain entry missing address`);
       }
+      const deployedTarget = Boolean(address && network) || kind === "chain" || kind.includes("contract") || kind.includes("deployment");
+      if (ctx.matchDeployed && deployedTarget && normalizePrepareMatchStatus(sourceMatch) !== "matched") {
+        unmatchedGroundTruth += 1;
+        ctx.issues.push(`real_target.ground_truth[${index}] deployment matching is required but source_match is ${sourceMatch || "missing"}`);
+      }
     });
     const method = str(guidance?.recommended_method ?? guidance?.recommendedMethod ?? methodFallback);
     if (!method) ctx.issues.push("real_target.confirm_guidance.recommended_method is missing");
+    return unmatchedGroundTruth;
   } else {
     const reason = str(realTarget.not_required_reason ?? realTarget.reason ?? guidance?.not_required_reason ?? guidance?.notRequiredReason);
     if (!reason) ctx.issues.push("real_target says confirmation is not required but gives no reason");
@@ -384,6 +420,7 @@ function validateRealTargetPlan(manifest: Record<string, unknown>, ctx: { issues
       ctx.issues.push("real_target says confirmation is not required even though deployed components were staged");
     }
   }
+  return 0;
 }
 
 function objectRecord(value: unknown): Record<string, unknown> | undefined {

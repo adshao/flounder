@@ -14,3 +14,16 @@ export function normalizePrepareMatchStatus(value: string): string {
     || /\bfull sourcify\b/.test(words)) return "matched";
   return raw;
 }
+
+export function isPrepareDeploymentMatchRequired(value: unknown): boolean {
+  if (value === true) return true;
+  if (typeof value !== "string") return false;
+  return ["required", "true", "yes", "on"].includes(value.trim().toLowerCase());
+}
+
+export function isUnresolvedPrepareScopeDeclaration(value: unknown): boolean {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+  const row = value as Record<string, unknown>;
+  const status = typeof row.status === "string" ? row.status.trim().toLowerCase().replace(/[\s-]+/g, "_") : "";
+  return ["partial", "partially_resolved", "pending", "unresolved", "in_progress", "unknown"].includes(status);
+}
