@@ -18,7 +18,7 @@ import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { DEFAULT_AUDIT_MODEL, defaultOutputDir, defaultWorkspaceDir, normalizeCustomModels, type CustomModelDefinition } from "../config.js";
-import { normalizePrepareMatchStatus } from "../prepare-match.js";
+import { isPrepareDeploymentMatchRequired, isUnresolvedPrepareScopeDeclaration, normalizePrepareMatchStatus } from "../prepare-match.js";
 import { MetadataStore, type RunKind, type Coverage, type DiscoveryBacklogFilter, type DiscoveryBacklogKind, type DiscoveryBacklogStatus, type ProviderInput, type ProviderProfile, type ProjectInput, type ProjectListOptions, type ProviderRoles, type RoleOverride } from "../db/store.js";
 import { getSupportedThinkingLevels, type ModelThinkingLevel } from "@earendil-works/pi-ai";
 import { getProviders, getModels } from "@earendil-works/pi-ai/compat";
@@ -1952,6 +1952,26 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
     for (const issue of realTarget.issues) issues.push(issue);
   }
 
+  const deploymentMatchRequired = isPrepareDeploymentMatchRequired(manifest?.match_deployed ?? manifest?.matchDeployed);
+  const unmatchedGroundTruth = realTarget.groundTruth.filter((entry) => {
+    const deployedTarget = Boolean(entry.address && entry.network)
+      || entry.kind.toLowerCase() === "chain"
+      || entry.kind.toLowerCase().includes("contract")
+      || entry.kind.toLowerCase().includes("deployment");
+    return deployedTarget && normalizePrepareMatchStatus(entry.sourceMatch) !== "matched";
+  }).length;
+  const unresolvedScopeDeclaration = isUnresolvedPrepareScopeDeclaration(manifest?.scope_declaration ?? manifest?.scopeDeclaration);
+  const semanticBlockingIssues: string[] = [];
+  if (deploymentMatchRequired) {
+    const unmatchedRecords = unverified + unmatchedGroundTruth;
+    if (unmatchedRecords > 0) {
+      semanticBlockingIssues.push(`prepare requires deployed-source matching but ${unmatchedRecords} deployed target record${unmatchedRecords === 1 ? "" : "s"} remain${unmatchedRecords === 1 ? "s" : ""} unverified`);
+    }
+    if (unresolvedScopeDeclaration) {
+      semanticBlockingIssues.push("prepare requires an authoritative scope declaration but the scope remains unresolved");
+    }
+  }
+
   const terminalPrepareRun = runStatus !== "running";
   const rawManifestStateLower = rawManifestState.toLowerCase();
   let manifestState = rawManifestState;
@@ -1970,16 +1990,25 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
 
   const summaryIssues = uniqueStrings(issues).slice(0, 12);
   const summaryGaps = summarizePrepareGaps(manifest?.gaps);
+  const blockingGaps = summaryGaps.filter(isBlockingPrepareGap);
+  const blockingIssues = uniqueStrings([
+    ...semanticBlockingIssues,
+    ...summaryIssues.filter(isBlockingPrepareIssue),
+    ...blockingGaps,
+  ]);
   const quality = prepareSummaryQuality({
     runStatus,
     manifestStatus,
     manifestState,
     issues: summaryIssues,
     gaps: summaryGaps,
+    blockingIssues,
   });
-  const blockingIssues = summaryIssues.filter(isBlockingPrepareIssue);
   const softIssues = summaryIssues.filter((issue) => !isBlockingPrepareIssue(issue));
-  const caveats = uniqueStrings([...softIssues, ...summaryGaps]).slice(0, 16);
+  const caveats = uniqueStrings([
+    ...softIssues,
+    ...summaryGaps.filter((gap) => !isBlockingPrepareGap(gap)),
+  ]).slice(0, 16);
   const auditReady = quality === "ready" || quality === "limited";
 
   return {
@@ -1996,6 +2025,9 @@ function readPrepareSummary(run: Record<string, unknown>): Record<string, unknow
     clue: stringValue(manifest?.clue),
     posture,
     scopeDeclaration: stringValue(manifest?.scope_declaration),
+    deploymentMatchRequired,
+    unmatchedGroundTruth,
+    unresolvedScopeDeclaration,
     answerFirewall,
     componentsTotal: components.length,
     components: componentRows,
@@ -2017,12 +2049,13 @@ function prepareSummaryQuality(input: {
   manifestState: string;
   issues: string[];
   gaps: string[];
+  blockingIssues: string[];
 }): "ready" | "limited" | "preparing" | "needs-review" | "missing" | "invalid" {
   if (input.manifestStatus === "invalid") return "invalid";
   if (input.manifestStatus === "missing") return input.runStatus === "running" ? "preparing" : "missing";
   if (input.runStatus === "running") return "preparing";
   const state = input.manifestState.trim().toLowerCase();
-  if (input.issues.some(isBlockingPrepareIssue)) return "needs-review";
+  if (input.blockingIssues.length > 0) return "needs-review";
   if (state === "partial" || input.issues.length > 0 || input.gaps.length > 0) return "limited";
   return "ready";
 }
@@ -2040,6 +2073,15 @@ function isBlockingPrepareIssue(issue: string): boolean {
     || raw.includes("prepared workspace is empty")
     || raw.includes("no auditable in-scope component with pinned source or deployment evidence")
     || raw.includes("prepare run ended with status");
+}
+
+function isBlockingPrepareGap(gap: string): boolean {
+  const id = gap.split(":", 1)[0]?.trim().toLowerCase() ?? "";
+  return id.startsWith("hard-gate-")
+    || id.startsWith("hard_gate_")
+    || id === "hard gate"
+    || id === "blocker"
+    || id === "blocking";
 }
 
 function summarizePrepareComponent(component: Record<string, unknown>): Record<string, unknown> {

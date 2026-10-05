@@ -4367,6 +4367,148 @@ test("api: terminal prepare with no components is not audit ready", async () => 
   });
 });
 
+test("api: explicit prepare hard-gate gaps block audit readiness", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "hard-gated-prepared-target" }));
+    const runDir = path.join(out, "hard-gated-prepared-target-prepare-test");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(path.join(workspace, "source", "target"), { recursive: true });
+    await writeFile(path.join(workspace, "source", "target", "Target.sol"), "contract Target {}\n");
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "partial",
+        clue: "official source around a date",
+        posture: "blind",
+        answer_firewall: "clean",
+        real_target: {
+          requires_confirmation: false,
+          mode: "source-only",
+          reason: "No live deployment is in scope.",
+          ground_truth: [],
+          confirm_guidance: {
+            required: false,
+            allowed_network_actions: "none",
+            recommended_method: "Run local source-level checks only.",
+            not_required_reason: "No live deployment is in scope.",
+          },
+        },
+        components: [
+          {
+            identity: "official source",
+            platform: "GitHub",
+            revision: "abc123",
+            staged_path: "source/target",
+            in_scope: true,
+            match: "n/a",
+          },
+        ],
+        gaps: [
+          { id: "hard-gate-authorized-scope-unresolved", description: "The authoritative scope could not be established." },
+          { id: "optional-design-docs-unavailable", description: "Additional design notes were not published." },
+        ],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + "/api/projects/" + created.uuid));
+    assert.equal(detail.prepareSummary.quality, "needs-review");
+    assert.equal(detail.prepareSummary.auditReady, false);
+    assert.equal(detail.prepareSummary.blocked, true);
+    assert.deepEqual(detail.prepareSummary.blockingIssues, [
+      "hard-gate-authorized-scope-unresolved: The authoritative scope could not be established.",
+    ]);
+    assert.match(detail.prepareSummary.caveats.join("\n"), /optional-design-docs-unavailable/);
+  });
+});
+
+test("api: required deployed-source matching blocks persisted unverified prepares", async () => {
+  await withServer(async (base, out) => {
+    const json = (r) => r.json();
+    const post = (p, body) => fetch(base + p, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+
+    const created = await json(await post("/api/projects", { name: "unverified-deployment-prepare" }));
+    const runDir = path.join(out, "unverified-deployment-prepare-test");
+    const workspace = path.join(runDir, "prepare", "workspace");
+    await mkdir(path.join(workspace, "source", "target"), { recursive: true });
+    await writeFile(path.join(workspace, "source", "target", "Target.sol"), "contract Target {}\n");
+    await writeFile(
+      path.join(workspace, "prepare_manifest.json"),
+      JSON.stringify({
+        status: "complete",
+        clue: "Resolve the exact deployed target and stage matching source.",
+        posture: "blind",
+        match_deployed: "required",
+        scope_declaration: {
+          status: "partially_resolved",
+          notes: "The exact in-scope deployment set is still being resolved.",
+        },
+        answer_firewall: "clean",
+        real_target: {
+          requires_confirmation: true,
+          mode: "deployed-contract",
+          reason: "A live deployed contract is in scope.",
+          ground_truth: [
+            {
+              kind: "contract",
+              network: "ethereum-mainnet",
+              chain_id: 1,
+              address: "0xabc",
+              role: "target",
+              block: "latest_pending",
+              source_match: "unverified",
+              staged_component: "target-source",
+            },
+          ],
+          confirm_guidance: {
+            required: true,
+            allowed_network_actions: "read-and-local-fork",
+            recommended_method: "Use read-only RPC calls and a pinned local fork.",
+          },
+        },
+        components: [
+          {
+            identity: "target-source",
+            platform: "GitHub",
+            revision: "abc123",
+            staged_path: "source/target",
+            in_scope: true,
+            match: "unverified",
+          },
+        ],
+        gaps: ["Exact deployed source matching is pending."],
+      }),
+    );
+
+    const store = MetadataStore.openForOutput(out);
+    try {
+      const runId = store.startRun({ projectId: created.id, kind: "prepare", runDir, provider: "openai-codex", model: "gpt-5.5" });
+      store.finishRun(runId, "done");
+    } finally {
+      store.close();
+    }
+
+    const detail = await json(await fetch(base + "/api/projects/" + created.uuid));
+    assert.equal(detail.prepareSummary.quality, "needs-review");
+    assert.equal(detail.prepareSummary.auditReady, false);
+    assert.equal(detail.prepareSummary.blocked, true);
+    assert.equal(detail.prepareSummary.deploymentMatchRequired, true);
+    assert.equal(detail.prepareSummary.unmatchedGroundTruth, 1);
+    assert.match(detail.prepareSummary.blockingIssues.join("\n"), /deployed-source matching.*unverified/i);
+    assert.match(detail.prepareSummary.blockingIssues.join("\n"), /scope remains unresolved/i);
+  });
+});
+
 test("api: terminal prepare manifests with no auditable source are not audit ready", async () => {
   await withServer(async (base, out) => {
     const json = (r) => r.json();

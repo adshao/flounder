@@ -12,7 +12,7 @@ import { buildTools, describeAction, ingestFindingsFromScratch, newSession, dedu
 import { buildRunHealth, mergeFollowupScopes, readScratchCoverageGaps, readScratchFollowupScopes, readScratchResourceRequests } from "../dist/agent/discovery-artifacts.js";
 import { mergeScopeInventory } from "../dist/agent/scope-store.js";
 import { dedupeVerifyInputs, digBatchStoppedReason, dischargeChallengeFindingTitle, dischargeChallengeScopeOutcomes, normalizeVerifyVerdicts, resolveSatisfiedVerifyResourceRequests, runAudit, verifyBatchStoppedReason } from "../dist/agent/audit.js";
-import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest } from "../dist/agent/acquire.js";
+import { normalizePrepareManifest, prepareValidationBlockingIssues, readPrepareManifest, validatePrepareManifest } from "../dist/agent/acquire.js";
 import { runAuditLoop, isTransientError } from "../dist/agent/loop.js";
 import { MetadataStore } from "../dist/db/store.js";
 import { buildConfirmKickoff, buildDeepKickoff, buildMapKickoff, buildVerifyKickoff, AUDIT_CONFIRM_SYSTEM, AUDIT_DEEP_SYSTEM, AUDIT_SYSTEM, AUDIT_VERIFY_SYSTEM, DISCOVERY_BACKLOG_RULES, MAP_GRANULARITY_RULES, MAP_SYSTEM, POC_TRUST_RULE } from "../dist/agent/prompts.js";
@@ -1113,6 +1113,68 @@ test("prepare validation treats missing source components as a hard blocker", ()
     issues: ["official docs unavailable"],
   });
   assert.deepEqual(sourceReadyWithCaveat, []);
+
+  const requiredDeploymentMatchMissing = prepareValidationBlockingIssues({
+    components: 1,
+    matched: 0,
+    unverified: 0,
+    sourcePinned: 1,
+    deploymentMatchRequired: true,
+    unmatchedGroundTruth: 1,
+    unresolvedScopeDeclaration: false,
+    issues: ["ground-truth target source_match is unverified"],
+  });
+  assert.deepEqual(requiredDeploymentMatchMissing, [
+    "prepare requires deployed-source matching but 1 deployed target record remains unverified",
+  ]);
+
+  const requiredScopeMissing = prepareValidationBlockingIssues({
+    components: 1,
+    matched: 1,
+    unverified: 0,
+    sourcePinned: 0,
+    deploymentMatchRequired: true,
+    unmatchedGroundTruth: 0,
+    unresolvedScopeDeclaration: true,
+    issues: ["scope declaration remains partially resolved"],
+  });
+  assert.deepEqual(requiredScopeMissing, [
+    "prepare requires an authoritative scope declaration but the scope remains unresolved",
+  ]);
+
+  const manifestValidation = validatePrepareManifest({
+    match_deployed: "required",
+    scope_declaration: { status: "partially_resolved" },
+    components: [
+      {
+        identity: "official source",
+        platform: "GitHub",
+        revision: "abc123",
+        match: "unverified",
+      },
+    ],
+    real_target: {
+      requires_confirmation: true,
+      mode: "deployed-contract",
+      ground_truth: [
+        {
+          kind: "contract",
+          network: "ethereum-mainnet",
+          chain_id: 1,
+          address: "0xabc",
+          role: "target",
+          source_match: "unverified",
+        },
+      ],
+      confirm_guidance: { required: true, recommended_method: "Use a pinned local fork." },
+    },
+  }, true);
+  assert.equal(manifestValidation.unmatchedGroundTruth, 1);
+  assert.equal(manifestValidation.unresolvedScopeDeclaration, true);
+  assert.deepEqual(prepareValidationBlockingIssues(manifestValidation), [
+    "prepare requires deployed-source matching but 1 deployed target record remains unverified",
+    "prepare requires an authoritative scope declaration but the scope remains unresolved",
+  ]);
 });
 
 test("prepare manifest reader prefers the workspace file over stale scratch content", async () => {
