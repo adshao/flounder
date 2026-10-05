@@ -21,7 +21,7 @@ import { runAuditLoop } from "./loop.js";
 import { ProjectMemory } from "./memory.js";
 import { loadScopeInventory, mergeScopeInventory, saveScopeInventory, scopeProgress } from "./scope-store.js";
 import { RunRecorder, toDiscoveryBacklogRows, toFindingStatus, type RunTrackerFactory } from "../db/record.js";
-import type { RunKind } from "../db/store.js";
+import type { RunKind, RunStatus } from "../db/store.js";
 import { isPiSessionProvider, runAuditSession, SessionLlmClient } from "./pi-session.js";
 import type { TranscriptStep } from "./prompts.js";
 import { buildTools, clearScratchFindings, dedupeFindings, ingestFindingsFromScratch, isRefutedFindingTitle, newSession, readScratchScopes, type AgentFinding, type AgentSession, type AuditScope, type ToolContext } from "./tools.js";
@@ -66,6 +66,8 @@ const SYNTHESIS_SCOPE_OUTCOMES_PATH = "synthesis_scope_outcomes.json";
 export interface AuditRunResult {
   runDir: string;
   summary: AuditSummary;
+  /** Persisted terminal state; pipeline callers must not advance past a failed phase. */
+  status: RunStatus;
   /** Scope-inventory coverage for the resumable map → dig flow (omitted otherwise). */
   scopeCoverage?: { total: number; audited: number; pending: number };
 }
@@ -1251,6 +1253,7 @@ export async function runAudit(
   return {
     runDir: logger.runDir,
     summary,
+    status: finalStatus,
     ...(finalCoverage ? { scopeCoverage: finalCoverage } : {}),
   };
 }
