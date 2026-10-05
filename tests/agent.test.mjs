@@ -1225,6 +1225,61 @@ test("report stages bounded Confirm artifacts and PoC source under relative evid
   }
 });
 
+test("report inspection exposes only explicitly staged Confirm evidence across a narrow source boundary", async () => {
+  const dir = await tempDir();
+  try {
+    const workspace = path.join(dir, "project");
+    const evidence = "report-evidence/decision-9/confirm_decision.json";
+    await mkdir(path.join(workspace, "src"), { recursive: true });
+    await mkdir(path.join(workspace, "private"), { recursive: true });
+    await mkdir(path.dirname(path.join(workspace, evidence)), { recursive: true });
+    await writeFile(path.join(workspace, "src", "core.ts"), "export const safe = true;\n");
+    await writeFile(path.join(workspace, "private", "answer.txt"), "HIDDEN ANSWER\n");
+    await writeFile(path.join(workspace, evidence), '{"result":"reproduced"}\n');
+    await writeFile(path.join(workspace, "report-evidence", "decision-9", "unlisted.txt"), "UNLISTED EVIDENCE\n");
+
+    const cfg = defaultConfig();
+    cfg.sourcePaths = [path.join(workspace, "src")];
+    cfg.buildRoot = workspace;
+    cfg.outputDir = path.join(dir, "runs");
+    const logger = await tempLogger(cfg.outputDir);
+    const session = newSession();
+    session.workspace = { absolute: workspace, relative: "report/workspace" };
+    session.baselineFiles = new Set(["src/core.ts", "private/answer.txt", evidence, "report-evidence/decision-9/unlisted.txt"]);
+    const ctx = {
+      cfg,
+      source: [{ path: "src/core.ts", kind: "source", content: "export const safe = true;\n" }],
+      corpus: [],
+      memory: new ProjectMemory(path.join(dir, "memory.jsonl")),
+      logger,
+      session,
+      reportEvidenceFiles: new Set([evidence]),
+    };
+
+    const read = await tool("read").run({ path: evidence }, ctx);
+    assert.match(read.observation, /reproduced/);
+    const inspected = await tool("bash").run({ cmd: `cat ${evidence}`, purpose: "inspect" }, ctx);
+    assert.match(inspected.observation, /reproduced/);
+    assert.doesNotMatch(inspected.observation, /HIDDEN ANSWER|UNLISTED EVIDENCE/);
+    const listing = await tool("bash").run({ cmd: "find report-evidence -type f", purpose: "inspect" }, ctx);
+    assert.match(listing.observation, /confirm_decision\.json/);
+    assert.doesNotMatch(listing.observation, /unlisted\.txt/);
+    const hidden = await tool("read").run({ path: "private/answer.txt" }, ctx);
+    const unlisted = await tool("read").run({ path: "report-evidence/decision-9/unlisted.txt" }, ctx);
+    assert.match(hidden.observation, /no authorized source/i);
+    assert.match(unlisted.observation, /no authorized source/i);
+    const misconfigured = await tool("read").run(
+      { path: "private/answer.txt" },
+      { ...ctx, reportEvidenceFiles: new Set(["private/answer.txt"]) },
+    );
+    assert.match(misconfigured.observation, /no authorized source/i);
+    const inspectionView = path.join(logger.runDir, "report", "workspace-source-view-cmd1");
+    await assert.rejects(stat(inspectionView), /ENOENT/, "inspection copies must be removed after each command");
+  } finally {
+    await rm(dir, { recursive: true, force: true });
+  }
+});
+
 test("project memory persists notes and recalls by keyword overlap", async () => {
   const dir = await tempDir();
   try {

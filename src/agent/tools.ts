@@ -144,6 +144,8 @@ export interface ToolContext {
   memory: ProjectMemory;
   logger: RunLogger;
   session: AgentSession;
+  /** Workspace-relative Confirm artifacts explicitly staged for a Report run. */
+  reportEvidenceFiles?: ReadonlySet<string>;
   onCommandRun?: (record: CommandRunRecord) => void;
   /** Cooperative run cancellation. Active sandbox commands stop with the agent session. */
   signal?: AbortSignal;
@@ -280,7 +282,7 @@ const MAX_READ_OBSERVATION_CHARS = 256 * 1024;
 const readTool: AgentTool = {
   name: "read",
   description:
-    'Read loaded source/corpus or a file written in the sandbox. args: {"path": string, "start"?: int (1-based), "end"?: int}. Without a range it returns up to 400 lines.',
+    'Read loaded source/corpus, an explicitly staged Report evidence file, or a file written in the sandbox. args: {"path": string, "start"?: int (1-based), "end"?: int}. Without a range it returns up to 400 lines.',
   async run(args, ctx) {
     const target = asString(args.path);
     if (!target) return { observation: 'error: "path" is required' };
@@ -972,7 +974,7 @@ async function findReadable(ctx: ToolContext, target: string): Promise<{ path: s
   }
   const doc = findDoc(ctx, normalized);
   if (doc) return { path: doc.path, content: doc.content, kind: doc.kind };
-  if (!sourceReadBoundaryActive(ctx) || isBuildMetadataPath(normalized)) {
+  if (!sourceReadBoundaryActive(ctx) || isBuildMetadataPath(normalized) || isStagedReportEvidencePath(ctx, normalized)) {
     const workspaceContent = await readWorkspaceCandidate(ctx, normalized);
     if (workspaceContent) return { ...workspaceContent, kind: "sandbox" };
   }
@@ -983,6 +985,10 @@ function sourceReadBoundaryActive(ctx: ToolContext): boolean {
   const buildRoot = ctx.cfg.buildRoot ? path.resolve(ctx.cfg.buildRoot) : undefined;
   if (!buildRoot || ctx.cfg.prepareMode) return false;
   return ctx.cfg.sourcePaths.length !== 1 || path.resolve(ctx.cfg.sourcePaths[0] ?? "") !== buildRoot;
+}
+
+function isStagedReportEvidencePath(ctx: ToolContext, filePath: string): boolean {
+  return filePath.startsWith("report-evidence/") && Boolean(ctx.reportEvidenceFiles?.has(filePath));
 }
 
 async function prepareInspectionWorkspace(ctx: ToolContext, workspace: SandboxWorkspace, runId: string): Promise<SandboxWorkspace> {
@@ -1010,6 +1016,15 @@ async function prepareInspectionWorkspace(ctx: ToolContext, workspace: SandboxWo
       if (result.content !== undefined) visible.set(filePath, result.content);
     } catch {
       // Binary or unreadable metadata is not needed for source inspection.
+    }
+  }
+  for (const filePath of ctx.reportEvidenceFiles ?? []) {
+    if (!isStagedReportEvidencePath(ctx, filePath) || normalizeToolPath(filePath) !== filePath) continue;
+    try {
+      const result = await readBoundedWorkspaceText(await resolveWorkspacePathForRead(workspace.absolute, filePath));
+      if (result.content !== undefined) visible.set(filePath, result.content);
+    } catch {
+      // Only the explicitly staged, readable evidence belongs in this view.
     }
   }
   await writeSandboxFiles(absolute, [...visible].map(([filePath, content]) => ({ path: filePath, content })));
