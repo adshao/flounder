@@ -94,7 +94,7 @@ export async function runReport(
     session.buildCacheDir = path.join(projectHistoryDir(historyLocation(reportCfg)), "build-cache");
 
     const memory = new ProjectMemory(path.join(projectHistoryDir(historyLocation(reportCfg)), "memory.jsonl"));
-    const ctx: ToolContext = { cfg: reportCfg, source, corpus, memory, logger, session };
+    const ctx: ToolContext = { cfg: reportCfg, source, corpus, memory, logger, session, reportEvidenceFiles: new Set(stagedEvidence) };
     const seed = renderReportSeed(options.findings);
 
     await logger.event("audit_report_start", {
