@@ -870,6 +870,8 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
   const mapRunning = Boolean(audit && !isVerify && audit.kind !== "audit" && !digStarted);
   const batchDone = runScopeBatchComplete(audit);
   const verifyProgress = verifyRunProgress(audit);
+  const latestVerifyProgress = verifyRunProgress(verifyLatest);
+  const latestVerifyDuration = runDur(verifyLatest, verifyLatest?.status === "running");
   const verifyRechecksConfirmed = verifyRunRechecksConfirmed(audit, pendingVerify, findings.length);
   const pendingConfirm = verifyRechecksConfirmed ? 0 : pendingConfirmRaw;
   const finalizingAudit = Boolean(batchDone && audit && !isVerify && !activeScope);
@@ -934,18 +936,20 @@ export function phaseState(detail: ProjectDetail, progress: Coverage): PhaseStat
       status: isVerify
         ? "running"
         : pendingVerify > 0
-          ? "pending"
+          ? verifyLatest?.status === "error" ? "error" : verifyLatest ? "partial" : "pending"
           : locallyVerified > 0 || needsEvidence > 0
             ? "done"
             : "none",
       stat: isVerify
         ? verifyStat
         : pendingVerify > 0
-          ? `${pendingVerify} ${pendingVerify === 1 ? "candidate" : "candidates"} waiting`
+          ? latestVerifyProgress
+            ? `${latestVerifyProgress.done}/${latestVerifyProgress.target} checked · ${pendingVerify} unresolved`
+            : `${pendingVerify} ${pendingVerify === 1 ? "candidate" : "candidates"} waiting`
           : locallyVerified > 0 || needsEvidence > 0
             ? `${locallyVerified} locally verified${needsEvidence ? ` · ${needsEvidence} need evidence` : ""}`
             : "Not started",
-      dur: runDur(verifyLatest, verifyLatest?.status === "running"),
+      dur: latestVerifyDuration && verifyLatest?.status !== "running" ? `Last run ${latestVerifyDuration}` : latestVerifyDuration,
     },
     confirm: {
       status: conf?.status === "error"
