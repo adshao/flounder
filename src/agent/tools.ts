@@ -1,7 +1,7 @@
 import { mkdir, open, rm } from "node:fs/promises";
 import path from "node:path";
 import { sandboxExecutionOptions, sandboxNetworkForPurpose, type AuditorConfig } from "../config.js";
-import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, isAgentWorkspaceSetupCommand, openWorldCommandNeedsNetwork } from "../security/policy.js";
+import { analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, isAgentWorkspaceSetupCommand, openWorldCommandNeedsNetwork, sealedBuildCommandNeedsNetwork, withoutInstallScripts } from "../security/policy.js";
 import { prepareResourceRequests, prepareToolVersionBlockingIssue, prepareWorkspaceToolchain } from "./prepare.js";
 import {
   firstBlockedSandboxFile,
@@ -371,7 +371,7 @@ const editTool: AgentTool = {
 const bashTool: AgentTool = {
   name: "bash",
   description:
-    'Run one command in the copied sandbox workspace. args: {"cmd": string, "purpose"?: "inspect"|"build"|"confirm" (default inspect), "cwd"?: relative, "expected_exit_code"?: int, "success_patterns"?: [string], "timeout_ms"?: int}. Shell control operators, destructive commands, and paths outside the workspace are blocked. Sealed audit phases block remote networks; Prepare and Confirm grant egress only to explicit read/fork/fetch commands, while arbitrary model-selected code stays network-sealed. purpose=inspect is for exploration (ls/find/rg/cat/sed/jq), tool availability checks (which nargo/scarb/blueprint/tact), and local JSON reads (jq . file or jq length file); it never confirms anything. purpose=build is for dependency resolution and compilation (cargo build/fetch, cmake -S/-B/--build, ninja, make, npm install, go mod download, forge build, scarb fetch/build/check/metadata, blueprint build --all, func-js/tolk-js/tact, pip install, …) to make the workspace buildable; it has side effects but is NOT confirmation-eligible. For CMake, prefer generator-neutral `cmake -S <src> -B <build>` then `cmake --build <build> --parallel 2` on large targets; pass `-G Ninja` only after `ninja --version` succeeds, and keep parallelism bounded. purpose=confirm must be a real local test runner (cargo test, ctest, forge test, scarb test, snforge test, blueprint test, go test, node --test, pytest, …) with success_patterns; only a confirm command that exits as expected, observes every success_pattern, and executes a test linked to pristine target source becomes confirmation-eligible and citable as command_id for confirmed-executable.',
+    'Run one command in the copied sandbox workspace. args: {"cmd": string, "purpose"?: "inspect"|"build"|"confirm" (default inspect), "cwd"?: relative, "expected_exit_code"?: int, "success_patterns"?: [string], "timeout_ms"?: int}. Shell control operators, destructive commands, and paths outside the workspace are blocked. Sealed audit phases block remote networks; Prepare and Confirm grant egress only to explicit read/fork/fetch commands, while arbitrary model-selected code stays network-sealed. In every phase a purpose=build command receives egress only when it is pure dependency resolution (a package manager fetch/install verb or a compiler-release download); a build that compiles or runs workspace code runs sealed, so resolve dependencies first and then build offline. Package-manager installs that hold egress run with lifecycle scripts disabled; run the package manager\'s rebuild verb afterwards (sealed) when a dependency needs its install script. purpose=inspect is for exploration (ls/find/rg/cat/sed/jq), tool availability checks (which nargo/scarb/blueprint/tact), and local JSON reads (jq . file or jq length file); it never confirms anything. purpose=build is for dependency resolution and compilation (cargo build/fetch, cmake -S/-B/--build, ninja, make, npm install, go mod download, forge build, scarb fetch/build/check/metadata, blueprint build --all, func-js/tolk-js/tact, pip install, …) to make the workspace buildable; it has side effects but is NOT confirmation-eligible. For CMake, prefer generator-neutral `cmake -S <src> -B <build>` then `cmake --build <build> --parallel 2` on large targets; pass `-G Ninja` only after `ninja --version` succeeds, and keep parallelism bounded. purpose=confirm must be a real local test runner (cargo test, ctest, forge test, scarb test, snforge test, blueprint test, go test, node --test, pytest, …) with success_patterns; only a confirm command that exits as expected, observes every success_pattern, and executes a test linked to pristine target source becomes confirmation-eligible and citable as command_id for confirmed-executable.',
   async run(args, ctx) {
     const normalized = normalizeBashCommand(args, ctx.cfg);
     if ("error" in normalized) return { observation: normalized.error };
@@ -405,16 +405,26 @@ const bashTool: AgentTool = {
       ...activityStreamMeta(ctx),
     });
     const phaseNetwork = sandboxNetworkForPurpose(ctx.cfg, normalized.purpose);
-    const commandNetwork = (ctx.cfg.confirmMode || ctx.cfg.prepareMode) && phaseNetwork === "enabled"
-      ? (openWorldCommandNeedsNetwork(normalized.command, normalized.purpose) ? "enabled" : "none")
-      : phaseNetwork;
+    // Egress is a per-command capability in every phase. Open-world phases grant
+    // it to read/fork/fetch commands; sealed phases grant it to dependency
+    // resolution only. Anything that can execute workspace-authored code runs
+    // sealed unless the operator explicitly widened build egress.
+    const openWorld = ctx.cfg.confirmMode === true || ctx.cfg.prepareMode === true;
+    const needsNetwork = openWorld
+      ? openWorldCommandNeedsNetwork(normalized.command, normalized.purpose)
+      : ctx.cfg.sandboxBuildEgress === "all" || sealedBuildCommandNeedsNetwork(normalized.command, normalized.purpose);
+    const commandNetwork = phaseNetwork === "enabled" && needsNetwork ? "enabled" : "none";
+    const widenedSealedBuild = !openWorld && ctx.cfg.sandboxBuildEgress === "all";
+    const executionCommand = commandNetwork === "enabled" && !widenedSealedBuild
+      ? { ...normalized.command, ...withoutInstallScripts(normalized.command) }
+      : normalized.command;
     const commandWorkspace = sourceReadBoundaryActive(ctx) && isAgentInspectionCommand(normalized.command)
       ? await prepareInspectionWorkspace(ctx, workspace, runId)
       : workspace;
     let result: ReproductionCommandResult;
     try {
       result = await runSandboxCommand(
-        normalized.command,
+        executionCommand,
         commandWorkspace.absolute,
         ctx.cfg.reproductionMaxLogBytes,
         ctx.cfg.sourcePaths,
@@ -491,8 +501,9 @@ const bashTool: AgentTool = {
       // live progress projection is best-effort
     }
 
+    const networkNote = normalized.purpose === "build" ? ` network=${commandNetwork === "enabled" ? "dependency-fetch" : "sealed"}.` : "";
     const verdict = !isConfirm
-      ? `command ${runId} (${normalized.purpose}): exit=${result.exitCode}${result.timedOut ? " timedOut" : ""}.`
+      ? `command ${runId} (${normalized.purpose}): exit=${result.exitCode}${result.timedOut ? " timedOut" : ""}.${networkNote}`
       : passed
         ? `command ${runId}: CONFIRMATION-ELIGIBLE PASS; cite command_id="${runId}" in findings.json for confirmed-executable.`
         : `command ${runId}: not confirmation-eligible (${confirmFailureReason(eligibleByType, targetLink, normalized, exitMatched, result, patternCheck)}).`;

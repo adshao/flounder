@@ -127,7 +127,7 @@ Start the local product surface from a source checkout:
 ```bash
 node dist/cli.js ui                 # dashboard + control plane at http://127.0.0.1:4500
 node dist/cli.js ui --no-daemon     # control plane only
-node dist/cli.js daemon start --server http://<server>:4500 --token <token>   # remote executor
+FLOUNDER_DAEMON_TOKEN=<token> node dist/cli.js daemon start --server http://<server>:4500   # remote executor
 ```
 
 After installing or linking the package, the same commands are:
@@ -135,7 +135,7 @@ After installing or linking the package, the same commands are:
 ```bash
 flounder ui                 # dashboard + control plane at http://127.0.0.1:4500
 flounder ui --no-daemon     # control plane only
-flounder daemon start --server http://<server>:4500 --token <token>   # remote executor
+FLOUNDER_DAEMON_TOKEN=<token> flounder daemon start --server http://<server>:4500   # remote executor
 ```
 
 ### Choosing a model and configuring access
@@ -248,7 +248,7 @@ flounder run --source ./src --build-root . --sandbox-backend host --allow-host-e
 
 Host execution keeps the copied workspace, isolated `HOME`, temp directories, and package-cache environment, but it cannot enforce command-level network sealing or provide kernel-level filesystem isolation, and it inherits the host process/toolchain boundary. Do not use it for untrusted targets, malicious dependencies, or real model-generated exploit code unless the operator deliberately accepts that risk. The same opt-in can be supplied by setting `FLOUNDER_ALLOW_HOST_EXECUTION=1`; the backend and image can be set with `FLOUNDER_SANDBOX_BACKEND` and `FLOUNDER_SANDBOX_IMAGE`.
 
-Network policy is phase- and command-specific. Sealed `run --source` / `map` / `audit` inspection and confirmation commands use Docker `--network none` in the Docker-backed OCI backend, and an internal host-only, no-DNS `flounder-sealed` network in the Apple container backend. Dependency warm-up and explicit `purpose=build` commands may use the configured package-registry window. In open-world `prepare` and `confirm`, the framework grants egress only to a narrow capability surface: read-only HTTP, explicit HTTPS Git fetch/clone, read-only GitHub/chain queries, and local-fork commands. Arbitrary model-selected programs still run with `network=none`, Foundry FFI is forced off, and broadcast, value-moving, destructive, credential, and persistence behavior remains forbidden.
+Network policy is phase- and command-specific. Sealed `run --source` / `map` / `audit` inspection and confirmation commands use Docker `--network none` in the Docker-backed OCI backend, and an internal host-only, no-DNS `flounder-sealed` network in the Apple container backend. The framework-owned dependency warm-up may use the configured package-registry window. A model-issued `purpose=build` command receives that window only when it is pure dependency resolution (for example `cargo fetch`, `go mod download`, `npm install`, a registry `pip install`, `forge build`); a build that compiles or runs workspace code (`make`, `cargo build`, `cmake --build`, a task runner) runs with `network=none`, so the model resolves dependencies first and builds offline. Package-manager installs that hold egress run with lifecycle scripts disabled; the sealed `rebuild` verb runs them afterwards. Setting `FLOUNDER_BUILD_EGRESS=all` on the executor restores egress for every allowlisted build command and gives up the sealed-discovery guarantee for that daemon. `FLOUNDER_PREPARE_NETWORK=none` removes the window entirely. In open-world `prepare` and `confirm`, the framework grants egress only to a narrow capability surface: read-only HTTP, explicit HTTPS Git fetch/clone, read-only GitHub/chain queries, and local-fork commands. Arbitrary model-selected programs still run with `network=none`, Foundry FFI is forced off, and broadcast, value-moving, destructive, credential, and persistence behavior remains forbidden.
 
 ## Materials
 
@@ -729,8 +729,26 @@ the control-plane host; otherwise run the storage command on that executor.
 ```bash
 flounder ui                 # dashboard at http://127.0.0.1:4500 + a co-located executor daemon
 flounder ui --no-daemon     # control plane only — connect your own daemon(s) elsewhere
-flounder daemon start --server http://<server>:4500 --token <token>   # run the executor on another machine
+FLOUNDER_DAEMON_TOKEN=<token> flounder daemon start --server http://<server>:4500   # run the executor on another machine
 ```
+
+The control plane holds undisclosed findings and can launch runs, so it is not
+left open to whatever else is running in the operator's browser:
+
+- It binds to `127.0.0.1` by default. On a loopback bind it answers only
+  requests whose `Host` header names a loopback address, which stops a
+  DNS-rebound hostname from reading the API. If you reach it through a local
+  reverse proxy under another name, list that name in
+  `FLOUNDER_UI_ALLOWED_HOSTS` (comma-separated, no port).
+- Requests that carry a browser `Origin` or `Sec-Fetch-Site` header must be
+  same-origin, and request bodies must be sent as `application/json`. The CLI,
+  `curl`, and daemons are unaffected as long as JSON bodies declare their
+  content type.
+- `flounder ui --host <non-loopback>` refuses to start without
+  `FLOUNDER_UI_TOKEN`; every control-plane request must then send
+  `Authorization: Bearer <token>`.
+- Daemon tokens are read from `FLOUNDER_DAEMON_TOKEN`. `--token` still works,
+  but command-line arguments are visible to other local users.
 
 A web dashboard to track and drive audits across projects, updating live via SSE. A project is pinned to an **execution daemon** and a **default provider profile**. A provider profile is the model strategy: provider, model, thinking level, an optional custom-model compatibility base, and optional role defaults. Settings can mark one profile as the local runtime default without changing the product fallback or existing projects. The project can also override the provider profile per phase (`prepare`, `map`, `dig`, `confirm`) when one phase needs a different model or reasoning level. The selected daemon must be authenticated for every provider profile the project can use. At launch the control plane includes the selected profiles' custom model definitions in the job claimed by that daemon; credentials remain daemon-local.
 
@@ -759,7 +777,9 @@ curl -X PATCH localhost:4500/api/settings/runtime \
 PROJECT_UUID=$(curl -s localhost:4500/api/projects \
   -H 'content-type: application/json' \
   -d '{"name":"p","daemonId":1,"dir":"p"}' | jq -r .uuid)       # inherits the local default
-curl -X POST localhost:4500/api/projects/$PROJECT_UUID/runs -d '{"verb":"run"}'   # enqueue a run for a daemon
+curl -X POST localhost:4500/api/projects/$PROJECT_UUID/runs \
+  -H 'content-type: application/json' \
+  -d '{"verb":"run"}'                                         # enqueue a run for a daemon
 flounder continue --project $PROJECT_UUID                                         # same project Continue action from the CLI
 curl localhost:4500/api/projects/$PROJECT_UUID                        # progress, counts, runs, confirm decisions
 curl "localhost:4500/api/projects/$PROJECT_UUID/backlog?status=open"  # next actions with actionability metadata
@@ -768,7 +788,8 @@ curl "localhost:4500/api/projects/$PROJECT_UUID/findings?status=confirmed-differ
 curl "localhost:4500/api/projects/$PROJECT_UUID/confirm-decisions?reproduced=yes"  # the confirmed bugs
 curl localhost:4500/api/storage/disk                                # cheap free-space pressure check
 curl localhost:4500/api/storage                                     # full local project attribution scan
-curl -X POST localhost:4500/api/storage/projects/$PROJECT_UUID/cleanup -d '{"apply":false}'
+curl -X POST localhost:4500/api/storage/projects/$PROJECT_UUID/cleanup \
+  -H 'content-type: application/json' -d '{"apply":false}'
 ```
 
 Resources: **runtime-settings** (`GET/PATCH /api/settings/runtime` reads or changes the local default provider profile), **project** (CRUD, including selected daemon, provider profile, task/clue, source/build/corpus paths, archive/pin/manual order; project URLs are UUID-only), **provider** (model strategy profiles; unknown pi model ids require `baseModel`, a known same-provider compatibility template), **daemon** (CRUD — mint/rename/revoke), **run** (`POST /api/projects/:uuid/runs` enqueues a job a daemon claims; `verb:"run"` is the automatic prepare-if-needed -> map/dig -> synthesize -> verify -> confirm -> report pipeline; `GET /api/runs/:id`; `POST /api/runs/:id/stop`; `GET /api/runs/:id/artifact?name=` reads an allowlisted report or discovery-health artifact), **run-group** / **work-item** (`POST /api/run-groups`, `POST /api/run-groups/:uuid/start`, pause/cancel/report, `GET /api/work-items/:id`, and `POST /api/work-items/:id/retry` for blocked attempts), and read-only **scope** / **finding** / **confirm-decision** (paginated + filterable). **Discovery-backlog** rows are project-scoped agent-owned Next Actions: `GET /api/projects/:uuid/backlog?kind=&status=` lists coverage gaps, resource requests, and follow-up scopes with `actionability` (`agent-runnable`, `agent-resource`, `agent-review`), `action_owner`, `recommended_action`, and `primary_action_label`; `PATCH /api/backlog/:id {"status":"resolved"|"ignored"|"stale"|"open"}` updates state without deleting provenance. Agents should try to resolve every open Next Action through the existing project workflow and narrow any truly external dependency to a concrete credential, authorization, or resource request. Operator actions: `PATCH …/scopes/:id {prioritize:true}` reorders the dig queue; `PATCH /api/findings/:id/tracking` advances a finding's submission state, including `ignored` for human-dismissed machine findings; a confirm `POST …/runs {verb:"confirm"}` reproduces all pending findings (or selected findings with `findingId`/`findingIds`); a report `POST …/runs {verb:"report", findingIds:[...]}` regenerates selected reports, `{"verb":"report","regenerateReports":true}` regenerates every current reportable finding, and an unselected report run writes only missing reports. `flounder continue --project <uuid|name>` drives the same Run/Continue project pipeline from the CLI. `flounder report --project <uuid|name>` drives the same project action from the CLI; add `--finding <id>` for selected regeneration or `--all` for full regeneration. `GET /api/bugs` powers the cross-project Findings view and supports `project=<uuid>`, `status=...`, `tracking=active/ignored/...`, `limit`, and `offset`. `GET /api/stream` is an SSE feed for live updates; `GET /api/runs/:id/log` streams a run's live token-level activity, fed by the executing daemon.

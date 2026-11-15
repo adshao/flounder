@@ -35,7 +35,7 @@ flounder ui                 # dashboard at http://127.0.0.1:4500 plus co-located
 flounder ui --no-daemon     # control plane only
 flounder ui --maintainer    # explicitly enable maintainer-only Harness source-improvement surfaces
 flounder server daemon-token mint [name]
-flounder daemon start --server http://<server>:4500 --token <token>
+FLOUNDER_DAEMON_TOKEN=<token> flounder daemon start --server http://<server>:4500
 flounder daemon provider list
 flounder daemon provider login openai-codex
 flounder daemon provider check openai-codex

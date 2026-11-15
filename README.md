@@ -48,14 +48,14 @@ The installed skill should trigger from requests about Flounder audits, public-s
 - **Framework-agnostic reasoning.** Flounder does not encode a Solidity/EVM, ZK/proof-system, Rust, Go, JavaScript, protocol, or crypto-specific audit strategy. Source, corpus, and optional profiles are inputs; the audit strategy comes from the model. As coding models improve, the audit capability can improve without rewriting the framework around every new stack.
 - **Execution-grounded findings.** A finding is not real because the model says it is plausible. It must cite a passing local command that exercises the vulnerable path. Stronger findings also pass differential confirmation, independent refutation, and faithful-PoC appeal checks.
 - **Versioned coverage and composition.** Scope inventories and model memory are bound to the prepared-material fingerprint. Independent Map inventories are unioned without dropping singleton scopes; every Dig writes a separate obligation/composition outcome, incomplete outcomes stay visible, and cross-scope synthesis runs even when individual scopes produced no finding.
-- **Blind discovery plus capability-scoped reproduction.** Discovery runs network-sealed, so findings are derived from the target material rather than copied from disclosures. During `flounder confirm`, only explicit read/fork/fetch commands receive egress for white-hat reproduction and novelty checks; arbitrary model code remains network-sealed.
+- **Blind discovery plus capability-scoped reproduction.** Discovery runs network-sealed, so findings are derived from the target material rather than copied from disclosures. The only egress a sealed phase grants is dependency resolution; builds and tests that execute workspace code run without network. During `flounder confirm`, only explicit read/fork/fetch commands receive egress for white-hat reproduction and novelty checks; arbitrary model code remains network-sealed.
 - **Sandboxed execution boundary.** Model-generated code, PoCs, dependency installs, and local tests run in a copied workspace, not directly in the host checkout. The default OCI backend refuses silent host execution, bind-mounts only the copied workspace and package cache, drops Linux capabilities, uses `no-new-privileges`, read-only root filesystems and tmpfs temp dirs, applies process/memory/CPU limits when configured, and disables network for sealed audit commands. This reduces the blast radius of malicious dependencies, unsafe PoCs, and model mistakes before they can pollute the host machine.
 - **Multiple audit scenarios.** Use the same product for blind capability audits, incident investigation from suspicious on-chain evidence, open-world bug-bounty audits, targeted follow-up on suspected findings, and disclosure preparation. Whether Flounder prepares the target itself or you provide source paths is an input path, not the scenario.
 - **Durable evaluation groups.** `flounder group` runs validated positive, negative, control, replay, and multi-target work items through the same daemon queue and audit kernel. Group concurrency, attempts, blocked setup, evidence outcomes, and reports survive control-plane restarts. Manifest-provided commands are never executed directly, host execution is rejected, and lifecycle state stays separate from security/scoring outcomes.
 - **Governed maintainer experiments.** When the control plane is explicitly started with `flounder ui --maintainer`, `flounder experiment` helps a Flounder maintainer agent mine verifier-grounded Evaluation failures, constrain source proposals to an allowlist, and compare paired baseline/candidate runs. It is not triggered by ordinary Projects and is absent from the default user surface. Promotion requires distinct cases and bug families, passing hidden holdouts and controls, and no paired regressions; merge and deployment remain human gates.
 - **Strong fit for Solidity and ZK.** Solidity/EVM targets work well because local forks and Foundry/Hardhat tests can prove real on-chain effects. ZK/proof-system targets work well because local prover and constraint harnesses can turn subtle missing constraints into executable counterexamples. These are high-signal examples, not hard-coded limits.
 - **Designed for agent tooling.** Flounder exposes the audit workflow through a CLI, React dashboard, self-describing REST API, pi extension, provider profiles, and daemon execution plane. Codex-style and Claude Code-style providers can be routed through the same sandbox and audit contract.
-- **Local control of code and credentials.** The UI server is a control plane. Audits run on a daemon, optionally on another machine, so target code and provider credentials stay on the executor host.
+- **Local control of code and credentials.** The UI server is a control plane that binds to loopback by default, rejects requests whose Host or Origin is not its own, and requires an operator token on any other bind. Audits run on a daemon, optionally on another machine, so target code and provider credentials stay on the executor host.
 - **Visible, bounded storage retention.** The dashboard warns when the local audit volume is low, attributes run/history/workspace bytes to projects, finds orphaned timestamped runs, and can remove a terminal project's local files while preserving every database record. CLI cleanup is dry-run first and refuses active work.
 
 ## Core Scenarios
@@ -152,7 +152,7 @@ flounder daemon provider check openai-codex
 
 # For a daemon on another machine, mint a control-plane token first.
 flounder server daemon-token mint remote-1
-flounder daemon start --server http://<server>:4500 --token <token>
+FLOUNDER_DAEMON_TOKEN=<token> flounder daemon start --server http://<server>:4500
 ```
 
 `openai-codex` uses pi subscription/OAuth auth. An agent can trigger the user
@@ -377,7 +377,7 @@ You can run that end to end or drive each phase directly:
 | `flounder server finding list [--project <name>] [--status <s>] [--tracking <s>]` | list findings globally or for one project |
 | `flounder server daemon list` | list registered execution daemons |
 | `flounder server daemon-token mint [name] [--server <url>]` | create a token for a remote daemon |
-| `flounder daemon start --server <url> --token <token>` | run an executor that claims queued jobs |
+| `FLOUNDER_DAEMON_TOKEN=<token> flounder daemon start --server <url>` | run an executor that claims queued jobs (`--token` also works, but command-line arguments are visible to other local users) |
 | `flounder daemon provider list/check/login [provider]` | manage provider auth on the executor machine |
 | `flounder config list/get/set/unset/path` | read or write persisted CLI defaults |
 | `flounder storage report [--json]` | show disk pressure and per-project local storage |

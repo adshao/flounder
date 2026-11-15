@@ -104,8 +104,9 @@ async function main(argv: string[]): Promise<void> {
       return;
     }
     const server = readFlag(startArgs, "--server");
-    const token = readFlag(startArgs, "--token");
-    if (!server || !token) throw new Error("flounder daemon start needs --server <url> and --token <token> (create one with `flounder server daemon-token mint [name]`)");
+    // Prefer the environment for the token: argv is visible to every local user via `ps`.
+    const token = readFlag(startArgs, "--token") ?? (process.env.FLOUNDER_DAEMON_TOKEN || undefined);
+    if (!server || !token) throw new Error("flounder daemon start needs --server <url> and a token via FLOUNDER_DAEMON_TOKEN or --token <token> (create one with `flounder server daemon-token mint [name]`)");
     const out = resolveOut(startArgs);
     const name = readFlag(startArgs, "--name");
     const workspace = readFlag(startArgs, "--workspace");
@@ -417,11 +418,12 @@ function spawnLocalDaemon(opts: { out: string; url: string; workspace?: string; 
   const store = MetadataStore.openForOutput(opts.out);
   const { id, token, reused } = store.getOrCreateLocalDaemonToken();
   store.close();
-  const args = [fileURLToPath(import.meta.url), "daemon", "start", "--server", opts.url, "--token", token, "--out", opts.out, "--name", "local"];
+  // The token travels in the child's environment, never its argv (which `ps` exposes).
+  const args = [fileURLToPath(import.meta.url), "daemon", "start", "--server", opts.url, "--out", opts.out, "--name", "local"];
   if (opts.workspace) args.push("--workspace", opts.workspace);
   if (opts.concurrency !== undefined) args.push("--concurrency", String(opts.concurrency));
   console.log(`[flounder ui] ${reused ? "reusing" : "created"} local daemon #${id}`);
-  const child = spawn(process.execPath, args, { stdio: "inherit" });
+  const child = spawn(process.execPath, args, { stdio: "inherit", env: { ...process.env, FLOUNDER_DAEMON_TOKEN: token } });
   child.on("error", (error) => console.error(`[flounder ui] could not start local daemon: ${error.message}`));
   child.on("exit", (code) => console.log(`[flounder ui] local daemon exited (code ${code ?? "?"})`));
   const kill = (): void => {
@@ -512,7 +514,9 @@ Usage:
 
 Required:
   --server      Control-plane URL, for example http://127.0.0.1:4500
-  --token       Daemon connection token minted by flounder server daemon-token mint
+  --token       Daemon connection token minted by flounder server daemon-token mint.
+                Prefer the FLOUNDER_DAEMON_TOKEN environment variable: command-line
+                arguments are visible to other local users.
 
 Defaults:
   --out         ~/.flounder
@@ -560,7 +564,7 @@ async function runMintTokenCommand(args: string[]): Promise<void> {
     const label = typeof body.name === "string" && body.name ? body.name : name;
     console.log(`[daemon ${body.id}] ${label}`);
     console.log(`token: ${body.token}`);
-    console.log(`run on the executor machine:\n  flounder daemon start --server ${server} --token ${body.token}`);
+    console.log(`run on the executor machine:\n  FLOUNDER_DAEMON_TOKEN=${body.token} flounder daemon start --server ${server}`);
     return;
   }
   const server = "http://<this-server-host>:4500";
@@ -569,7 +573,7 @@ async function runMintTokenCommand(args: string[]): Promise<void> {
     const { id, token } = db.createDaemonToken(name);
     console.log(`[daemon ${id}] ${name}`);
     console.log(`token: ${token}`);
-    console.log(`run on the executor machine:\n  flounder daemon start --server ${server} --token ${token}`);
+    console.log(`run on the executor machine:\n  FLOUNDER_DAEMON_TOKEN=${token} flounder daemon start --server ${server}`);
   } finally {
     db.close();
   }
