@@ -24,6 +24,7 @@ import { RunRecorder, toDiscoveryBacklogRows, toFindingStatus, type RunTrackerFa
 import type { RunKind, RunStatus } from "../db/store.js";
 import { isPiSessionProvider, runAuditSession, SessionLlmClient } from "./pi-session.js";
 import type { TranscriptStep } from "./prompts.js";
+import { SYSTEM_MODEL_WORKSPACE_PATH, isSystemModelDoc, loadSystemModel, normalizeSystemModel, readWorkspaceSystemModel, saveSystemModel, systemModelDoc, unionSystemModels } from "./system-model.js";
 import { buildTools, clearScratchFindings, dedupeFindings, ingestFindingsFromScratch, isRefutedFindingTitle, newSession, readScratchScopes, type AgentFinding, type AgentSession, type AuditScope, type ToolContext } from "./tools.js";
 import {
   COVERAGE_GAPS_FILE,
@@ -155,7 +156,36 @@ export async function runAudit(
   // Driver choice: real pi providers (e.g. openai-codex) run a continuous
   // AgentSession that owns the loop; the deterministic mock and CLI fallbacks use
   // the legacy per-step complete() loop.
-  const fileManifest = renderFileManifest(source, corpusManifest);
+  let fileManifest = renderFileManifest(source, corpusManifest);
+  // Shared system model: MAP authors it once; every later workspace (dig, verify,
+  // synthesis, appeal) and the independent skeptic receive it as read-only corpus
+  // context. Installing it mutates the shared corpus list in place so workspaces
+  // created afterwards stage it without each call site having to remember to.
+  const systemModelDir = projectHistoryDir(historyLocation(cfg));
+  let systemModel: string | undefined;
+  const installSystemModel = async (text: string | undefined, persist: boolean): Promise<void> => {
+    const normalized = normalizeSystemModel(text);
+    if (!normalized) return;
+    systemModel = normalized;
+    const doc = systemModelDoc(normalized);
+    const at = corpus.findIndex(isSystemModelDoc);
+    if (at >= 0) corpus[at] = doc;
+    else corpus.push(doc);
+    if (session.workspace) {
+      await writeSandboxFiles(session.workspace.absolute, [{ path: SYSTEM_MODEL_WORKSPACE_PATH, content: normalized }]);
+      if (!corpusManifest.includes(SYSTEM_MODEL_WORKSPACE_PATH)) corpusManifest.push(SYSTEM_MODEL_WORKSPACE_PATH);
+      fileManifest = renderFileManifest(source, corpusManifest);
+    }
+    if (persist) await saveSystemModel(systemModelDir, normalized, cfg.materialFingerprint);
+    // Keep the exact context this run's phases were given next to its other artifacts.
+    await logger.artifact("system_model.md", normalized);
+    await logger.event("audit_system_model", { chars: normalized.length, persisted: persist });
+  };
+  // A fresh enumeration (remap, or a non-append map) starts without the previous
+  // model; every other entry point reuses the one persisted for this material.
+  if (!cfg.auditRemap && !(cfg.auditMapOnly && !cfg.auditAppendMap)) {
+    await installSystemModel(await loadSystemModel(systemModelDir, cfg.materialFingerprint), false);
+  }
   const memoryHintFor = async (opts: { mode: string; deepFocus?: string }): Promise<string> => {
     const filter = { ...(cfg.materialFingerprint ? { materialFingerprint: cfg.materialFingerprint } : {}), includePortable: true };
     const query = [cfg.targetName, scopeNote, opts.mode, opts.deepFocus].filter(Boolean).join(" ");
@@ -227,9 +257,10 @@ export async function runAudit(
     }));
   };
 
-  const runMapEnsemble = async (coveredScopes: AuditScope[], coveredCount: number): Promise<{ scopes: AuditScope[]; steps: TranscriptStep[] }> => {
+  const runMapEnsemble = async (coveredScopes: AuditScope[], coveredCount: number): Promise<{ scopes: AuditScope[]; steps: TranscriptStep[]; systemModel?: string }> => {
     const sampleCount = Math.max(1, Math.floor(cfg.auditMapSamples));
     const sampleMaps: AuditScope[][] = [];
+    const sampleModels: Array<string | undefined> = [];
     const mapSteps: TranscriptStep[] = [];
     for (let sample = 1; sample <= sampleCount; sample += 1) {
       if (options.signal?.aborted) throw new Error("audit aborted");
@@ -247,11 +278,14 @@ export async function runAudit(
       }, { ctx: mapCtx, cwd: ws.absolute });
       const scopes = readScratchScopes(mapSession).map((scope) => ({ ...scope, mapSamples: [sample], mapAgreement: 1 }));
       sampleMaps.push(scopes);
+      sampleModels.push(await readWorkspaceSystemModel(ws.absolute));
       mapSteps.push(...phase.steps);
       session.commandRuns.push(...mapSession.commandRuns.map((run) => ({ ...run, id: `map-s${sample}:${run.id}` })));
       await logger.event("audit_map_sample", { sample, of: sampleCount, scopes: scopes.length });
     }
-    return { scopes: unionMapSamples(sampleMaps), steps: mapSteps };
+    const mappedModel = unionSystemModels(sampleModels);
+    if (!mappedModel) await logger.event("audit_system_model_missing", { samples: sampleCount, reusedPrevious: systemModel !== undefined });
+    return { scopes: unionMapSamples(sampleMaps), steps: mapSteps, ...(mappedModel ? { systemModel: mappedModel } : {}) };
   };
 
   let steps: TranscriptStep[];
@@ -434,6 +468,7 @@ export async function runAudit(
     const seedScopes = await loadAppendMapSeedScopes(cfg);
     if (existing.length > 0 || seedScopes.length > 0) await logger.event("audit_map_append_start", { existing: existing.length, seedScopes: seedScopes.length, samples: cfg.auditMapSamples });
     const mapResult = await runMapEnsemble([...existing, ...seedScopes], existing.length);
+    await installSystemModel(mapResult.systemModel, true);
     const mapped = mapResult.scopes;
     if (existing.length > 0) {
       const merged = mergeScopeInventory(existing, mapped);
@@ -507,6 +542,7 @@ export async function runAudit(
     if (!resuming) {
       if (appendExisting.length > 0 || appendSeedScopes.length > 0) await logger.event("audit_map_append_start", { existing: appendExisting.length, seedScopes: appendSeedScopes.length, samples: cfg.auditMapSamples });
       const mapResult = await runMapEnsemble([...appendExisting, ...appendSeedScopes], appendExisting.length);
+      await installSystemModel(mapResult.systemModel, true);
       const mapped = mapResult.scopes;
       if (appendExisting.length > 0) {
         const merged = mergeScopeInventory(appendExisting, mapped);
@@ -968,7 +1004,7 @@ export async function runAudit(
       // confirmed candidate. No finding silently escapes independent review.
       for (let offset = 0; offset < candidates.length; offset += 8) {
         const chunk = candidates.slice(offset, offset + 8);
-        const result = await runRefutation({ findings: chunk, source, cfg: refuteCfg, llm: refuteLlm, logger, max: chunk.length, onProgress: (id) => options.onActivity?.({ kind: "step", tool: `refute ${id}` }), ...(pocFiles.length > 0 ? { pocFiles } : {}) });
+        const result = await runRefutation({ findings: chunk, source, cfg: refuteCfg, llm: refuteLlm, logger, max: chunk.length, ...(systemModel ? { systemModel } : {}), onProgress: (id) => options.onActivity?.({ kind: "step", tool: `refute ${id}` }), ...(pocFiles.length > 0 ? { pocFiles } : {}) });
         refutation.attempted += result.attempted;
         refutation.verdicts.push(...result.verdicts);
         refutation.errors.push(...result.errors);
@@ -1035,7 +1071,7 @@ export async function runAudit(
             const appealPocFiles = [...session.scratchFiles.entries()]
               .filter(([scratchPath]) => /\.t\.(sol|rs|ts|js)$/i.test(scratchPath) || /(^|\/)tests?\//i.test(scratchPath) || /(poc|exploit)/i.test(scratchPath))
               .map(([scratchPath, content]) => ({ path: scratchPath, content }));
-            const appealRefutation = await runRefutation({ findings: [reConfirmed], source, cfg: refuteCfg, llm: refuteLlm, logger, max: 1, ...(appealPocFiles.length > 0 ? { pocFiles: appealPocFiles } : {}) });
+            const appealRefutation = await runRefutation({ findings: [reConfirmed], source, cfg: refuteCfg, llm: refuteLlm, logger, max: 1, ...(systemModel ? { systemModel } : {}), ...(appealPocFiles.length > 0 ? { pocFiles: appealPocFiles } : {}) });
             refutationErrors.push(...appealRefutation.errors.map((error) => ({ phase: "appeal-refutation" as const, ...error })));
             upheld = appealRefutation.errors.length === 0 && !(reConfirmed.refutation?.refuted && reConfirmed.refutation.unrealistic);
             if (upheld) {

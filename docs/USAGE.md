@@ -669,6 +669,7 @@ Each audit writes:
 - `run_health.json`: health verdict for the run (`healthy`, `needs-coverage`, `needs-resource`, `shallow`, or `infra-failed`).
 - `coverage_gaps.json`, `resource_requests.json`, `followup_scopes.json`: discovery backlog artifacts for coverage gaps, missing resources, and adjacent scopes to audit later.
 - `scope_outcomes.json`: current-material per-scope obligation, blocker, and composition coverage evidence. This is not a finding artifact.
+- `system_model.md`: the MAP-authored description of principals, trust, assets, entry points, and cross-component properties that later phases and the skeptic read as context. It is not evidence and not a finding artifact.
 - `summary.json`: ranked finding summary and coverage.
 - `report_<id>.md`: private disclosure drafts.
 - `events.jsonl` and `calls/*.json`: audit trace and model-call records.

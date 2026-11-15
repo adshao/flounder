@@ -3,6 +3,7 @@ import type { RunLogger } from "../trace/logger.js";
 import type { Doc, LlmClient } from "../types.js";
 import { extractJsonObject } from "../util/json.js";
 import type { AgentFinding } from "./tools.js";
+import { clipSystemModel } from "./system-model.js";
 
 // Independent refutation. A confirmed finding rests on one chain of reasoning (and
 // possibly one self-authored test). A fresh-context skeptic — which never saw the
@@ -13,15 +14,17 @@ import type { AgentFinding } from "./tools.js";
 // assumption (including "it matches upstream").
 
 export const REFUTE_SYSTEM = `You are an independent adversarial reviewer. Another auditor produced an UNVERIFIED vulnerability claim. You did NOT do the original investigation; do not assume the claim is right or wrong.
-The claim sometimes comes with a PoC test it says confirms the bug. REFUTE it on EITHER of two independent grounds:
+The claim sometimes comes with a PoC test it says confirms the bug. REFUTE it on ANY of three independent grounds:
 1. INVARIANT: from the actual code and first principles, the alleged security property is in fact enforced (so the claim is wrong), or the exploit reasoning has a flaw that makes it not exploitable.
 2. POC REALISM / TRUST ASSUMPTIONS: even a PoC that "passes" only confirms a real bug if the exploit is reachable in the ACTUALLY DEPLOYED system. Scrutinize the PoC's setup — every mock, stub, vm.store, fake deployed contract, role, and assumption. If triggering the bug REQUIRES a fixed component to behave CONTRARY to its real or specified contract, the "confirmation" is VACUOUS — it proves a counterfactual, not a real bug. A PoC may mock a component ONLY if the mock faithfully matches that component's real/spec'd behavior.
+3. EFFECT NOT EXHIBITED: a confirmation must commit and observe the claimed unauthorized effect itself on the real code path — an unauthorized change of value, authority, or stored state, an accepted input that must be rejected, or a system-level property that no longer holds. If the PoC only shows an intermediate value, an encoded request, a discrepancy with no security consequence, or an effect the acting principal is already authorized to cause, the confirmation does not establish the claim. Set unrealistic=true for this ground too and name the effect that was never observed.
+When a shared system model is supplied, use it as context for who the principals are and what each is trusted to do. It is model-authored and can be wrong; the source and project-owned specifications win.
 Do NOT mechanically refute or accept a PoC merely because it uses a privileged role. First determine, from the available source and project-owned specifications, who controls the role, its actual control model, whether the stated security model trusts that principal, the current behavior the role can select, and a realistic path by which the assessed attacker could obtain or benefit from that control. Strong role separation, threshold signing, timelocks, transparent governance, recovery, and a well-supported institutional trust model may reduce present likelihood; a public path, weak single-key control, or an explicitly in-scope malicious principal may change the conclusion. Reputation or a brand name alone is not evidence. If controller or current-state facts are unavailable, state that evidence limit instead of inventing them.
 Do not clear code because it "matches upstream", a spec, or looks standard — a reference can carry the same bug. But DO refute a confirmation whose only triggering path needs an out-of-spec trusted component.
 Be skeptical, but honest: if you genuinely cannot refute it on either ground, say so.
 Respond with ONLY a JSON object and nothing else (no prose, no fences): {"refuted": true|false, "unrealistic": true|false, "reason": "<concise and specific>"}.
-- refuted=true: the claim/confirmation as stated does not hold — say which ground. Set unrealistic=true when it fails ground 2; identify the exact unsupported capability and the available controller/current-state evidence. Preserve any conditional mechanism in the reason instead of silently converting it into a current permissionless exploit.
-- refuted=false: you could not refute it on either ground; the concern appears to stand (then unrealistic must be false).`;
+- refuted=true: the claim/confirmation as stated does not hold — say which ground. Set unrealistic=true when it fails ground 2 or ground 3; identify the exact unsupported capability and the available controller/current-state evidence. Preserve any conditional mechanism in the reason instead of silently converting it into a current permissionless exploit.
+- refuted=false: you could not refute it on any ground; the concern appears to stand (then unrealistic must be false).`;
 
 export interface RefutationVerdict {
   findingId: string;
@@ -52,6 +55,9 @@ export async function runRefutation(input: {
   // confirmation's trust assumptions (e.g. an out-of-spec mocked verifier), not
   // just the invariant. Keyed by path; passed verbatim.
   pocFiles?: Array<{ path: string; content: string }>;
+  // MAP-authored principals/trust/assets context, so reachability is judged against
+  // the target's own security model instead of being re-guessed per finding.
+  systemModel?: string;
   // Reports which finding is being refuted, so the caller can surface progress in the live UI
   // (the refutation runs after the dig's scope batch, where the activity stream otherwise goes quiet).
   onProgress?: (findingId: string) => void;
@@ -61,7 +67,7 @@ export async function runRefutation(input: {
   const errors: RefutationError[] = [];
   for (const finding of attemptedFindings) {
     input.onProgress?.(finding.id);
-    const user = buildRefutationPrompt(finding, sourceForLocation(input.source, finding.location), input.pocFiles ?? []);
+    const user = buildRefutationPrompt(finding, sourceForLocation(input.source, finding.location), input.pocFiles ?? [], input.systemModel);
     try {
       const raw = await input.llm.complete({
         tag: `refute_${finding.id}`,
@@ -168,7 +174,7 @@ ${sourceSlice}
 Independently try to BREAK this discharge: does the cited enforcement clear the obligation's FULL security property end-to-end (to the sink/effect it protects, across every reachable path and caller), or only a narrower sub-property? Respond with the JSON verdict only.`;
 }
 
-function buildRefutationPrompt(finding: AgentFinding, sourceSlice: string, pocFiles: Array<{ path: string; content: string }>): string {
+function buildRefutationPrompt(finding: AgentFinding, sourceSlice: string, pocFiles: Array<{ path: string; content: string }>, systemModel?: string): string {
   const poc = pocFiles.length > 0
     ? pocFiles.map((file) => `----- ${file.path} -----\n${file.content.length > 6000 ? file.content.slice(0, 6000) + "\n…(truncated)" : file.content}`).join("\n\n")
     : "(no PoC test files were provided)";
@@ -187,7 +193,10 @@ ${sourceSlice}
 PoC / scratch test file(s) the finder wrote to confirm it (audit their setup, mocks, and trust assumptions — a passing test against an out-of-spec mocked component is a vacuous confirmation):
 ${poc}
 
-Independently determine whether this claim/confirmation holds, on EITHER the invariant ground or the PoC-realism ground. Respond with the JSON verdict only.`;
+Shared system model from the MAP phase (context for principals, trust, and assets; not evidence):
+${systemModel ? clipSystemModel(systemModel, 16_000) : "(none available)"}
+
+Independently determine whether this claim/confirmation holds on the invariant, PoC-realism, and exhibited-effect grounds. Respond with the JSON verdict only.`;
 }
 
 function sourceForLocation(source: Doc[], location: string): string {

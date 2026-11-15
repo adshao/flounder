@@ -32,6 +32,18 @@ export interface FixPatch {
   new: string;
 }
 
+/**
+ * The finding bar asks every claim to name its attacker and the observed effect.
+ * Both are carried inside the evidence text so they reach the skeptic, verify,
+ * confirm, reports, and the tracking store without a parallel schema.
+ */
+export function withFindingBarEvidence(evidence: string, attacker?: string, effect?: string): string {
+  const parts = [evidence.trim()];
+  if (attacker && attacker.trim()) parts.push(`Attacker and assumed capabilities: ${attacker.trim()}`);
+  if (effect && effect.trim()) parts.push(`Unauthorized effect observed: ${effect.trim()}`);
+  return parts.filter((part) => part.length > 0).join("\n");
+}
+
 export interface AgentFinding {
   id: string;
   title: string;
@@ -251,7 +263,7 @@ export function ingestFindingsFromScratch(session: AgentSession): { parsed: numb
       severity: asEnum(record.severity, ["info", "low", "medium", "high", "critical"], "medium") as Severity,
       location,
       description: asString(record.description) ?? "",
-      evidence: asString(record.evidence) ?? "",
+      evidence: withFindingBarEvidence(asString(record.evidence) ?? "", asString(record.attacker), asString(record.effect)),
       exploitSketch: asString(record.exploit_sketch) ?? asString(record.exploitSketch) ?? "",
       fix: asString(record.fix) ?? "",
       confidence: clampFloat(record.confidence, 0, 1, 0.5),
