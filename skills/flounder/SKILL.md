@@ -181,7 +181,7 @@ For repository development or local builds, use Node 24 LTS from `.nvmrc` /
    `flounder server daemon-token mint`, then run:
 
    ```bash
-   flounder daemon start --server http://<server>:4500 --token <token>
+   FLOUNDER_DAEMON_TOKEN=<token> flounder daemon start --server http://<server>:4500
    ```
 
 3. Authenticate every provider that the selected daemon will run. For model

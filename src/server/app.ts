@@ -13,6 +13,7 @@
 // unless a per-daemon bearer token is configured.
 
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { checkRequestBoundary, isLoopbackName, parseAllowedHosts } from "./request-guard.js";
 import { closeSync, existsSync, fstatSync, openSync, readFileSync, readSync, readdirSync, statSync } from "node:fs";
 import { timingSafeEqual } from "node:crypto";
 import path from "node:path";
@@ -828,9 +829,21 @@ export function startUiServer(options: UiServerOptions = {}): ReturnType<typeof 
   // survive a server restart. Blind-killing them here would be wrong. (A future daemon
   // heartbeat can reconcile rows whose daemon has gone stale.)
 
+  const allowedHosts = parseAllowedHosts(process.env.FLOUNDER_UI_ALLOWED_HOSTS);
   const server = createServer((req, res) => {
     const url = new URL(req.url ?? "/", "http://localhost");
     const method = req.method ?? "GET";
+    const boundary = checkRequestBoundary({
+      method,
+      headers: req.headers,
+      loopbackBound: loopback,
+      daemonRoute: isDaemonRoute(url.pathname),
+      allowedHosts,
+    });
+    if (!boundary.ok) {
+      sendJson(res, boundary.status, { error: boundary.error });
+      return;
+    }
     for (const r of ROUTES) {
       if (r.method !== method) continue;
       const match = r.regex.exec(url.pathname);
@@ -962,8 +975,7 @@ function readTailLines(file: string, limit: number, maxBytes = PERSISTED_ACTIVIT
 }
 
 function isLoopbackHost(host: string): boolean {
-  const normalized = host.trim().toLowerCase().replace(/^\[|\]$/g, "");
-  return normalized === "localhost" || normalized === "127.0.0.1" || normalized === "::1";
+  return isLoopbackName(host);
 }
 
 function isDaemonRoute(routePath: string): boolean {

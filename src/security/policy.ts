@@ -229,7 +229,7 @@ export function openWorldCommandNeedsNetwork(command: StructuredReproductionComm
   if (!normalized) return false;
   const program = normalized.program.trim().toLowerCase();
   const args = normalized.args.map((arg) => String(arg));
-  if (purpose === "build" && isAllowedBuildCommand(program, args)) return true;
+  if (purpose === "build" && isDependencyFetchCommand(program, args)) return true;
   if (program === "curl") return isReadOnlyCurl(args);
   if (program === "wget") return isReadOnlyWget(args);
   if (program === "git") return isReadOnlyGitNetworkCommand(args);
@@ -240,6 +240,115 @@ export function openWorldCommandNeedsNetwork(command: StructuredReproductionComm
   if (program === "solana") return isReadOnlySolanaCommand(args);
   if (program === "solana-test-validator") return isReadOnlySolanaValidatorForkCommand(args);
   return false;
+}
+
+/**
+ * Sealed discovery (map/dig/synthesize/verify) grants egress to one capability
+ * only: dependency resolution. A build command that compiles or runs
+ * workspace-authored code (make, cargo build with a build script, a bundler, a
+ * task runner) stays network-sealed, so "found without network access" holds
+ * for everything the model can author. Fetch first, then build offline.
+ */
+export function sealedBuildCommandNeedsNetwork(command: StructuredReproductionCommand, purpose: AgentCommandPurpose): boolean {
+  if (purpose !== "build") return false;
+  // Same rule as open-world egress: a wrapped command never acquires network.
+  if (command.program.trim().toLowerCase() === "env") return false;
+  const normalized = unwrapSafeEnvCommand(command);
+  if (!normalized) return false;
+  return isDependencyFetchCommand(normalized.program.trim().toLowerCase(), normalized.args.map((arg) => String(arg)));
+}
+
+/**
+ * Package installers run lifecycle scripts, which would execute workspace- or
+ * model-authored code while the command holds egress. When the framework grants
+ * network to a model-issued install it disables those scripts; the model can run
+ * them afterwards with a sealed rebuild command. Applied after policy
+ * classification, so the model cannot remove it.
+ */
+export function withoutInstallScripts(command: StructuredReproductionCommand): StructuredReproductionCommand {
+  const program = command.program.trim().toLowerCase();
+  const args = command.args.map((arg) => String(arg));
+  if (program === "npm" || program === "pnpm" || program === "bun") {
+    return args.includes("--ignore-scripts") ? command : { ...command, args: [...args, "--ignore-scripts"] };
+  }
+  if (program === "yarn") {
+    // Classic and modern yarn disagree on the flag; both honor their own
+    // environment setting, so set both instead of guessing the major version.
+    return { ...command, program: "env", args: ["yarn_ignore_scripts=true", "YARN_ENABLE_SCRIPTS=false", "yarn", ...args] };
+  }
+  return command;
+}
+
+/**
+ * Commands whose job is to download declared dependencies (or a compiler
+ * release) without executing workspace-authored code. This is the only build
+ * surface that receives egress from a model-issued command. Extend this table
+ * when a new package manager has a pure fetch verb; anything that evaluates a
+ * build script belongs in isAllowedBuildCommand only.
+ */
+function isDependencyFetchCommand(program: string, args: string[]): boolean {
+  if (!isAllowedBuildCommand(program, args)) return false;
+  const name = program.toLowerCase();
+  const lower = args.map((arg) => arg.toLowerCase());
+  const first = lower[0];
+  const second = lower[1];
+  if (name === "cargo") return ["fetch", "vendor", "update", "generate-lockfile"].includes(cargoSubcommand(args) ?? "");
+  if (name === "go") return first === "mod" && ["download", "tidy", "vendor"].includes(second ?? "");
+  if (name === "npm") return ["install", "ci", "i"].includes(first ?? "");
+  if (name === "pnpm" || name === "yarn" || name === "bun") {
+    if (name === "yarn" && args.length === 0) return true;
+    if (["install", "i", "ci"].includes(first ?? "")) return true;
+    return first === "hardhat" && second === "compile" && usesProjectOwnedConfig(lower);
+  }
+  if (name === "npx") return first === "hardhat" && second === "compile" && usesProjectOwnedConfig(lower);
+  if (name === "pip" || name === "pip3") return first === "install" && isRegistryPipInstall(args.slice(1));
+  if (name === "python" || name === "python3") {
+    return first === "-m" && second === "pip" && lower[2] === "install" && isRegistryPipInstall(args.slice(3));
+  }
+  // The Solidity compiler front end resolves and downloads a compiler release;
+  // it does not execute workspace code (FFI is forced off by the sandbox).
+  if (name === "forge") return ["build", "compile", "install", "update", "inspect"].includes(first ?? "");
+  if (name === "scarb") return ["fetch", "metadata"].includes(scarbSubcommand(args) ?? "");
+  if (name === "deno") return first === "cache";
+  if (name === "dotnet") return first === "restore";
+  if (name === "mvn") {
+    const goals = lower.filter((arg) => !arg.startsWith("-"));
+    return goals.length > 0 && goals.every((goal) => goal === "dependency:resolve" || goal === "dependency:go-offline");
+  }
+  return false;
+}
+
+/** A compiler download may ride a task runner only when it loads the project's own configuration. */
+function usesProjectOwnedConfig(lowerArgs: string[]): boolean {
+  return !lowerArgs.some((arg) => arg === "--config" || arg.startsWith("--config=") || arg === "--tsconfig" || arg.startsWith("--tsconfig="));
+}
+
+const PIP_VALUELESS_FLAGS = new Set(["-u", "--upgrade", "-q", "--quiet", "--no-cache-dir", "--no-input", "--disable-pip-version-check", "--prefer-binary", "--no-deps", "--user"]);
+const PIP_REQUIREMENT = /^[a-z0-9][a-z0-9._-]*(\[[a-z0-9._,-]+\])?((==|>=|<=|~=|!=|<|>)[a-z0-9.*+!_-]+(,(==|>=|<=|~=|!=|<|>)[a-z0-9.*+!_-]+)*)?$/i;
+
+/**
+ * Registry installs only: named requirements or a workspace requirements file.
+ * Local paths, editable installs, direct URLs, VCS references, and alternate
+ * indexes would run workspace code or reach an arbitrary server with egress.
+ */
+function isRegistryPipInstall(args: string[]): boolean {
+  let requirements = 0;
+  for (let index = 0; index < args.length; index += 1) {
+    const arg = args[index] ?? "";
+    const lower = arg.toLowerCase();
+    if (PIP_VALUELESS_FLAGS.has(lower)) continue;
+    if (lower === "-r" || lower === "--requirement") {
+      const file = args[index + 1] ?? "";
+      if (!file || file.startsWith("-") || looksLikeRemoteUrl(file) || looksLikePathEscape(file)) return false;
+      index += 1;
+      requirements += 1;
+      continue;
+    }
+    if (arg.startsWith("-")) return false;
+    if (!PIP_REQUIREMENT.test(arg)) return false;
+    requirements += 1;
+  }
+  return requirements > 0;
 }
 
 function isReadOnlyCurl(args: string[]): boolean {
@@ -953,8 +1062,8 @@ function isAllowedBuildCommand(program: string, args: string[]): boolean {
   const lower = args.map((arg) => arg.toLowerCase());
   if (name === "cargo") return ["build", "fetch", "check", "generate-lockfile", "vendor", "update"].includes(cargoSubcommand(args) ?? "");
   if (name === "go") return first === "build" || first === "mod"; // go build / go mod download|tidy|vendor
-  if (name === "npm") return ["install", "ci", "i"].includes(first ?? "");
-  if (name === "pnpm" || name === "yarn" || name === "bun") return ["install", "i", "ci"].includes(first ?? "")
+  if (name === "npm") return ["install", "ci", "i", "rebuild"].includes(first ?? "");
+  if (name === "pnpm" || name === "yarn" || name === "bun") return ["install", "i", "ci", "rebuild"].includes(first ?? "")
     || (name === "yarn" && args.length === 0)
     || (first === "hardhat" && (second === "compile" || second === "typechain"))
     || (first === "blueprint" && second === "build");

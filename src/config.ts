@@ -39,6 +39,13 @@ export interface AuditorConfig {
   sandboxImage: string;
   sandboxAllowHostFallback: boolean;
   sandboxPrepareNetwork: SandboxNetworkMode;
+  /**
+   * Which model-issued build commands may use the build-phase network in sealed
+   * audit phases. "fetch-only" (default) limits egress to dependency resolution;
+   * "all" restores egress for every allowlisted build command and is an explicit
+   * operator opt-out of the sealed-discovery guarantee.
+   */
+  sandboxBuildEgress?: "fetch-only" | "all";
   sandboxConfirmNetwork: SandboxNetworkMode;
   sandboxMemoryMb?: number;
   sandboxCpus?: number;
@@ -256,6 +263,7 @@ export function defaultConfig(): AuditorConfig {
     sandboxImage: process.env.FLOUNDER_SANDBOX_IMAGE || "flounder-sandbox:latest",
     sandboxAllowHostFallback: process.env.FLOUNDER_ALLOW_HOST_EXECUTION === "1",
     sandboxPrepareNetwork: readSandboxNetwork(process.env.FLOUNDER_PREPARE_NETWORK) ?? "enabled",
+    sandboxBuildEgress: process.env.FLOUNDER_BUILD_EGRESS === "all" ? "all" : "fetch-only",
     sandboxConfirmNetwork: readSandboxNetwork(process.env.FLOUNDER_CONFIRM_NETWORK) ?? "enabled",
     auditMaxSteps: Number.POSITIVE_INFINITY,
     auditPrepare: true,

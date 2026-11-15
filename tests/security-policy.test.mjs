@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import test from "node:test";
-import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, openWorldCommandNeedsNetwork } from "../dist/security/policy.js";
+import { analyzeCommandSafety, analyzeReproductionCommandSafety, analyzeAgentBashCommandSafety, analyzeConfirmBashCommandSafety, isAgentBuildCommand, isAgentConfirmCommand, isAgentInspectionCommand, openWorldCommandNeedsNetwork, sealedBuildCommandNeedsNetwork, withoutInstallScripts } from "../dist/security/policy.js";
 
 const cmd = (program, ...args) => ({ program, args });
 
@@ -480,4 +480,70 @@ test("reproduction command policy keeps Solidity fork and network targets local-
     analyzeReproductionCommandSafety({ program: "forge", args: ["test", "--fork-url", "$MAINNET_RPC_URL"] }).blocked,
     true,
   );
+});
+
+test("sealed build egress is limited to dependency resolution", () => {
+  for (const c of [
+    cmd("cargo", "fetch"),
+    cmd("cargo", "+1.86.0", "vendor"),
+    cmd("go", "mod", "download"),
+    cmd("npm", "install"),
+    cmd("npm", "ci"),
+    cmd("pnpm", "install", "--frozen-lockfile"),
+    cmd("yarn"),
+    cmd("pip", "install", "pytest==8.3.0", "eth-abi>=5,<6"),
+    cmd("python3", "-m", "pip", "install", "-r", "requirements.txt"),
+    cmd("forge", "build"),
+    cmd("forge", "install"),
+    cmd("scarb", "fetch"),
+    cmd("deno", "cache", "poc/main.ts"),
+    cmd("dotnet", "restore"),
+    cmd("mvn", "-q", "dependency:go-offline"),
+    cmd("npx", "hardhat", "compile"),
+  ]) assert.equal(sealedBuildCommandNeedsNetwork(c, "build"), true, `${c.program} ${c.args.join(" ")} should receive dependency-fetch egress`);
+
+  // Anything that compiles or runs workspace-authored code stays sealed, even
+  // though it is still an allowed build command.
+  for (const c of [
+    cmd("make"),
+    cmd("make", "-C", "poc"),
+    cmd("ninja"),
+    cmd("cmake", "--build", "build"),
+    cmd("cargo", "build"),
+    cmd("cargo", "check"),
+    cmd("go", "build", "./..."),
+    cmd("npm", "rebuild"),
+    cmd("scarb", "build"),
+    cmd("gradle", "dependencies"),
+    cmd("mvn", "package"),
+    cmd("mvn", "dependency:resolve", "package"),
+    cmd("npx", "hardhat", "compile", "--config", "poc/hardhat.config.js"),
+    cmd("pip", "install", "."),
+    cmd("pip", "install", "-e", "poc"),
+    cmd("pip", "install", "./poc/pkg"),
+    cmd("pip", "install", "git+https://example.invalid/pkg.git"),
+    cmd("pip", "install", "--index-url", "https://example.invalid/simple", "pytest"),
+    cmd("pip", "install", "-r", "../requirements.txt"),
+    cmd("pip", "install"),
+  ]) {
+    assert.equal(isAgentBuildCommand(c), true, `${c.program} ${c.args.join(" ")} is still a permitted build command`);
+    assert.equal(sealedBuildCommandNeedsNetwork(c, "build"), false, `${c.program} ${c.args.join(" ")} must stay network-sealed`);
+    assert.equal(openWorldCommandNeedsNetwork(c, "build"), false, `${c.program} ${c.args.join(" ")} must stay sealed in open-world phases too`);
+  }
+
+  // Egress never follows a purpose label or an env wrapper.
+  assert.equal(sealedBuildCommandNeedsNetwork(cmd("npm", "install"), "inspect"), false);
+  assert.equal(sealedBuildCommandNeedsNetwork(cmd("npm", "install"), "confirm"), false);
+  assert.equal(sealedBuildCommandNeedsNetwork(cmd("env", "FOO=1", "npm", "install"), "build"), false);
+  assert.equal(sealedBuildCommandNeedsNetwork(cmd("cargo", "test"), "build"), false);
+});
+
+test("installs that hold egress run without lifecycle scripts", () => {
+  assert.deepEqual(withoutInstallScripts(cmd("npm", "install")).args, ["install", "--ignore-scripts"]);
+  assert.deepEqual(withoutInstallScripts(cmd("pnpm", "install", "--ignore-scripts")).args, ["install", "--ignore-scripts"]);
+  assert.deepEqual(withoutInstallScripts(cmd("bun", "install")).args, ["install", "--ignore-scripts"]);
+  const yarn = withoutInstallScripts(cmd("yarn", "install", "--frozen-lockfile"));
+  assert.equal(yarn.program, "env");
+  assert.deepEqual(yarn.args, ["yarn_ignore_scripts=true", "YARN_ENABLE_SCRIPTS=false", "yarn", "install", "--frozen-lockfile"]);
+  assert.deepEqual(withoutInstallScripts(cmd("cargo", "fetch")), cmd("cargo", "fetch"));
 });

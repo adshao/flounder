@@ -451,7 +451,9 @@ test("daemon: CLI daemon-token mint uses the server API when --server is passed"
     const { stdout } = await execFileAsync(process.execPath, [path.join(root, "dist/cli.js"), "server", "daemon-token", "mint", "cli-remote", "--server", base], { cwd: root });
 
     assert.match(stdout, /\[daemon \d+\] cli-remote/);
-    assert.match(stdout, new RegExp(`flounder daemon start --server ${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")} --token [a-f0-9]+`));
+    // The printed hint keeps the token out of argv, where other local users could read it.
+    assert.match(stdout, new RegExp(`FLOUNDER_DAEMON_TOKEN=[a-f0-9]+ flounder daemon start --server ${base.replace(/[.*+?^${}()|[\]\\]/g, "\\$&")}`));
+    assert.doesNotMatch(stdout, /--token/);
 
     const daemons = await j(await ui(base, "GET", "/api/daemons"));
     assert.equal(daemons.daemons.some((daemon) => daemon.name === "cli-remote"), true);
