@@ -165,6 +165,8 @@ New scope outcomes trigger synthesis even when no individual scope produced a fi
 
 **Per-role models.** `map`/`dig`/`refute`/`default` each resolve a provider/model/thinking via `resolveRole` (role entry → `default` → top-level config); nothing is auto-downgraded. This spends the expensive model where it matters and lets the provider be switched in one line (the driver — continuous pi session vs per-step loop — is auto-selected from the resolved provider). See `examples/models.*.json`.
 
+**Shared system model.** A dig sees one scope at a time and cannot rebuild the whole system from it, so MAP also writes `system_model.md`: the principals and what each is trusted to do under the project's own security model, the assets and authorities worth attacking, the externally reachable entry points, the properties that must hold across components, and any deployment or configuration facts present in the loaded material. The structure and derivation are the model's. The framework only persists it beside the scope inventory (bound to the same material fingerprint), stages it read-only at `corpus/audit-context/system_model.md` in every later dig, verify, synthesis, and appeal workspace, and passes it to the independent skeptic. It is context for judging reachability and impact; it can never confirm or refute a finding, and where it disagrees with the source the source wins. A scope may also name several locations in `region` when its property only holds across components.
+
 ## Thin-Layer Rule
 
 A component belongs in audit mode only if it gives the model something it cannot provide for itself:
@@ -186,6 +188,8 @@ Default tools:
 There are no default bug-class, dataflow, checklist, memory, or report tools. Optional priors should live as extension skills, prompt packs, corpus material, or package add-ons, not as default strategy in audit mode.
 
 ## Confirmation Boundary
+
+**One finding bar, stated from the first phase.** Every phase that can produce, settle, or re-judge a finding (`FINDING_BAR` in `src/agent/prompts.ts`) uses the same three conditions: the attacker can actually reach every precondition; the proof commits and observes the unauthorized effect itself, not an intermediate value; and severity reflects what remains after existing controls. A mechanism that needs a principal the target trusts, or a configuration other than the current one, is a conditional mechanism and stays `suspected`. Each finding names its attacker and the observed effect, and the independent skeptic can reject a confirmation whose PoC never exhibited the effect — the same downgrade-then-appeal path as an unrealistic PoC. This is an evidence bar, not a search method: it says what a claim must establish, never where to look. Real-target `confirm` applies the same conditions against deployed ground truth; stating them at discovery is what keeps mechanisms that cannot clear them from consuming verify and confirm work.
 
 The hard rule is that the model cannot confirm a bug by assertion. The problem is that the model otherwise controls all three of: the code under test, the test, and the success criterion. Three mechanisms take that control away.
 

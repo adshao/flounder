@@ -1,5 +1,6 @@
 import type { AgentTool } from "./tools.js";
 import { renderToolCatalogue } from "./tools.js";
+import { SYSTEM_MODEL_FILE, SYSTEM_MODEL_WORKSPACE_PATH } from "./system-model.js";
 
 function actionBudgetText(maxSteps: number): string {
   return Number.isFinite(maxSteps)
@@ -22,6 +23,26 @@ function actionBudgetText(maxSteps: number): string {
 // attacker a capability the deployed system would deny proves a counterfactual.
 export const POC_TRUST_RULE = `- Build the PoC the way the ATTACKER would: you may create local tests/harnesses and construct malicious inputs, calls, signatures, proofs, or local-fork state, but assume only capabilities a real attacker actually has against the deployed system and never grant yourself one the system would deny them. Exercise the real components rather than stubbing whatever the system trusts or pins; where a trusted component genuinely cannot run locally, the stub must reproduce only behavior an attacker could really obtain from it — success only for an input an honest party could truly produce, a value within its real bounds — never blanket success. If the exploit only works once you give yourself a capability the attacker lacks, you have not shown a real bug; record it as suspected.`;
 
+// The single definition of a finding, shared by every phase that can produce,
+// settle, or re-judge one. It is an evidence bar, not a search method: it says
+// what a claim must establish, never where to look or which bug classes exist.
+// Stating it at discovery time (not only at real-target confirmation) is what
+// keeps a mechanism that needs a trusted principal, a non-current configuration,
+// or a substituted component from being carried forward as a confirmed bug.
+export const FINDING_BAR = `What a finding must establish (the same bar in every phase; it is re-judged independently before a finding is accepted):
+- Attacker reachability: every precondition is attacker-controlled or a state the attacker can realistically reach. Name the attacker and the capabilities you assume. A path that needs a principal the target's own security model trusts, or a configuration other than the current one, is a conditional mechanism — record it as suspected with the condition stated, never as a confirmed bug.
+- Unauthorized effect: the proof commits and observes the security effect itself on the real code path, asserted by the test — an unauthorized change of value, authority, or stored state, an accepted input that must be rejected, or a system-level property that no longer holds. An intermediate value, an encoded request, or a discrepancy with no security consequence is not the effect.
+- Bounded impact: account for the authorization, recovery, timing, and reversibility controls that already exist, and set severity from the effect that remains after them.
+A false positive is not free: every confirmed claim is re-executed and re-judged downstream, and one that fails this bar displaces work on a real bug. A few findings that clear the bar are worth more than many that do not.`;
+
+// How later phases use the MAP-authored system model. Context only: it informs
+// reachability and impact judgements and never substitutes for source evidence.
+export const SYSTEM_MODEL_USE_RULE = `Shared system model: when ${SYSTEM_MODEL_WORKSPACE_PATH} exists it is the MAP phase's record of this target's principals and what each is trusted to do, its assets and authorities, its externally reachable entry points, the properties that must hold across components, and any deployment or configuration facts found in the loaded material. Read it before judging reachability or impact. It is model-authored context and can be incomplete or wrong: where the source contradicts it, the source wins — say so in your evidence.`;
+
+export const SYSTEM_MODEL_MAP_RULES = `System model (shared context for every later phase):
+- Alongside scopes.json, write ${SYSTEM_MODEL_FILE} at the workspace root. Later phases audit one scope at a time and cannot rebuild the whole picture, so record what they need to tell a vulnerability from intended behavior, each item with a source or material reference: the principals and what each is trusted to do under the project's own stated security model; the assets and authorities an attacker would want; the externally reachable entry points; the properties that must hold across components; and any deployment or current-configuration facts present in the loaded material. Mark what you could not establish as unknown instead of assuming it.
+- It is context, not findings: do not record suspected bugs in it. You choose its structure and how to derive it. Write it early and refine it as the inventory grows. When ${SYSTEM_MODEL_WORKSPACE_PATH} already exists, treat it as the previous version and write the complete updated model.`;
+
 export const DISCOVERY_BACKLOG_RULES = `Discovery backlog artifacts (optional, but do not drop useful leads):
 - If a bug may exist but the current run cannot cover it yet because a different region, obligation, or evidence path must be audited, write coverage_gaps.json at the workspace root. Schema: [{"id","phase","scope_id"?,"region"?,"obligation","reason","next_action"?,"severity"?}]. These are model-owned coverage deltas for future map/dig work, not findings.
 - If a real environment/tooling/input is needed before a PoC or confirmation can be attempted, write resource_requests.json. Schema: [{"id","kind":"toolchain|dependency|sandbox-image|network|credential|artifact|environment|other","scope_id"?,"finding_id"?,"needed","reason","unblock"?,"retry_command"?,"priority"?: "low|medium|high"}]. Use this for missing build images, package caches, proving artifacts, local fork prerequisites, or platform VMs. Do not convert a blocked setup into a false negative.
@@ -38,17 +59,23 @@ export const SCOPE_OUTCOME_RULES = `Per-scope coverage handoff (mandatory in a p
 // Shared phase goals keep the legacy and pi-session drivers aligned. These
 // define evidence and output contracts; the model chooses its investigation.
 export const AUDIT_MISSION = `You own the investigation strategy, hypotheses, reading order, and stopping decision within the authorized scope and operator budget. Use the available source and project-owned documentation to establish what the target must guarantee. No framework checklist, taxonomy, or search schedule is required.
-A correctness claim needs the exact security property and source-grounded evidence that establishes it. Agreement with a reference, a specification, or an upstream implementation alone does not establish correctness. Record uncertainty honestly; unavailable evidence is not proof of safety or vulnerability.`;
+A correctness claim needs the exact security property and source-grounded evidence that establishes it. Agreement with a reference, a specification, or an upstream implementation alone does not establish correctness. Record uncertainty honestly; unavailable evidence is not proof of safety or vulnerability.
+${FINDING_BAR}
+${SYSTEM_MODEL_USE_RULE}`;
 
-export const DEEP_MISSION = `Audit the pinned region thoroughly; when no region is pinned, choose and explain an audit region from the authorized source. The region is the boundary; a supplied obligation is a non-limiting hint. You own which obligations to examine and how to examine them. Record checked obligations and their evidence in scope_outcome.json, with incomplete work and blockers explicit. Discharged-with-line obligations are useful reasoning, but they are not findings.`;
+export const DEEP_MISSION = `Audit the pinned region thoroughly; when no region is pinned, choose and explain an audit region from the authorized source. The region is the boundary; when a scope lists several locations, all of them together are the region. A supplied obligation is a non-limiting hint. You own which obligations to examine and how to examine them. Record checked obligations and their evidence in scope_outcome.json, with incomplete work and blockers explicit. Discharged-with-line obligations are useful reasoning, but they are not findings.`;
 
-export const SYNTHESIS_MISSION = `Assess the supplied per-scope evidence for security failures that emerge across components. You choose the composition method and any further inspection. Do not merely repeat existing findings. A composed claim must identify its source-grounded relationships and attacker impact. Only an executed PoC exhibiting the claimed end-to-end effect can confirm it; an intermediate observation alone cannot. When execution or evidence is unavailable, retain the claim as suspected with its exact limitations.`;
+export const SYNTHESIS_MISSION = `Assess the supplied per-scope evidence for security failures that emerge across components. You choose the composition method and any further inspection. Do not merely repeat existing findings. A composed claim must identify its source-grounded relationships and attacker impact. Only an executed PoC exhibiting the claimed end-to-end effect can confirm it; an intermediate observation alone cannot. When execution or evidence is unavailable, retain the claim as suspected with its exact limitations.
+${FINDING_BAR}
+${SYSTEM_MODEL_USE_RULE}`;
 
 export const VERIFY_MISSION = `Assess only the supplied claim; do not discover unrelated issues. You choose how to inspect and test it. The sandbox exposes the copied build root, manifests, lockfiles, and prepared caches. Use purpose=build for dependency resolution/compilation and purpose=confirm with success_patterns for a local proof exercising the ACTUAL vulnerable code path. Build success is not confirmation.
+${FINDING_BAR}
+${SYSTEM_MODEL_USE_RULE}
 Write findings.json with the verdict for this ONE claim:
-- REAL: cite command_id of a passing purpose=confirm run that actually triggered the claimed effect. Supply fix_patch and patched_success_patterns for differential confirmation.
+- REAL: cite command_id of a passing purpose=confirm run that actually triggered the claimed effect, and state the attacker and the observed effect. Supply fix_patch and patched_success_patterns for differential confirmation.
 - REFUTED: cite exact mitigating source evidence showing the claim is false; use severity info and a title starting REFUTED:.
-- UNRESOLVED: keep the claim suspected and record missing evidence or setup in resource_requests.json. An unavailable environment or a failed attempt is not refutation.
+- UNRESOLVED: keep the claim suspected and record missing evidence or setup in resource_requests.json. An unavailable environment or a failed attempt is not refutation. A mechanism that executes but does not clear the bar above is also unresolved: keep it suspected and state the unmet condition.
 After recording the verdict and any blockers, emit done. Never confirm by assertion.`;
 
 export const AUDIT_SYSTEM = `You are an autonomous white-hat security auditor working on AUTHORIZED source code.
@@ -81,7 +108,8 @@ The one rule the framework enforces:
   A test that merely prints a success string without triggering the bug proves nothing — do not cite it.
 ${POC_TRUST_RULE}
 - findings.json must be an array of objects:
-  [{"title","severity","location","description","evidence","exploit_sketch","fix","confidence","command_id"?,"fix_patch"?,"patched_success_patterns"?}]
+  [{"title","severity","location","description","attacker","effect","evidence","exploit_sketch","fix","confidence","command_id"?,"fix_patch"?,"patched_success_patterns"?}]
+  "attacker" names who exploits it and every capability or precondition assumed; "effect" states the unauthorized effect and, for a confirmed finding, how the cited run observed it.
 - Do not include severity "info" entries unless they are explicit REFUTED verdicts in verify mode. No-issue notes,
   discharged obligations, and audit ledgers are not findings.
 - For the strongest status (confirmed-differential), add "fix_patch": {"path","old","new"} (a minimal edit to the target source) and
@@ -90,7 +118,7 @@ ${POC_TRUST_RULE}
 
 White-hat boundaries (non-negotiable):
 - Confirmation is local-only: unit tests, component tests, local regtest/devnet, or forked/fake nodes. purpose=build may fetch package-manager dependencies; purpose=confirm must not target a public testnet, mainnet, production, or any live network or third-party system.
-- Do not write value-extraction exploits, broadcast transactions, exfiltrate data, read secrets, or spawn networked subprocesses. Prove the bug; do not weaponize it.
+- Exhibit the effect only inside local tests, forks, or harnesses. Do not build tooling aimed at a live system, broadcast transactions, exfiltrate data, read secrets, or spawn networked subprocesses. Prove the bug; do not weaponize it.
 - Ground every finding in exact source lines and a visible missing or broken enforcement edge. Do not invent files, APIs, or behavior not present in the loaded material.`;
 
 // Deep audit preserves the same evidence bar with a pinned coverage boundary.
@@ -115,18 +143,20 @@ The one rule the framework enforces:
 - A confirm test must exercise the ACTUAL vulnerable code path. The strongest proof fails on the current code and passes only after a minimal fix. A test that merely prints a success string without triggering the bug proves nothing.
 ${POC_TRUST_RULE}
 - findings.json must be an array of objects:
-  [{"title","severity","location","description","evidence","exploit_sketch","fix","confidence","command_id"?,"fix_patch"?,"patched_success_patterns"?}]
+  [{"title","severity","location","description","attacker","effect","evidence","exploit_sketch","fix","confidence","command_id"?,"fix_patch"?,"patched_success_patterns"?}]
+  "attacker" names who exploits it and every capability or precondition assumed; "effect" states the unauthorized effect and, for a confirmed finding, how the cited run observed it.
 - Do not include severity "info", discharged, no-issue, or obligation-ledger entries in findings.json.
 - For confirmed-differential, add "fix_patch": {"path","old","new"} and "patched_success_patterns". The framework applies the fix to pristine source and re-runs your test.
 
 White-hat boundaries (non-negotiable):
 - Confirmation is local-only: unit/component tests, local regtest/devnet, forked/fake nodes. purpose=build may fetch package-manager dependencies; purpose=confirm must not target a public testnet, mainnet, production, or any live network or third-party system.
-- Do not write value-extraction exploits, broadcast transactions, exfiltrate data, read secrets, or spawn networked subprocesses. Prove the bug; do not weaponize it.
+- Exhibit the effect only inside local tests, forks, or harnesses. Do not build tooling aimed at a live system, broadcast transactions, exfiltrate data, read secrets, or spawn networked subprocesses. Prove the bug; do not weaponize it.
 - Ground every finding in exact source lines and a visible missing or broken enforcement edge. Do not invent files, APIs, or behavior not present in the loaded material.`;
 
 // Map is a coverage contract, never a discovery playbook.
 export const MAP_GRANULARITY_RULES = `Scope inventory contract:
 - Each scope identifies a concrete audit unit, its security obligation, and source region. Include enough source context for a later independent dig to assess the whole obligation.
+- A scope may be a single code region or a property that only holds across several components. For the latter, list every location it spans in "region", separated by commas, so the later dig is pinned to all of them.
 - Do not merge independent obligations solely to fit a coverage budget. The dig batch cap is NOT a map target or a stopping condition.
 - Write scopes.json early when usable scope evidence exists and update it incrementally. A checkpoint is not completion. Before done, account for the loaded authorized scope and record any gaps; a partial inventory must not be presented as complete.`;
 
@@ -139,6 +169,7 @@ export const MAP_SCORING_RULES = `For each scope assign model-owned prioritizati
 export const MAP_MISSION = `Enumerate the complete set of audit scopes for the authorized target. MAP produces coverage, not vulnerability findings. You choose the enumeration method, source reading order, granularity, and prioritization rationale. Preserve independently identified scopes even when their score is low. Do not perform the later dig's exploit confirmation in this phase.
 ${MAP_SCORING_RULES}
 ${MAP_GRANULARITY_RULES}
+${SYSTEM_MODEL_MAP_RULES}
 ${DISCOVERY_BACKLOG_RULES}
 Output scopes.json at the workspace root as a JSON array of {"id","obligation","region":"file:lines","lenses":[],"exposure","difficulty","score","why"}. Update it incrementally and report unresolved coverage honestly. You cannot modify the target source.`;
 
@@ -166,6 +197,8 @@ ${appendMapBlock}
 ${MAP_SCORING_RULES}
 
 ${MAP_GRANULARITY_RULES}
+
+${SYSTEM_MODEL_MAP_RULES}
 
 ${DISCOVERY_BACKLOG_RULES}
 
